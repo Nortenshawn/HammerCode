@@ -44,10 +44,13 @@ export interface ApprovalRequest {
   description: string;
   details: string;
   risk: "write" | "delete" | "command";
+  turnId?: string;
+  operation?: "agent_tool" | "undo";
   createdAt: string;
 }
 
 export interface ToolTrace {
+  turnId: string;
   call: ToolCall;
   status: ToolTraceStatus;
   summary: string;
@@ -57,10 +60,12 @@ export interface ToolTrace {
   startedAt?: string;
   finishedAt?: string;
   durationMs?: number;
+  fileChangeId?: string;
 }
 
 export interface UserMessage {
   id: string;
+  turnId: string;
   role: "user";
   content: string;
   createdAt: string;
@@ -68,6 +73,7 @@ export interface UserMessage {
 
 export interface AssistantMessage {
   id: string;
+  turnId: string;
   role: "assistant";
   content: string;
   reasoningContent?: string;
@@ -77,6 +83,7 @@ export interface AssistantMessage {
 
 export interface ToolMessage {
   id: string;
+  turnId: string;
   role: "tool";
   toolCallId: string;
   toolName: string;
@@ -97,10 +104,49 @@ export type TerminationReason =
   | "interrupted";
 
 export interface StateTransition {
+  turnId: string;
   from: SessionStatus;
   to: SessionStatus;
   reason: string;
   at: string;
+}
+
+export interface AgentTurn {
+  id: string;
+  userMessageId: string;
+  status: SessionStatus;
+  terminationReason?: TerminationReason;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+}
+
+export type FileChangeKind = "create" | "modify" | "delete";
+export type FileChangeStatus = "applied" | "reverted";
+
+export interface FileChange {
+  id: string;
+  turnId: string;
+  toolCallId: string;
+  path: string;
+  kind: FileChangeKind;
+  beforeContent: string | null;
+  afterContent: string | null;
+  beforeHash: string | null;
+  afterHash: string | null;
+  patch: string;
+  status: FileChangeStatus;
+  appliedAt: string;
+  revertedAt?: string;
+}
+
+export interface PendingUndo {
+  id: string;
+  changeId: string;
+  approvalId: string;
+  status: "awaiting_approval" | "executing";
+  createdAt: string;
 }
 
 export interface AgentSession {
@@ -108,12 +154,16 @@ export interface AgentSession {
   workspaceRoot: string;
   status: SessionStatus;
   task: string;
+  turns: AgentTurn[];
+  activeTurnId: string;
   messages: ConversationMessage[];
   toolTraces: ToolTrace[];
+  fileChanges: FileChange[];
   transitions: StateTransition[];
   streamingText: string;
   streamingReasoning: string;
   pendingApproval?: ApprovalRequest;
+  pendingUndo?: PendingUndo;
   terminationReason?: TerminationReason;
   error?: string;
   createdAt: string;
@@ -125,6 +175,8 @@ export interface SessionSummary {
   workspaceRoot: string;
   title: string;
   status: SessionStatus;
+  turnCount: number;
+  changedFileCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -159,6 +211,7 @@ export interface HammerCodeApi {
   newChat(): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   startTask(task: string): Promise<{ sessionId: string }>;
+  requestUndo(changeId: string): Promise<void>;
   cancelTask(): Promise<void>;
   resolveApproval(approvalId: string, approved: boolean): Promise<void>;
   clearSession(): Promise<void>;

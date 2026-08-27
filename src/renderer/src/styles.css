@@ -145,6 +145,7 @@ button { color: inherit; }
 .topbar-title strong { max-width: min(54vw, 680px); overflow: hidden; font-size: 14px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .topbar-title > span { padding-left: 10px; border-left: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .top-actions { -webkit-app-region: no-drag; }
+.undo-running { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-dark); font-size: 11px; }
 .stop-button {
   display: inline-flex;
   align-items: center;
@@ -169,6 +170,9 @@ button { color: inherit; }
 .config-warning { margin-top: 20px; padding: 9px 12px; border: 1px solid #e5d7b7; border-radius: 8px; color: #7d6740; background: #fffaf0; font-size: 11px; }
 
 .message-stack { display: flex; flex-direction: column; max-width: 820px; margin: 0 auto; }
+.turn-block { display: contents; }
+.turn-divider { display: flex; align-items: center; gap: 10px; margin: 22px 0 30px; color: var(--quiet); font-size: 9px; }
+.turn-divider::before, .turn-divider::after { content: ""; height: 1px; flex: 1; background: var(--line); }
 .user-message { align-self: flex-end; max-width: min(84%, 680px); margin: 0 0 34px 10%; }
 .user-message > div { padding: 12px 16px; border-radius: 18px 18px 5px 18px; color: #2f312e; background: #f0f0ed; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .user-message time { display: block; margin: 6px 4px 0; color: var(--quiet); font-size: 9px; text-align: right; }
@@ -255,6 +259,31 @@ button { color: inherit; }
 .error-panel strong { font-size: 12px; }
 .error-panel p { margin: 6px 0; font-size: 11px; line-height: 1.55; }
 .error-panel small { color: #a77575; font-size: 9px; }
+
+.change-review { margin: 18px 0 28px; border: 1px solid var(--line); border-radius: 13px; background: #fcfcfa; overflow: hidden; }
+.change-review-heading { padding: 13px 14px; border-bottom: 1px solid var(--line); background: #fafaf7; }
+.change-review-heading > div { display: flex; align-items: center; gap: 9px; }
+.review-icon { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid #d5dfca; border-radius: 7px; color: var(--accent-dark); background: var(--accent-soft); }
+.change-review-heading strong, .change-review-heading small { display: block; }
+.change-review-heading strong { color: #41433e; font-size: 12px; font-weight: 630; }
+.change-review-heading small { margin-top: 2px; color: var(--quiet); font-size: 9px; }
+.review-files { padding: 0 13px; }
+.review-file { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.review-file:last-child { border-bottom: 0; }
+.review-file > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.review-file > header > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.review-file > header code { overflow: hidden; color: #4b4e47; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.change-kind { padding: 2px 5px; border-radius: 4px; font-size: 8px; white-space: nowrap; }
+.kind-create { color: #4d762c; background: #eaf4df; }
+.kind-modify { color: #746229; background: #f7f0d9; }
+.kind-delete { color: #9b4d4d; background: #f8e8e8; }
+.review-file > header button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 7px; color: #696c64; background: var(--surface); font-size: 9px; cursor: pointer; white-space: nowrap; }
+.review-file > header button:hover:not(:disabled) { color: var(--accent-dark); border-color: #c8d9b6; background: var(--accent-soft); }
+.review-file > header button:disabled { opacity: .5; cursor: default; }
+.review-file > details { margin-top: 8px; }
+.review-file > details > summary { color: var(--muted); font-size: 9px; cursor: pointer; }
+.review-file > details > summary span { margin-left: 6px; color: var(--quiet); }
+.diff-view { max-height: 420px; margin: 9px 0 0; padding: 12px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; color: #4b4e47; background: #f3f4f0; font: 9px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
 
 .composer-wrap { position: relative; z-index: 2; width: 100%; padding: 12px max(36px, calc((100% - 820px) / 2)) 20px; background: linear-gradient(to bottom, rgba(255,255,255,0), #fff 20px); }
 .composer { max-width: 820px; margin: 0 auto; border: 1px solid var(--line-strong); border-radius: 17px; background: rgba(255, 255, 255, .98); box-shadow: 0 8px 30px rgba(28, 31, 25, .09), 0 1px 2px rgba(28, 31, 25, .04); transition: border-color .16s, box-shadow .16s; }

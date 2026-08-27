@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -15,13 +14,14 @@ import { z } from "zod";
 import type { ApprovalRequest, ToolCall, ToolResult } from "../../shared/contracts";
 import type { IdGenerator, PreparedToolCall, ToolExecutorPort } from "../types";
 import { HammerCodeError } from "../types";
+import { hashText, MAX_REVERSIBLE_FILE_BYTES, readWorkspaceTextState } from "../file-state";
 import { WorkspaceBoundary } from "../security/path-boundary";
 import { assertCommandAllowed } from "../security/command-policy";
 import { runCommand } from "./command-runner";
 import { TOOL_DEFINITIONS } from "./tool-definitions";
 
 const MAX_ARGUMENT_BYTES = 2_000_000;
-const MAX_WRITE_BYTES = 1_000_000;
+const MAX_WRITE_BYTES = MAX_REVERSIBLE_FILE_BYTES;
 const MAX_READ_BYTES = 200_000;
 const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "release", "coverage"]);
 
@@ -48,7 +48,17 @@ const schemas = {
     })
     .strict(),
   write_file: z
-    .object({ path: z.string(), content: z.string().max(MAX_WRITE_BYTES) })
+    .object({
+      path: z.string(),
+      content: z
+        .string()
+        .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_WRITE_BYTES, {
+          message: "写入内容超过大小限制",
+        })
+        .refine((value) => !value.includes("\0"), {
+          message: "二进制内容不支持安全写入与撤销",
+        }),
+    })
     .strict(),
   delete_file: z.object({ path: z.string() }).strict(),
   run_command: z
@@ -61,10 +71,6 @@ const schemas = {
 };
 
 type ToolName = keyof typeof schemas;
-
-function hash(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
-}
 
 function parseArguments<T extends ToolName>(name: T, input: string): z.output<(typeof schemas)[T]> {
   if (Buffer.byteLength(input) > MAX_ARGUMENT_BYTES) {
@@ -85,20 +91,6 @@ function parseArguments<T extends ToolName>(name: T, input: string): z.output<(t
     );
   }
   return parsed.data as z.output<(typeof schemas)[T]>;
-}
-
-async function readOptionalText(filePath: string): Promise<string | null> {
-  try {
-    const info = await stat(filePath);
-    if (!info.isFile()) throw new HammerCodeError("目标不是普通文件", "NOT_A_FILE", true);
-    if (info.size > MAX_WRITE_BYTES) {
-      throw new HammerCodeError("现有文件过大，拒绝完整替换", "FILE_TOO_LARGE", true);
-    }
-    return await readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
 }
 
 function approval(
@@ -269,9 +261,10 @@ export class LocalToolExecutor implements ToolExecutorPort {
 
   private async prepareWrite(call: ToolCall, now: Date): Promise<PreparedToolCall> {
     const args = parseArguments("write_file", call.arguments);
-    const target = await this.boundary.resolveForWrite(args.path);
-    const previous = await readOptionalText(target);
-    const previousHash = previous === null ? null : hash(previous);
+    await this.boundary.resolveForWrite(args.path);
+    const previousState = await readWorkspaceTextState(this.boundary, args.path);
+    const previous = previousState.content;
+    const previousHash = previousState.hash;
     const patch = createTwoFilesPatch(
       previous === null ? "/dev/null" : `a/${args.path}`,
       `b/${args.path}`,
@@ -296,11 +289,19 @@ export class LocalToolExecutor implements ToolExecutorPort {
       target: args.path,
       requiresApproval: true,
       approvalRequest: request,
+      fileMutation: {
+        path: args.path,
+        kind: previous === null ? "create" : "modify",
+        beforeContent: previous,
+        afterContent: args.content,
+        beforeHash: previousHash,
+        afterHash: hashText(args.content),
+        patch,
+      },
       execute: async () => {
         const checkedTarget = await this.boundary.resolveForWrite(args.path);
-        const current = await readOptionalText(checkedTarget);
-        const currentHash = current === null ? null : hash(current);
-        if (currentHash !== previousHash) {
+        const current = await readWorkspaceTextState(this.boundary, args.path);
+        if (current.hash !== previousHash) {
           return {
             ok: false,
             summary: "文件在审批期间发生变化，未写入",
@@ -345,13 +346,26 @@ export class LocalToolExecutor implements ToolExecutorPort {
     if (!info.isFile()) {
       throw new HammerCodeError("只允许删除单个普通文件", "DELETE_NON_FILE_BLOCKED");
     }
+    const previous = await readWorkspaceTextState(this.boundary, args.path);
+    if (previous.content === null || previous.hash === null) {
+      throw new HammerCodeError("删除目标不存在", "PATH_NOT_FOUND", true);
+    }
     const fingerprint = `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`;
+    const patch = createTwoFilesPatch(
+      `a/${args.path}`,
+      "/dev/null",
+      previous.content,
+      "",
+      "删除前",
+      "删除后",
+      { context: 4 },
+    );
     const request = approval(
       this.ids,
       call,
       "删除文件",
       `永久删除工作区文件 ${args.path}`,
-      `目标：${args.path}\n大小：${info.size} 字节\n此操作不可由 HammerCode 自动恢复。`,
+      patch,
       "delete",
       now,
     );
@@ -361,6 +375,15 @@ export class LocalToolExecutor implements ToolExecutorPort {
       target: args.path,
       requiresApproval: true,
       approvalRequest: request,
+      fileMutation: {
+        path: args.path,
+        kind: "delete",
+        beforeContent: previous.content,
+        afterContent: null,
+        beforeHash: previous.hash,
+        afterHash: null,
+        patch,
+      },
       execute: async () => {
         const checked = await this.boundary.resolveExisting(args.path);
         const current = await lstat(checked);

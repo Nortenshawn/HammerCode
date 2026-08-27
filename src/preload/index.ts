@@ -7,6 +7,7 @@ const api: HammerCodeApi = {
   newChat: () => ipcRenderer.invoke("hammercode:new-chat"),
   selectSession: (sessionId) => ipcRenderer.invoke("hammercode:select-session", sessionId),
   startTask: (task) => ipcRenderer.invoke("hammercode:start-task", task),
+  requestUndo: (changeId) => ipcRenderer.invoke("hammercode:request-undo", changeId),
   cancelTask: () => ipcRenderer.invoke("hammercode:cancel-task"),
   resolveApproval: (approvalId, approved) =>
     ipcRenderer.invoke("hammercode:resolve-approval", approvalId, approved),

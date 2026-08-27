@@ -127,15 +127,15 @@ describe("agent runner", () => {
         throw new Error("unknown");
       },
     };
-    const toolRound: ModelStreamChunk[] = [
+    const toolRound = (id: string): ModelStreamChunk[] => [
       {
-        toolCallDeltas: [{ index: 0, id: "call", name: "unknown", arguments: "{}" }],
+        toolCallDeltas: [{ index: 0, id, name: "unknown", arguments: "{}" }],
         finishReason: "tool_calls",
       },
     ];
     const runner = new AgentRunner(
       {
-        model: new ScriptedModel([toolRound, toolRound]),
+        model: new ScriptedModel([toolRound("call_1"), toolRound("call_2")]),
         tools: unknownTools,
         approvals: approve,
         ids,
@@ -178,5 +178,146 @@ describe("agent runner", () => {
     const result = await run;
     expect(result.status).toBe("cancelled");
     expect(result.terminationReason).toBe("cancelled");
+  });
+
+  it("continues the same chat after completion without replaying historical work", async () => {
+    const { ids, clock } = fixtures();
+    const model = new ScriptedModel([
+      [{ content: "第一轮完成。", finishReason: "stop" }],
+      [{ content: "已根据补充要求继续。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: { definitions: [], prepare: async () => { throw new Error("unused"); } },
+        approvals: approve,
+        ids,
+        clock,
+      },
+      { maxRounds: 2, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+
+    const first = await runner.start("先分析问题", "/tmp");
+    const second = await runner.resume(first, "补充：保持接口不变");
+    expect(second.id).toBe(first.id);
+    expect(second.turns).toHaveLength(2);
+    expect(second.messages.filter((message) => message.role === "user")).toHaveLength(2);
+    expect(model.requests).toHaveLength(2);
+    expect(model.requests[1].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "assistant", content: "第一轮完成。" }),
+        expect.objectContaining({ role: "user", content: "补充：保持接口不变" }),
+      ]),
+    );
+  });
+
+  it("can recover from a failed turn by starting a fresh turn in the same chat", async () => {
+    const { ids, clock } = fixtures();
+    let requestCount = 0;
+    const model: ModelClient = {
+      async *stream(): AsyncIterable<ModelStreamChunk> {
+        requestCount += 1;
+        if (requestCount === 1) throw new Error("temporary model failure");
+        yield { content: "重试后已完成。", finishReason: "stop" };
+      },
+    };
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: { definitions: [], prepare: async () => { throw new Error("unused"); } },
+        approvals: approve,
+        ids,
+        clock,
+      },
+      { maxRounds: 2, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+
+    const failed = await runner.start("执行任务", "/tmp");
+    expect(failed).toMatchObject({ status: "failed", terminationReason: "model_error" });
+    const recovered = await runner.resume(failed, "刚才失败了，请重试");
+    expect(recovered).toMatchObject({ id: failed.id, status: "completed" });
+    expect(recovered.turns).toHaveLength(2);
+    expect(recovered.turns[0]).toMatchObject({ status: "failed", terminationReason: "model_error" });
+    expect(recovered.turns[1]).toMatchObject({ status: "completed", terminationReason: "completed" });
+  });
+
+  it("closes an interrupted tool call before continuing and never executes it again", async () => {
+    const { ids, clock } = fixtures();
+    let executions = 0;
+    const tools: ToolExecutorPort = {
+      definitions: [],
+      prepare: async (call, now) => ({
+        call,
+        summary: "等待写入审批",
+        requiresApproval: true,
+        approvalRequest: {
+          id: "approval_wait",
+          toolCallId: call.id,
+          toolName: call.name,
+          title: "写入",
+          description: "写入文件",
+          details: "diff",
+          risk: "write",
+          createdAt: now.toISOString(),
+        },
+        execute: async () => {
+          executions += 1;
+          return { ok: true, summary: "done", output: "done" };
+        },
+      }),
+    };
+    const approvals: ApprovalGateway = {
+      request: (_request, signal) => new Promise<boolean>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("cancel", "AbortError")), { once: true });
+      }),
+    };
+    const model = new ScriptedModel([
+      [{ toolCallDeltas: [{ index: 0, id: "call_wait", name: "write_file", arguments: "{}" }], finishReason: "tool_calls" }],
+      [{ content: "已按新要求继续，未重放写入。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      { model, tools, approvals, ids, clock },
+      { maxRounds: 2, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+
+    const running = runner.start("准备写入", "/tmp");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    runner.cancel();
+    const cancelled = await running;
+    expect(cancelled.status).toBe("cancelled");
+    expect(executions).toBe(0);
+    expect(cancelled.messages.filter((message) => message.role === "tool" && message.toolCallId === "call_wait")).toHaveLength(1);
+
+    const continued = await runner.resume(cancelled, "不要写了，只总结");
+    expect(continued.status).toBe("completed");
+    expect(executions).toBe(0);
+    expect(continued.messages.filter((message) => message.role === "tool" && message.toolCallId === "call_wait")).toHaveLength(1);
+    expect(JSON.stringify(model.requests[1].messages)).toContain("TOOL_CALL_INTERRUPTED");
+  });
+
+  it("records an approved file mutation for review", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "hammercode-change-"));
+    workspaces.push(workspace);
+    await writeFile(path.join(workspace, "a.txt"), "before\n");
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const { ids, clock } = fixtures();
+    const model = new ScriptedModel([
+      [{ toolCallDeltas: [{ index: 0, id: "call_change", name: "write_file", arguments: '{"path":"a.txt","content":"after\\n"}' }], finishReason: "tool_calls" }],
+      [{ content: "修改完成。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      { model, tools: new LocalToolExecutor(boundary, ids), approvals: approve, ids, clock },
+      { maxRounds: 3, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+    const result = await runner.start("修改 a.txt", workspace);
+    expect(result.fileChanges).toHaveLength(1);
+    expect(result.fileChanges[0]).toMatchObject({
+      path: "a.txt",
+      kind: "modify",
+      beforeContent: "before\n",
+      afterContent: "after\n",
+      status: "applied",
+    });
+    expect(result.toolTraces[0].fileChangeId).toBe(result.fileChanges[0].id);
   });
 });

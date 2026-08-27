@@ -11,17 +11,22 @@ afterEach(async () => {
 });
 
 function createSession(id: string, task: string, updatedAt: string): AgentSession {
+  const turnId = `${id}_turn`;
+  const userMessageId = `${id}_user`;
   return {
     id,
     workspaceRoot: "/tmp/workspace",
     status: "completed",
     task,
+    turns: [{ id: turnId, userMessageId, status: "completed", terminationReason: "completed", createdAt: updatedAt, updatedAt, finishedAt: updatedAt }],
+    activeTurnId: turnId,
     messages: [
-      { id: `${id}_user`, role: "user", content: task, createdAt: updatedAt },
-      { id: `${id}_assistant`, role: "assistant", content: "done", createdAt: updatedAt },
+      { id: userMessageId, turnId, role: "user", content: task, createdAt: updatedAt },
+      { id: `${id}_assistant`, turnId, role: "assistant", content: "done", createdAt: updatedAt },
     ],
     toolTraces: [],
-    transitions: [{ from: "requesting", to: "completed", reason: "done", at: updatedAt }],
+    fileChanges: [],
+    transitions: [{ turnId, from: "requesting", to: "completed", reason: "done", at: updatedAt }],
     streamingText: "",
     streamingReasoning: "",
     terminationReason: "completed",
@@ -60,9 +65,15 @@ describe("session persistence", () => {
       workspaceRoot: "/tmp/workspace",
       status: "awaiting_approval",
       task: "edit",
-      messages: [{ id: "m1", role: "user", content: "edit", createdAt: at }],
-      toolTraces: [],
-      transitions: [{ from: "idle", to: "requesting", reason: "start", at }],
+      turns: [{ id: "turn_1", userMessageId: "m1", status: "awaiting_approval", createdAt: at, updatedAt: at }],
+      activeTurnId: "turn_1",
+      messages: [
+        { id: "m1", turnId: "turn_1", role: "user", content: "edit", createdAt: at },
+        { id: "m2", turnId: "turn_1", role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "write_file", arguments: '{"path":"a.txt","content":"x"}' }], createdAt: at },
+      ],
+      toolTraces: [{ turnId: "turn_1", call: { id: "call_1", name: "write_file", arguments: '{"path":"a.txt","content":"x"}' }, status: "awaiting_approval", summary: "修改 a.txt", approval }],
+      fileChanges: [],
+      transitions: [{ turnId: "turn_1", from: "idle", to: "requesting", reason: "start", at }],
       streamingText: "partial",
       streamingReasoning: "thinking",
       pendingApproval: approval,
@@ -82,6 +93,11 @@ describe("session persistence", () => {
       from: "awaiting_approval",
       to: "failed",
     });
+    expect(restored?.messages.filter((message) => message.role === "tool" && message.toolCallId === "call_1")).toHaveLength(1);
+    expect(restored?.toolTraces[0]).toMatchObject({ status: "cancelled", result: { errorCode: "TOOL_CALL_INTERRUPTED" } });
+
+    const restoredAgain = await store.load();
+    expect(restoredAgain?.messages.filter((message) => message.role === "tool" && message.toolCallId === "call_1")).toHaveLength(1);
   });
 
   it("keeps independent chats and restores the selected chat", async () => {
@@ -108,10 +124,26 @@ describe("session persistence", () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
     directories.push(directory);
     const legacy = createSession("session_legacy", "保留旧聊天", "2026-08-27T03:00:00.000Z");
-    await writeFile(path.join(directory, "active-session.json"), JSON.stringify(legacy), "utf8");
+    const raw = JSON.parse(JSON.stringify(legacy)) as {
+      turns?: unknown;
+      activeTurnId?: unknown;
+      fileChanges?: unknown;
+      messages: Array<{ turnId?: string }>;
+      toolTraces: Array<{ turnId?: string }>;
+      transitions: Array<{ turnId?: string }>;
+    };
+    delete raw.turns;
+    delete raw.activeTurnId;
+    delete raw.fileChanges;
+    raw.messages.forEach((message) => delete message.turnId);
+    raw.toolTraces.forEach((trace) => delete trace.turnId);
+    raw.transitions.forEach((transition) => delete transition.turnId);
+    await writeFile(path.join(directory, "active-session.json"), JSON.stringify(raw), "utf8");
 
     const state = await new SessionStore(directory).loadState();
     expect(state.activeSession).toMatchObject({ id: "session_legacy", task: "保留旧聊天" });
+    expect(state.activeSession?.turns).toHaveLength(1);
+    expect(state.activeSession?.messages.every((message) => Boolean(message.turnId))).toBe(true);
     expect(state.sessions).toEqual([
       expect.objectContaining({ id: "session_legacy", title: "保留旧聊天" }),
     ]);

@@ -63,6 +63,7 @@ function registerIpc(appController: AppController): void {
     appController.selectSession(sessionId),
   );
   handle("hammercode:start-task", (task: unknown) => appController.startTask(task));
+  handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));
   handle("hammercode:cancel-task", () => appController.cancelTask());
   handle("hammercode:resolve-approval", (id: unknown, approved: unknown) =>
     appController.resolveApproval(id, approved),

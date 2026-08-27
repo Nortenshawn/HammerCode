@@ -1,6 +1,7 @@
 import type {
   AgentSession,
   ApprovalRequest,
+  FileChangeKind,
   ToolCall,
   ToolResult,
 } from "../shared/contracts";
@@ -95,6 +96,15 @@ export interface PreparedToolCall {
   target?: string;
   requiresApproval: boolean;
   approvalRequest?: ApprovalRequest;
+  fileMutation?: {
+    path: string;
+    kind: FileChangeKind;
+    beforeContent: string | null;
+    afterContent: string | null;
+    beforeHash: string | null;
+    afterHash: string | null;
+    patch: string;
+  };
   execute(context: ToolExecutionContext): Promise<ToolResult>;
 }
 

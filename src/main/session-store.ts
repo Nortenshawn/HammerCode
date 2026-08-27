@@ -1,9 +1,12 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { closeUnresolvedToolCalls } from "../core/session-recovery";
 import {
   SESSION_STATUSES,
   type AgentSession,
+  type AgentTurn,
+  type ConversationMessage,
   type SessionSummary,
 } from "../shared/contracts";
 
@@ -24,12 +27,15 @@ const approvalSchema = z.object({
   description: z.string(),
   details: z.string(),
   risk: z.enum(["write", "delete", "command"]),
+  turnId: z.string().optional(),
+  operation: z.enum(["agent_tool", "undo"]).optional(),
   createdAt: z.string(),
 });
 const messageSchema = z.discriminatedUnion("role", [
-  z.object({ id: z.string(), role: z.literal("user"), content: z.string(), createdAt: z.string() }),
+  z.object({ id: z.string(), turnId: z.string().optional(), role: z.literal("user"), content: z.string(), createdAt: z.string() }),
   z.object({
     id: z.string(),
+    turnId: z.string().optional(),
     role: z.literal("assistant"),
     content: z.string(),
     reasoningContent: z.string().optional(),
@@ -38,6 +44,7 @@ const messageSchema = z.discriminatedUnion("role", [
   }),
   z.object({
     id: z.string(),
+    turnId: z.string().optional(),
     role: z.literal("tool"),
     toolCallId: z.string(),
     toolName: z.string(),
@@ -45,26 +52,51 @@ const messageSchema = z.discriminatedUnion("role", [
     createdAt: z.string(),
   }),
 ]);
+const turnSchema = z.object({
+  id: z.string(),
+  userMessageId: z.string(),
+  status: z.enum(SESSION_STATUSES),
+  terminationReason: z.enum(["completed", "round_limit", "cancelled", "model_error", "tool_error", "invalid_model_output", "context_overflow", "interrupted"]).optional(),
+  error: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  finishedAt: z.string().optional(),
+});
+const fileChangeSchema = z.object({
+  id: z.string(),
+  turnId: z.string(),
+  toolCallId: z.string(),
+  path: z.string(),
+  kind: z.enum(["create", "modify", "delete"]),
+  beforeContent: z.string().nullable(),
+  afterContent: z.string().nullable(),
+  beforeHash: z.string().nullable(),
+  afterHash: z.string().nullable(),
+  patch: z.string(),
+  status: z.enum(["applied", "reverted"]),
+  appliedAt: z.string(),
+  revertedAt: z.string().optional(),
+});
+const pendingUndoSchema = z.object({
+  id: z.string(),
+  changeId: z.string(),
+  approvalId: z.string(),
+  status: z.enum(["awaiting_approval", "executing"]),
+  createdAt: z.string(),
+});
 const sessionSchema = z.object({
   id: z.string(),
   workspaceRoot: z.string(),
   status: z.enum(SESSION_STATUSES),
   task: z.string(),
+  turns: z.array(turnSchema).optional(),
+  activeTurnId: z.string().optional(),
   messages: z.array(messageSchema),
   toolTraces: z.array(
     z.object({
+      turnId: z.string().optional(),
       call: toolCallSchema,
-      status: z.enum([
-        "proposed",
-        "awaiting_approval",
-        "approved",
-        "rejected",
-        "running",
-        "succeeded",
-        "failed",
-        "blocked",
-        "cancelled",
-      ]),
+      status: z.enum(["proposed", "awaiting_approval", "approved", "rejected", "running", "succeeded", "failed", "blocked", "cancelled"]),
       summary: z.string(),
       target: z.string().optional(),
       approval: approvalSchema.optional(),
@@ -72,10 +104,13 @@ const sessionSchema = z.object({
       startedAt: z.string().optional(),
       finishedAt: z.string().optional(),
       durationMs: z.number().optional(),
+      fileChangeId: z.string().optional(),
     }),
   ),
+  fileChanges: z.array(fileChangeSchema).optional(),
   transitions: z.array(
     z.object({
+      turnId: z.string().optional(),
       from: z.enum(SESSION_STATUSES),
       to: z.enum(SESSION_STATUSES),
       reason: z.string(),
@@ -85,18 +120,8 @@ const sessionSchema = z.object({
   streamingText: z.string(),
   streamingReasoning: z.string(),
   pendingApproval: approvalSchema.optional(),
-  terminationReason: z
-    .enum([
-      "completed",
-      "round_limit",
-      "cancelled",
-      "model_error",
-      "tool_error",
-      "invalid_model_output",
-      "context_overflow",
-      "interrupted",
-    ])
-    .optional(),
+  pendingUndo: pendingUndoSchema.optional(),
+  terminationReason: z.enum(["completed", "round_limit", "cancelled", "model_error", "tool_error", "invalid_model_output", "context_overflow", "interrupted"]).optional(),
   error: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -109,6 +134,7 @@ const indexSchema = z.object({
   sessionIds: z.array(z.string()),
 });
 
+type ParsedSession = z.infer<typeof sessionSchema>;
 type SessionIndex = z.infer<typeof indexSchema>;
 
 export interface SessionStoreState {
@@ -120,12 +146,84 @@ export interface SessionStoreState {
 const ACTIVE_STATUSES = new Set(["requesting", "awaiting_approval", "executing_tool"]);
 const SAFE_SESSION_ID = /^[a-zA-Z0-9_-]{1,200}$/;
 
+function legacyTurnId(sessionId: string, index: number): string {
+  return `turn_legacy_${sessionId}_${index}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 200);
+}
+
+function normalizeSessionShape(parsed: ParsedSession): AgentSession {
+  const rawMessages = parsed.messages.map((message) => ({ ...message }));
+  let turns: AgentTurn[] = parsed.turns?.map((turn) => ({ ...turn })) ?? [];
+
+  if (turns.length === 0) {
+    const users = rawMessages.filter((message) => message.role === "user");
+    if (users.length === 0) throw new Error("会话缺少用户消息");
+    turns = users.map((message, index) => {
+      const isLast = index === users.length - 1;
+      return {
+        id: message.turnId ?? legacyTurnId(parsed.id, index),
+        userMessageId: message.id,
+        status: isLast ? parsed.status : "completed",
+        terminationReason: isLast ? parsed.terminationReason : "completed",
+        error: isLast ? parsed.error : undefined,
+        createdAt: message.createdAt,
+        updatedAt: isLast ? parsed.updatedAt : users[index + 1]?.createdAt ?? parsed.updatedAt,
+        finishedAt: isLast && ACTIVE_STATUSES.has(parsed.status) ? undefined : isLast ? parsed.updatedAt : users[index + 1]?.createdAt,
+      };
+    });
+  }
+
+  const turnByUserMessage = new Map(turns.map((turn) => [turn.userMessageId, turn]));
+  let currentTurn = turns[0];
+  const messages = rawMessages.map((message) => {
+    if (message.role === "user") currentTurn = turnByUserMessage.get(message.id) ?? currentTurn;
+    return { ...message, turnId: message.turnId ?? currentTurn.id } as ConversationMessage;
+  });
+  const assistantTurnByCall = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const call of message.toolCalls ?? []) assistantTurnByCall.set(call.id, message.turnId);
+  }
+  const activeTurnId =
+    parsed.activeTurnId && turns.some((turn) => turn.id === parsed.activeTurnId)
+      ? parsed.activeTurnId
+      : turns.at(-1)!.id;
+
+  return {
+    id: parsed.id,
+    workspaceRoot: parsed.workspaceRoot,
+    status: parsed.status,
+    task: parsed.task,
+    turns,
+    activeTurnId,
+    messages,
+    toolTraces: parsed.toolTraces.map((trace) => ({
+      ...trace,
+      turnId: trace.turnId ?? assistantTurnByCall.get(trace.call.id) ?? activeTurnId,
+    })),
+    fileChanges: parsed.fileChanges?.map((change) => ({ ...change })) ?? [],
+    transitions: parsed.transitions.map((transition) => ({
+      ...transition,
+      turnId: transition.turnId ?? activeTurnId,
+    })),
+    streamingText: parsed.streamingText,
+    streamingReasoning: parsed.streamingReasoning,
+    pendingApproval: parsed.pendingApproval,
+    pendingUndo: parsed.pendingUndo,
+    terminationReason: parsed.terminationReason,
+    error: parsed.error,
+    createdAt: parsed.createdAt,
+    updatedAt: parsed.updatedAt,
+  };
+}
+
 function toSummary(session: AgentSession): SessionSummary {
   return {
     id: session.id,
     workspaceRoot: session.workspaceRoot,
     title: session.task.trim().split(/\r?\n/, 1)[0]?.slice(0, 120) || "未命名对话",
     status: session.status,
+    turnCount: session.turns.length,
+    changedFileCount: new Set(session.fileChanges.filter((change) => change.status === "applied").map((change) => change.path)).size,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
   };
@@ -153,7 +251,6 @@ export class SessionStore {
     const index = await this.readIndex();
     const sessions: AgentSession[] = [];
     const validIds: string[] = [];
-
     for (const id of index.sessionIds) {
       const session = await this.readSession(id);
       if (!session) continue;
@@ -161,20 +258,13 @@ export class SessionStore {
       sessions.push(session);
     }
 
-    const activeSession =
-      sessions.find((session) => session.id === index.activeSessionId) ?? null;
+    const activeSession = sessions.find((session) => session.id === index.activeSessionId) ?? null;
     if (!activeSession && index.activeSessionId) index.activeSessionId = null;
     if (validIds.length !== index.sessionIds.length) index.sessionIds = validIds;
-
     const workspaceRoot = index.workspaceRoot ?? activeSession?.workspaceRoot ?? null;
     if (workspaceRoot !== index.workspaceRoot) index.workspaceRoot = workspaceRoot;
     await this.writeIndex(index);
-
-    return {
-      activeSession,
-      sessions: sortSummaries(sessions.map(toSummary)),
-      workspaceRoot,
-    };
+    return { activeSession, sessions: sortSummaries(sessions.map(toSummary)), workspaceRoot };
   }
 
   async load(): Promise<AgentSession | null> {
@@ -188,23 +278,20 @@ export class SessionStore {
 
   async save(session: AgentSession): Promise<void> {
     this.assertSafeSessionId(session.id);
-    const parsed = sessionSchema.parse(session) as AgentSession;
+    const parsed = sessionSchema.parse(session);
+    const normalized = normalizeSessionShape(parsed);
     const index = await this.readIndex();
-    if (index.workspaceRoot && index.workspaceRoot !== parsed.workspaceRoot) {
-      throw new Error("会话工作区与当前单工作区不一致");
-    }
-    await this.writeSession(parsed);
-    index.workspaceRoot = parsed.workspaceRoot;
-    index.activeSessionId = parsed.id;
-    index.sessionIds = [parsed.id, ...index.sessionIds.filter((id) => id !== parsed.id)];
+    if (index.workspaceRoot && index.workspaceRoot !== normalized.workspaceRoot) throw new Error("会话工作区与当前单工作区不一致");
+    await this.writeSession(normalized);
+    index.workspaceRoot = normalized.workspaceRoot;
+    index.activeSessionId = normalized.id;
+    index.sessionIds = [normalized.id, ...index.sessionIds.filter((id) => id !== normalized.id)];
     await this.writeIndex(index);
   }
 
   async setWorkspaceRoot(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
-    if (index.workspaceRoot && index.workspaceRoot !== workspaceRoot && index.sessionIds.length > 0) {
-      throw new Error("已有聊天时不能切换到其他工作区");
-    }
+    if (index.workspaceRoot && index.workspaceRoot !== workspaceRoot && index.sessionIds.length > 0) throw new Error("已有聊天时不能切换到其他工作区");
     index.workspaceRoot = workspaceRoot;
     await this.writeIndex(index);
   }
@@ -236,7 +323,7 @@ export class SessionStore {
         const parsed = indexSchema.safeParse(JSON.parse(raw) as unknown);
         if (parsed.success) return parsed.data;
       } catch {
-        // A malformed index is ignored. Individual chat files remain untouched.
+        // Invalid index data is ignored; chat files remain untouched for manual recovery.
       }
       return this.emptyIndex();
     }
@@ -249,16 +336,10 @@ export class SessionStore {
     try {
       const parsed = sessionSchema.safeParse(JSON.parse(raw) as unknown);
       if (!parsed.success) return this.emptyIndex();
-      const session = parsed.data as AgentSession;
+      const session = this.normalizeInterrupted(normalizeSessionShape(parsed.data));
       this.assertSafeSessionId(session.id);
-      const normalized = this.normalizeInterrupted(session);
-      await this.writeSession(normalized);
-      const index: SessionIndex = {
-        version: 1,
-        workspaceRoot: normalized.workspaceRoot,
-        activeSessionId: normalized.id,
-        sessionIds: [normalized.id],
-      };
+      await this.writeSession(session);
+      const index: SessionIndex = { version: 1, workspaceRoot: session.workspaceRoot, activeSessionId: session.id, sessionIds: [session.id] };
       await this.writeIndex(index);
       await rm(this.legacyPath, { force: true });
       return index;
@@ -274,7 +355,7 @@ export class SessionStore {
     try {
       const parsed = sessionSchema.safeParse(JSON.parse(raw) as unknown);
       if (!parsed.success || parsed.data.id !== id) return null;
-      const session = parsed.data as AgentSession;
+      const session = normalizeSessionShape(parsed.data);
       if (ACTIVE_STATUSES.has(session.status)) {
         const normalized = this.normalizeInterrupted(session);
         await this.writeSession(normalized);
@@ -289,18 +370,20 @@ export class SessionStore {
   private normalizeInterrupted(session: AgentSession): AgentSession {
     if (!ACTIVE_STATUSES.has(session.status)) return session;
     const now = new Date().toISOString();
-    session.transitions.push({
-      from: session.status,
-      to: "failed",
-      reason: "应用退出导致运行中任务中断；未确认的副作用不会自动重放。",
-      at: now,
-    });
+    closeUnresolvedToolCalls(session, now);
+    const turn = session.turns.find((item) => item.id === session.activeTurnId) ?? session.turns.at(-1)!;
+    session.transitions.push({ turnId: turn.id, from: session.status, to: "failed", reason: "应用退出导致运行中任务中断；未确认的副作用不会自动重放。", at: now });
     session.status = "failed";
+    turn.status = "failed";
+    turn.terminationReason = "interrupted";
+    turn.error = "上次运行被中断。请检查已有结果后继续对话。";
+    turn.updatedAt = now;
+    turn.finishedAt = now;
     session.pendingApproval = undefined;
     session.streamingText = "";
     session.streamingReasoning = "";
     session.terminationReason = "interrupted";
-    session.error = "上次运行被中断。请检查已有结果后重新提交任务。";
+    session.error = turn.error;
     session.updatedAt = now;
     return session;
   }

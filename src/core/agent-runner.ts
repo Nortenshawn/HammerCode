@@ -1,6 +1,8 @@
 import type {
   AgentSession,
+  AgentTurn,
   AssistantMessage,
+  FileChange,
   TerminationReason,
   ToolMessage,
   ToolResult,
@@ -8,10 +10,13 @@ import type {
 } from "../shared/contracts";
 import { buildModelContext } from "./context";
 import { StreamAssembler } from "./model/stream-assembler";
+import { closeUnresolvedToolCalls } from "./session-recovery";
 import { transitionState } from "./state-machine";
 import type { AgentDependencies, AgentRunOptions } from "./types";
 import { HammerCodeError } from "./types";
 import { cloneValue, isAbortError, toErrorMessage } from "./utils";
+
+const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed"]);
 
 export class AgentRunner {
   private session: AgentSession | null = null;
@@ -28,42 +33,109 @@ export class AgentRunner {
   }
 
   async start(task: string, workspaceRoot: string): Promise<AgentSession> {
-    if (this.running) {
-      throw new HammerCodeError("已有任务正在运行", "SESSION_BUSY", true);
-    }
-    if (!task.trim()) {
-      throw new HammerCodeError("任务描述不能为空", "EMPTY_TASK", true);
-    }
-
-    this.running = true;
-    this.runAbort = new AbortController();
+    this.assertCanRun(task);
     const now = this.dependencies.clock.now().toISOString();
+    const turnId = this.dependencies.ids.next("turn");
+    const userMessageId = this.dependencies.ids.next("message");
+    const turn: AgentTurn = {
+      id: turnId,
+      userMessageId,
+      status: "idle",
+      createdAt: now,
+      updatedAt: now,
+    };
     this.session = {
       id: this.dependencies.ids.next("session"),
       workspaceRoot,
       status: "idle",
       task: task.trim(),
+      turns: [turn],
+      activeTurnId: turnId,
       messages: [
         {
-          id: this.dependencies.ids.next("message"),
+          id: userMessageId,
+          turnId,
           role: "user",
           content: task.trim(),
           createdAt: now,
         },
       ],
       toolTraces: [],
+      fileChanges: [],
       transitions: [],
       streamingText: "",
       streamingReasoning: "",
       createdAt: now,
       updatedAt: now,
     };
-    await this.moveTo("requesting", "用户提交任务");
+    return this.runPreparedTurn("用户提交任务");
+  }
 
+  async resume(previous: AgentSession, input: string): Promise<AgentSession> {
+    this.assertCanRun(input);
+    if (!TERMINAL_STATUSES.has(previous.status)) {
+      throw new HammerCodeError("只有已结束的聊天才能继续", "SESSION_NOT_TERMINAL", true);
+    }
+    if (previous.pendingUndo) {
+      throw new HammerCodeError("文件撤销仍在处理中", "UNDO_BUSY", true);
+    }
+
+    this.session = cloneValue(previous);
+    const now = this.dependencies.clock.now().toISOString();
+    closeUnresolvedToolCalls(
+      this.session,
+      now,
+      () => this.dependencies.ids.next("message"),
+    );
+    const turnId = this.dependencies.ids.next("turn");
+    const userMessageId = this.dependencies.ids.next("message");
+    this.session.turns.push({
+      id: turnId,
+      userMessageId,
+      status: "idle",
+      createdAt: now,
+      updatedAt: now,
+    });
+    this.session.activeTurnId = turnId;
+    this.session.messages.push({
+      id: userMessageId,
+      turnId,
+      role: "user",
+      content: input.trim(),
+      createdAt: now,
+    });
+    this.session.streamingText = "";
+    this.session.streamingReasoning = "";
+    this.session.pendingApproval = undefined;
+    this.session.terminationReason = undefined;
+    this.session.error = undefined;
+    return this.runPreparedTurn("用户继续对话");
+  }
+
+  cancel(): void {
+    this.runAbort?.abort(new DOMException("用户取消任务", "AbortError"));
+  }
+
+  private assertCanRun(input: string): void {
+    if (this.running) throw new HammerCodeError("已有任务正在运行", "SESSION_BUSY", true);
+    if (!input.trim()) throw new HammerCodeError("任务描述不能为空", "EMPTY_TASK", true);
+  }
+
+  private async runPreparedTurn(startReason: string): Promise<AgentSession> {
+    this.running = true;
+    const abort = new AbortController();
+    this.runAbort = abort;
     try {
-      await this.runLoop(this.runAbort.signal);
+      await this.moveTo("requesting", startReason);
+      await this.runLoop(abort.signal);
     } catch (error) {
-      if (isAbortError(error) || this.runAbort.signal.aborted) {
+      const now = this.dependencies.clock.now().toISOString();
+      closeUnresolvedToolCalls(
+        this.requireSession(),
+        now,
+        () => this.dependencies.ids.next("message"),
+      );
+      if (isAbortError(error) || abort.signal.aborted) {
         await this.terminate("cancelled", "任务已由用户取消");
       } else {
         const reason: TerminationReason =
@@ -80,10 +152,6 @@ export class AgentRunner {
       this.runAbort = null;
     }
     return this.requireSession();
-  }
-
-  cancel(): void {
-    this.runAbort?.abort(new DOMException("用户取消任务", "AbortError"));
   }
 
   private async runLoop(signal: AbortSignal): Promise<void> {
@@ -104,15 +172,15 @@ export class AgentRunner {
       })) {
         assembler.push(chunk);
         if (chunk.content) this.requireSession().streamingText += chunk.content;
-        if (chunk.reasoningContent) {
-          this.requireSession().streamingReasoning += chunk.reasoningContent;
-        }
+        if (chunk.reasoningContent) this.requireSession().streamingReasoning += chunk.reasoningContent;
         if (chunk.content || chunk.reasoningContent) await this.publish();
       }
 
       const response = assembler.result();
+      this.assertFreshToolCallIds(response.toolCalls.map((call) => call.id));
       const assistant: AssistantMessage = {
         id: this.dependencies.ids.next("message"),
+        turnId: this.currentTurn().id,
         role: "assistant",
         content: response.content,
         reasoningContent: response.reasoningContent || undefined,
@@ -133,17 +201,14 @@ export class AgentRunner {
       if (response.finishReason === "insufficient_system_resource") {
         throw new HammerCodeError("模型服务资源不足，请稍后重试", "MODEL_RESOURCE_EXHAUSTED", true);
       }
-
       if (response.toolCalls.length > 0) {
         for (const call of response.toolCalls) await this.executeTool(call, signal);
         continue;
       }
-
       if (response.finishReason === "stop") {
         await this.terminate("completed", "模型正常完成任务");
         return;
       }
-
       throw new HammerCodeError("模型没有给出有效的终止原因", "INVALID_MODEL_FINISH");
     }
 
@@ -153,12 +218,30 @@ export class AgentRunner {
     );
   }
 
+  private assertFreshToolCallIds(callIds: string[]): void {
+    if (callIds.length === 0) return;
+    const existing = new Set<string>();
+    for (const message of this.requireSession().messages) {
+      if (message.role !== "assistant") continue;
+      for (const call of message.toolCalls ?? []) existing.add(call.id);
+    }
+    const current = new Set<string>();
+    for (const id of callIds) {
+      if (!id || existing.has(id) || current.has(id)) {
+        throw new HammerCodeError("模型返回了重复或空的 tool call id", "INVALID_TOOL_CALL", true);
+      }
+      current.add(id);
+    }
+  }
+
   private async executeTool(
     call: { id: string; name: string; arguments: string },
     signal: AbortSignal,
   ): Promise<void> {
     const session = this.requireSession();
-    let trace: ToolTrace = {
+    const turnId = this.currentTurn().id;
+    const trace: ToolTrace = {
+      turnId,
       call,
       status: "proposed",
       summary: `模型请求调用 ${call.name}`,
@@ -171,6 +254,10 @@ export class AgentRunner {
       prepared = await this.dependencies.tools.prepare(call, this.dependencies.clock.now());
       trace.summary = prepared.summary;
       trace.target = prepared.target;
+      if (prepared.approvalRequest) {
+        prepared.approvalRequest.turnId = turnId;
+        prepared.approvalRequest.operation = "agent_tool";
+      }
       trace.approval = prepared.approvalRequest;
     } catch (error) {
       const result: ToolResult = {
@@ -181,12 +268,7 @@ export class AgentRunner {
       };
       trace.status =
         error instanceof HammerCodeError &&
-        [
-          "HIGH_RISK_COMMAND_BLOCKED",
-          "PATH_TRAVERSAL_BLOCKED",
-          "ABSOLUTE_PATH_BLOCKED",
-          "SYMLINK_ESCAPE_BLOCKED",
-        ].includes(error.code)
+        ["HIGH_RISK_COMMAND_BLOCKED", "PATH_TRAVERSAL_BLOCKED", "ABSOLUTE_PATH_BLOCKED", "SYMLINK_ESCAPE_BLOCKED"].includes(error.code)
           ? "blocked"
           : "failed";
       trace.result = result;
@@ -203,10 +285,7 @@ export class AgentRunner {
       trace.status = "awaiting_approval";
       session.pendingApproval = prepared.approvalRequest;
       await this.moveTo("awaiting_approval", `等待审批 ${call.name}`);
-      const approved = await this.dependencies.approvals.request(
-        prepared.approvalRequest,
-        signal,
-      );
+      const approved = await this.dependencies.approvals.request(prepared.approvalRequest, signal);
       session.pendingApproval = undefined;
       if (!approved) {
         const result: ToolResult = {
@@ -247,21 +326,30 @@ export class AgentRunner {
       };
     }
     const finished = this.dependencies.clock.now();
-    trace = session.toolTraces.find((item) => item.call.id === call.id) ?? trace;
     trace.status = result.ok ? "succeeded" : result.errorCode === "COMMAND_CANCELLED" ? "cancelled" : "failed";
     trace.result = result;
     trace.finishedAt = finished.toISOString();
     trace.durationMs = Math.max(0, finished.getTime() - started);
+    if (result.ok && prepared.fileMutation) {
+      const change: FileChange = {
+        id: this.dependencies.ids.next("change"),
+        turnId,
+        toolCallId: call.id,
+        ...prepared.fileMutation,
+        status: "applied",
+        appliedAt: finished.toISOString(),
+      };
+      session.fileChanges.push(change);
+      trace.fileChangeId = change.id;
+    }
     this.appendToolMessage(call, result);
     await this.moveTo("requesting", `${call.name} ${result.ok ? "执行完成" : "执行失败"}`);
   }
 
-  private appendToolMessage(
-    call: { id: string; name: string },
-    result: ToolResult,
-  ): void {
+  private appendToolMessage(call: { id: string; name: string }, result: ToolResult): void {
     const message: ToolMessage = {
       id: this.dependencies.ids.next("message"),
+      turnId: this.currentTurn().id,
       role: "tool",
       toolCallId: call.id,
       toolName: call.name,
@@ -275,42 +363,51 @@ export class AgentRunner {
     const session = this.requireSession();
     session.streamingText = "";
     session.streamingReasoning = "";
-    if (session.status !== "requesting") {
-      await this.moveTo("requesting", `开始第 ${round} 轮模型请求`);
-    } else {
-      await this.publish();
-    }
+    if (session.status !== "requesting") await this.moveTo("requesting", `开始第 ${round} 轮模型请求`);
+    else await this.publish();
   }
 
-  private async moveTo(
-    next: AgentSession["status"],
-    reason: string,
-  ): Promise<void> {
+  private async moveTo(next: AgentSession["status"], reason: string): Promise<void> {
     const session = this.requireSession();
-    const transition = transitionState(
-      session.status,
-      next,
-      reason,
-      this.dependencies.clock,
-    );
+    const turn = this.currentTurn();
+    const transition = transitionState(session.status, next, reason, this.dependencies.clock, turn.id);
     session.status = next;
+    turn.status = next;
     session.transitions.push(transition);
     await this.publish();
   }
 
   private async terminate(reason: TerminationReason, detail: string): Promise<void> {
     const session = this.requireSession();
-    if (["completed", "cancelled", "failed"].includes(session.status)) return;
+    if (TERMINAL_STATUSES.has(session.status)) return;
+    const turn = this.currentTurn();
     session.terminationReason = reason;
-    if (reason !== "completed" && reason !== "cancelled") session.error = detail;
+    turn.terminationReason = reason;
+    if (reason !== "completed" && reason !== "cancelled") {
+      session.error = detail;
+      turn.error = detail;
+    }
     const target = reason === "completed" ? "completed" : reason === "cancelled" ? "cancelled" : "failed";
     await this.moveTo(target, detail);
+    const finishedAt = this.dependencies.clock.now().toISOString();
+    turn.finishedAt = finishedAt;
+    turn.updatedAt = finishedAt;
+    await this.publish();
   }
 
   private async publish(): Promise<void> {
     const session = this.requireSession();
-    session.updatedAt = this.dependencies.clock.now().toISOString();
+    const now = this.dependencies.clock.now().toISOString();
+    session.updatedAt = now;
+    this.currentTurn().updatedAt = now;
     await this.dependencies.onSessionChange?.(cloneValue(session));
+  }
+
+  private currentTurn(): AgentTurn {
+    const session = this.requireSession();
+    const turn = session.turns.find((item) => item.id === session.activeTurnId);
+    if (!turn) throw new HammerCodeError("找不到当前对话轮次", "NO_ACTIVE_TURN");
+    return turn;
   }
 
   private requireSession(): AgentSession {

@@ -68,4 +68,37 @@ describe("local tool executor", () => {
     expect(result.errorCode).toBe("STALE_WRITE");
     expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe("user edit\n");
   });
+
+  it("rejects binary writes because they cannot be safely reviewed or undone", async () => {
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+
+    await expect(
+      executor.prepare(
+        {
+          id: "write_binary",
+          name: "write_file",
+          arguments: JSON.stringify({ path: "binary.dat", content: "prefix\0suffix" }),
+        },
+        new Date(),
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_TOOL_ARGUMENTS" });
+  });
+
+  it("records reversible state for an approved text deletion", async () => {
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+    const prepared = await executor.prepare(
+      { id: "delete_1", name: "delete_file", arguments: '{"path":"a.txt"}' },
+      new Date(),
+    );
+
+    expect(prepared.fileMutation).toMatchObject({
+      path: "a.txt",
+      kind: "delete",
+      beforeContent: "before\n",
+      afterContent: null,
+    });
+    expect(prepared.approvalRequest?.details).toContain("-before");
+  });
 });

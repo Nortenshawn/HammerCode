@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import logoUrl from "../../../logos/logo.png";
 import type {
   AgentSession,
+  AgentTurn,
   AppBootstrap,
   AssistantMessage,
   RendererEvent,
@@ -12,6 +13,7 @@ import type {
   ToolCall,
   ToolTrace,
 } from "../../shared/contracts";
+import { buildFileReviews } from "../../shared/file-reviews";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -26,16 +28,7 @@ const STATUS_LABELS: Record<SessionStatus, string> = {
 const ACTIVE_STATUSES: SessionStatus[] = ["requesting", "awaiting_approval", "executing_tool"];
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "cancelled", "failed"];
 
-type IconName =
-  | "arrow-up"
-  | "check"
-  | "chevron"
-  | "file"
-  | "folder"
-  | "plus"
-  | "square"
-  | "stop"
-  | "terminal";
+type IconName = "arrow-up" | "check" | "chevron" | "file" | "folder" | "plus" | "square" | "stop" | "terminal" | "undo";
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
@@ -48,6 +41,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     square: <rect x="4" y="4" width="16" height="16" rx="3"/>,
     stop: <rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor" stroke="none"/>,
     terminal: <><path d="m4 7 5 5-5 5"/><path d="M12 17h8"/></>,
+    undo: <><path d="M9 7 4 12l5 5"/><path d="M4 12h9a6 6 0 0 1 6 6"/></>,
   };
   return (
     <svg aria-hidden="true" className="icon" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -92,6 +86,8 @@ function summaryFromSession(session: AgentSession): SessionSummary {
     workspaceRoot: session.workspaceRoot,
     title: session.task.trim().split(/\r?\n/, 1)[0]?.slice(0, 120) || "未命名对话",
     status: session.status,
+    turnCount: session.turns.length,
+    changedFileCount: new Set(session.fileChanges.filter((change) => change.status === "applied").map((change) => change.path)).size,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
   };
@@ -99,17 +95,11 @@ function summaryFromSession(session: AgentSession): SessionSummary {
 
 function upsertSessionSummary(items: SessionSummary[], session: AgentSession): SessionSummary[] {
   const summary = summaryFromSession(session);
-  return [summary, ...items.filter((item) => item.id !== summary.id)].sort((left, right) =>
-    right.updatedAt.localeCompare(left.updatedAt),
-  );
+  return [summary, ...items.filter((item) => item.id !== summary.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 function Markdown({ children }: { children: string }) {
-  return (
-    <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
-    </div>
-  );
+  return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>;
 }
 
 const TOOL_STATUS_LABELS: Record<ToolTrace["status"], string> = {
@@ -127,10 +117,7 @@ const TOOL_STATUS_LABELS: Record<ToolTrace["status"], string> = {
 function argumentPreview(call: ToolCall): string {
   try {
     const value = JSON.parse(call.arguments) as Record<string, unknown>;
-    return Object.entries(value)
-      .slice(0, 2)
-      .map(([key, item]) => `${key}: ${typeof item === "string" ? item : JSON.stringify(item)}`)
-      .join(" · ");
+    return Object.entries(value).slice(0, 2).map(([key, item]) => `${key}: ${typeof item === "string" ? item : JSON.stringify(item)}`).join(" · ");
   } catch {
     return call.arguments;
   }
@@ -142,10 +129,7 @@ function ToolIntent({ call, trace }: { call: ToolCall; trace?: ToolTrace }) {
     <details className={`process-tool process-tool-${status}`} open={status === "running" || status === "awaiting_approval"}>
       <summary>
         <span className="process-node"><Icon name={call.name === "run_command" ? "terminal" : "file"} size={15}/></span>
-        <span className="process-tool-copy">
-          <strong>{call.name}</strong>
-          <small>{trace?.summary || argumentPreview(call)}</small>
-        </span>
+        <span className="process-tool-copy"><strong>{call.name}</strong><small>{trace?.summary || argumentPreview(call)}</small></span>
         <span className="process-status">{TOOL_STATUS_LABELS[status]}</span>
       </summary>
       <div className="process-tool-detail">
@@ -158,93 +142,111 @@ function ToolIntent({ call, trace }: { call: ToolCall; trace?: ToolTrace }) {
   );
 }
 
-function WorkProcess({ session, finalMessageId }: { session: AgentSession; finalMessageId?: string }) {
-  const terminal = TERMINAL_STATUSES.includes(session.status);
-  const traces = useMemo(
-    () => new Map(session.toolTraces.map((trace) => [trace.call.id, trace])),
-    [session.toolTraces],
-  );
-  const processMessages = session.messages.filter(
-    (message) => message.role !== "user" && message.id !== finalMessageId,
-  );
-  const hasContent = processMessages.length > 0 || session.streamingReasoning || session.streamingText;
+function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession; turn: AgentTurn; finalMessageId?: string }) {
+  const terminal = TERMINAL_STATUSES.includes(turn.status);
+  const tracesForTurn = session.toolTraces.filter((trace) => trace.turnId === turn.id);
+  const traces = useMemo(() => new Map(tracesForTurn.map((trace) => [trace.call.id, trace])), [tracesForTurn]);
+  const processMessages = session.messages.filter((message) => message.turnId === turn.id && message.role !== "user" && message.id !== finalMessageId);
+  const isActiveTurn = session.activeTurnId === turn.id && !terminal;
+  const hasContent = processMessages.length > 0 || (isActiveTurn && (session.streamingReasoning || session.streamingText));
 
   return (
-    <details className="work-process" key={`${session.id}-${terminal ? "terminal" : "active"}`} open={!terminal}>
+    <details className="work-process" key={`${turn.id}-${terminal ? "terminal" : "active"}`} open={!terminal}>
       <summary className="work-process-summary">
-        <span className={`activity-orb ${terminal ? "done" : "live"}`}>
-          {terminal ? <Icon name="check" size={13}/> : <span/>}
-        </span>
+        <span className={`activity-orb ${terminal ? "done" : "live"}`}>{terminal ? <Icon name="check" size={13}/> : <span/>}</span>
         <span className="work-process-title">
-          <strong>{terminal ? "过程与工具调用" : STATUS_LABELS[session.status]}</strong>
-          <small>{terminal ? `${session.toolTraces.length} 次工具调用` : "实时展示模型思考与执行链"}</small>
+          <strong>{terminal ? "过程与工具调用" : STATUS_LABELS[turn.status]}</strong>
+          <small>{terminal ? `${tracesForTurn.length} 次工具调用` : "实时展示模型思考与执行链"}</small>
         </span>
         <Icon name="chevron" size={15}/>
       </summary>
       <div className="process-timeline">
-        {!hasContent && <div className="process-placeholder">正在理解任务和工作区…</div>}
+        {!hasContent && <div className="process-placeholder">正在理解这轮请求…</div>}
         {processMessages.map((message) => {
           if (message.role === "tool") {
             const parsed = parseToolContent(message.content);
             return (
               <div className={`tool-result ${parsed.ok ? "success" : "failure"}`} key={message.id}>
                 <span className="process-node"><Icon name={parsed.ok ? "check" : "square"} size={14}/></span>
-                <div>
-                  <strong>{message.toolName}</strong>
-                  <span>{parsed.summary}</span>
-                  <details><summary>查看输出</summary><pre>{parsed.output || "（无输出）"}</pre></details>
-                </div>
+                <div><strong>{message.toolName}</strong><span>{parsed.summary}</span><details><summary>查看输出</summary><pre>{parsed.output || "（无输出）"}</pre></details></div>
               </div>
             );
           }
           if (message.role === "user") return null;
           return (
             <div className="assistant-process" key={message.id}>
-              {message.reasoningContent && (
-                <div className="thinking-copy">
-                  <span className="process-node"><span className="thought-dot"/></span>
-                  <div><strong>思考</strong><p>{message.reasoningContent}</p></div>
-                </div>
-              )}
+              {message.reasoningContent && <div className="thinking-copy"><span className="process-node"><span className="thought-dot"/></span><div><strong>思考</strong><p>{message.reasoningContent}</p></div></div>}
               {message.content && <div className="intermediate-copy"><Markdown>{message.content}</Markdown></div>}
               {message.toolCalls?.map((call) => <ToolIntent key={call.id} call={call} trace={traces.get(call.id)}/>)}
             </div>
           );
         })}
-        {session.streamingReasoning && (
-          <div className="thinking-copy streaming-copy">
-            <span className="process-node"><span className="thought-dot"/></span>
-            <div><strong>正在思考</strong><p>{session.streamingReasoning}</p></div>
-          </div>
-        )}
-        {session.streamingText && <div className="intermediate-copy live-copy"><Markdown>{session.streamingText}</Markdown><span className="typing-caret"/></div>}
+        {isActiveTurn && session.streamingReasoning && <div className="thinking-copy streaming-copy"><span className="process-node"><span className="thought-dot"/></span><div><strong>正在思考</strong><p>{session.streamingReasoning}</p></div></div>}
+        {isActiveTurn && session.streamingText && <div className="intermediate-copy live-copy"><Markdown>{session.streamingText}</Markdown><span className="typing-caret"/></div>}
       </div>
     </details>
   );
 }
 
-function ChatList({ sessions, activeId, disabled, onSelect }: {
-  sessions: SessionSummary[];
-  activeId?: string;
-  disabled: boolean;
-  onSelect: (id: string) => void;
-}) {
-  if (sessions.length === 0) return <p className="empty-chat-list">这个工作区还没有聊天</p>;
+function TurnView({ session, turn, index }: { session: AgentSession; turn: AgentTurn; index: number }) {
+  const messages = session.messages.filter((message) => message.turnId === turn.id);
+  const user = messages.find((message) => message.role === "user");
+  const finalAssistant = TERMINAL_STATUSES.includes(turn.status)
+    ? [...messages].reverse().find((message): message is AssistantMessage => message.role === "assistant" && Boolean(message.content) && !message.toolCalls?.length)
+    : undefined;
   return (
-    <div className="chat-list">
-      {sessions.map((item) => (
-        <button
-          className={`chat-item ${item.id === activeId ? "active" : ""}`}
-          disabled={disabled}
-          key={item.id}
-          onClick={() => onSelect(item.id)}
-        >
-          <span className="chat-title">{item.title}</span>
-          <span className="chat-meta"><i className={`chat-state state-${item.status}`}/>{STATUS_LABELS[item.status]} · {formatListDate(item.updatedAt)}</span>
-        </button>
-      ))}
-    </div>
+    <section className="turn-block" aria-label={`第 ${index + 1} 轮对话`}>
+      {index > 0 && <div className="turn-divider"><span>第 {index + 1} 轮</span></div>}
+      {user && <article className="user-message"><div>{user.content}</div><time>{formatClock(user.createdAt)}</time></article>}
+      <WorkProcess session={session} turn={turn} finalMessageId={finalAssistant?.id}/>
+      {finalAssistant && (
+        <article className="final-answer">
+          <Markdown>{finalAssistant.content}</Markdown>
+          <footer><span className={`final-state final-state-${turn.status}`}><Icon name={turn.status === "completed" ? "check" : "square"} size={14}/>{STATUS_LABELS[turn.status]}</span><time>{formatClock(finalAssistant.createdAt)}</time></footer>
+        </article>
+      )}
+      {turn.error && <div className="error-panel"><strong>这一轮未完成</strong><p>{turn.error}</p><small>可以直接在下方继续说明或纠正；未完成的工具调用不会重放。</small></div>}
+    </section>
   );
+}
+
+function ChangeReviewPanel({ session, busy, onUndo }: { session: AgentSession; busy: boolean; onUndo: (changeId: string) => void }) {
+  const reviews = useMemo(() => buildFileReviews(session.fileChanges), [session.fileChanges]);
+  if (reviews.length === 0) return null;
+  return (
+    <section className="change-review" aria-label="文件修改审阅">
+      <header className="change-review-heading">
+        <div><span className="review-icon"><Icon name="file" size={15}/></span><span><strong>文件修改</strong><small>{reviews.length} 个文件 · 本聊天累计 diff</small></span></div>
+      </header>
+      <div className="review-files">
+        {reviews.map((review) => {
+          const undoing = session.pendingUndo?.changeId === review.latestChangeId;
+          return (
+            <article className="review-file" key={review.path}>
+              <header>
+                <div><code>{review.path}</code><span className={`change-kind kind-${review.kind}`}>{review.kind === "create" ? "新增" : review.kind === "delete" ? "删除" : "修改"}</span></div>
+                <button disabled={busy} onClick={() => onUndo(review.latestChangeId)}><Icon name="undo" size={14}/>{undoing ? (session.pendingUndo?.status === "executing" ? "正在撤销" : "等待确认") : "撤销最近修改"}</button>
+              </header>
+              <details>
+                <summary>查看累计 diff <span>{review.appliedChangeCount} 次生效修改{review.revertedChangeCount ? ` · ${review.revertedChangeCount} 次已撤销` : ""}</span></summary>
+                <pre className="diff-view">{review.diff}{review.truncated ? "\n…（diff 已截断）" : ""}</pre>
+              </details>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ChatList({ sessions, activeId, disabled, onSelect }: { sessions: SessionSummary[]; activeId?: string; disabled: boolean; onSelect: (id: string) => void }) {
+  if (sessions.length === 0) return <p className="empty-chat-list">这个工作区还没有聊天</p>;
+  return <div className="chat-list">{sessions.map((item) => (
+    <button className={`chat-item ${item.id === activeId ? "active" : ""}`} disabled={disabled} key={item.id} onClick={() => onSelect(item.id)}>
+      <span className="chat-title">{item.title}</span>
+      <span className="chat-meta"><i className={`chat-state state-${item.status}`}/>{STATUS_LABELS[item.status]} · {item.turnCount} 轮 · {formatListDate(item.updatedAt)}</span>
+    </button>
+  ))}</div>;
 }
 
 export function App() {
@@ -275,20 +277,11 @@ export function App() {
       if (event.type === "sessions_changed") setSessions(event.sessions);
       if (event.type === "notification") setNotice({ level: event.level, text: event.message });
     });
-    return () => {
-      mounted = false;
-      unsubscribe();
-    };
+    return () => { mounted = false; unsubscribe(); };
   }, []);
 
   const isRunning = Boolean(session && ACTIVE_STATUSES.includes(session.status));
-  const userMessage = session?.messages.find((message) => message.role === "user");
-  const finalAssistant = useMemo(() => {
-    if (!session || !TERMINAL_STATUSES.includes(session.status)) return undefined;
-    return [...session.messages].reverse().find((message): message is AssistantMessage =>
-      message.role === "assistant" && Boolean(message.content) && !message.toolCalls?.length,
-    );
-  }, [session]);
+  const isBusy = isRunning || Boolean(session?.pendingUndo);
 
   useEffect(() => {
     const conversation = conversationRef.current;
@@ -301,138 +294,78 @@ export function App() {
     try {
       const selected = await window.hammerCode.chooseWorkspace();
       if (selected) setWorkspaceRoot(selected);
-    } catch (error) {
-      setNotice({ level: "error", text: String(error) });
-    } finally {
-      setBusy(false);
-    }
+    } catch (error) { setNotice({ level: "error", text: String(error) }); }
+    finally { setBusy(false); }
   };
 
   const newChat = async () => {
-    if (isRunning) return;
+    if (isBusy) return;
     try {
       await window.hammerCode.newChat();
       setSession(null);
       setTask("");
       setNotice(null);
-    } catch (error) {
-      setNotice({ level: "error", text: String(error) });
-    }
+    } catch (error) { setNotice({ level: "error", text: String(error) }); }
   };
 
   const selectSession = async (id: string) => {
-    if (isRunning || id === session?.id) return;
-    try {
-      await window.hammerCode.selectSession(id);
-      setNotice(null);
-    } catch (error) {
-      setNotice({ level: "error", text: String(error) });
-    }
+    if (isBusy || id === session?.id) return;
+    try { await window.hammerCode.selectSession(id); setNotice(null); }
+    catch (error) { setNotice({ level: "error", text: String(error) }); }
   };
 
   const submit = async () => {
-    if (!task.trim() || !workspaceRoot || isRunning) return;
+    if (!task.trim() || !workspaceRoot || isBusy) return;
     setBusy(true);
     setNotice(null);
-    try {
-      await window.hammerCode.startTask(task);
-      setTask("");
-    } catch (error) {
-      setNotice({ level: "error", text: String(error) });
-    } finally {
-      setBusy(false);
-    }
+    try { await window.hammerCode.startTask(task); setTask(""); }
+    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    finally { setBusy(false); }
   };
 
   const resolveApproval = async (approved: boolean) => {
     if (!session?.pendingApproval) return;
-    try {
-      await window.hammerCode.resolveApproval(session.pendingApproval.id, approved);
-    } catch (error) {
-      setNotice({ level: "error", text: String(error) });
-    }
+    try { await window.hammerCode.resolveApproval(session.pendingApproval.id, approved); }
+    catch (error) { setNotice({ level: "error", text: String(error) }); }
   };
 
-  if (!bootstrap) {
-    return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
-  }
+  const requestUndo = async (changeId: string) => {
+    try { await window.hammerCode.requestUndo(changeId); setNotice(null); }
+    catch (error) { setNotice({ level: "error", text: String(error) }); }
+  };
+
+  if (!bootstrap) return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-drag"/>
-        <header className="brand-row">
-          <button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button>
-        </header>
-
-        <nav className="primary-nav" aria-label="主要导航">
-          <button className="new-chat-button" onClick={newChat} disabled={isRunning}>
-            <Icon name="plus" size={17}/><span>新对话</span>
-          </button>
-        </nav>
-
+        <header className="brand-row"><button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button></header>
+        <nav className="primary-nav" aria-label="主要导航"><button className="new-chat-button" onClick={newChat} disabled={isBusy}><Icon name="plus" size={17}/><span>新对话</span></button></nav>
         <section className="projects-section">
           <div className="section-heading">项目</div>
-          <button className="project-row" onClick={chooseWorkspace} disabled={busy || isRunning} title={workspaceRoot ?? "选择本地工作区"}>
-            <Icon name="folder" size={17}/>
-            <span>{folderName(workspaceRoot)}</span>
-            <Icon name="chevron" size={14}/>
-          </button>
+          <button className="project-row" onClick={chooseWorkspace} disabled={busy || isBusy} title={workspaceRoot ?? "选择本地工作区"}><Icon name="folder" size={17}/><span>{folderName(workspaceRoot)}</span><Icon name="chevron" size={14}/></button>
           {workspaceRoot && (
-            <ChatList sessions={sessions} activeId={session?.id} disabled={isRunning} onSelect={selectSession}/>
+            <ChatList sessions={sessions} activeId={session?.id} disabled={isBusy} onSelect={selectSession}/>
           )}
         </section>
-
-        <footer className="sidebar-footer">
-          <div className="runtime-line"><span className={`connection-dot ${bootstrap.config.hasApiKey ? "ready" : "missing"}`}/><strong>{bootstrap.config.model}</strong></div>
-          <span>{bootstrap.config.hasApiKey ? "本地工具已就绪" : "缺少 API 配置"}</span>
-        </footer>
+        <footer className="sidebar-footer"><div className="runtime-line"><span className={`connection-dot ${bootstrap.config.hasApiKey ? "ready" : "missing"}`}/><strong>{bootstrap.config.model}</strong></div><span>{bootstrap.config.hasApiKey ? "本地工具已就绪" : "缺少 API 配置"}</span></footer>
       </aside>
 
       <main className="workspace">
         <header className="topbar">
-          <div className="topbar-title">
-            <Icon name="folder" size={17}/>
-            <strong>{session?.task.split(/\r?\n/, 1)[0]?.slice(0, 64) || "新对话"}</strong>
-            {workspaceRoot && <span>{folderName(workspaceRoot)}</span>}
-          </div>
-          <div className="top-actions">
-            {isRunning && <button className="stop-button" onClick={() => window.hammerCode.cancelTask()}><Icon name="stop" size={14}/>停止</button>}
-          </div>
+          <div className="topbar-title"><Icon name="folder" size={17}/><strong>{session?.task.split(/\r?\n/, 1)[0]?.slice(0, 64) || "新对话"}</strong>{workspaceRoot && <span>{folderName(workspaceRoot)}</span>}</div>
+          <div className="top-actions">{isRunning && <button className="stop-button" onClick={() => window.hammerCode.cancelTask()}><Icon name="stop" size={14}/>停止</button>}{session?.pendingUndo?.status === "executing" && <span className="undo-running"><Icon name="undo" size={14}/>正在撤销</span>}</div>
         </header>
 
         <section className="conversation" ref={conversationRef}>
           {!session ? (
-            <div className="welcome">
-              <img className="welcome-mark" src={logoUrl} alt="HammerCode"/>
-              <h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1>
-              <p>{workspaceRoot ? "描述你想完成的开发任务。文件修改和命令执行仍会先向你确认。" : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>
-              {!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}
-              {!bootstrap.config.hasApiKey && <div className="config-warning">未检测到 <code>DEEPSEEK_API_KEY</code>，请完成本地配置后重启。</div>}
-            </div>
+            <div className="welcome"><img className="welcome-mark" src={logoUrl} alt="HammerCode"/><h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1><p>{workspaceRoot ? "描述你想完成的开发任务。文件修改和命令执行仍会先向你确认。" : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>{!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}{!bootstrap.config.hasApiKey && <div className="config-warning">未检测到 <code>DEEPSEEK_API_KEY</code>，请完成本地配置后重启。</div>}</div>
           ) : (
             <div className="message-stack">
-              {userMessage && (
-                <article className="user-message">
-                  <div>{userMessage.content}</div>
-                  <time>{formatClock(userMessage.createdAt)}</time>
-                </article>
-              )}
-
-              <WorkProcess session={session} finalMessageId={finalAssistant?.id}/>
-
-              {finalAssistant && (
-                <article className="final-answer">
-                  <Markdown>{finalAssistant.content}</Markdown>
-                  <footer>
-                    <span className={`final-state final-state-${session.status}`}><Icon name={session.status === "completed" ? "check" : "square"} size={14}/>{STATUS_LABELS[session.status]}</span>
-                    <time>{formatClock(finalAssistant.createdAt)}</time>
-                  </footer>
-                </article>
-              )}
-
-              {session.error && (
-                <div className="error-panel"><strong>任务未完成</strong><p>{session.error}</p><small>已保存现有结果；未确认的操作不会自动重放。</small></div>
+              {session.turns.map((turn, index) => <TurnView key={turn.id} session={session} turn={turn} index={index}/>)}
+              {TERMINAL_STATUSES.includes(session.status) && (
+                <ChangeReviewPanel session={session} busy={isBusy} onUndo={(id) => void requestUndo(id)}/>
               )}
             </div>
           )}
@@ -440,48 +373,20 @@ export function App() {
 
         <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
-          <div className={`composer ${isRunning ? "disabled" : ""}`}>
-            <textarea
-              value={task}
-              onChange={(event) => setTask(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder={workspaceRoot ? (session ? "输入新任务，将创建一条独立对话" : "交给 HammerCode 一个开发任务") : "请先从左侧选择工作区"}
-              disabled={!workspaceRoot || isRunning || busy}
-              rows={3}
-            />
-            <div className="composer-footer">
-              <span>{isRunning ? STATUS_LABELS[session?.status ?? "requesting"] : `${folderName(workspaceRoot)} · Enter 发送`}</span>
-              {isRunning ? (
-                <button className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button>
-              ) : (
-                <button className="send-button" onClick={submit} disabled={!task.trim() || !workspaceRoot || busy} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>
-              )}
-            </div>
+          <div className={`composer ${isBusy ? "disabled" : ""}`}>
+            <textarea value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} placeholder={workspaceRoot ? (session ? "继续追问、补充要求或纠正上一轮" : "交给 HammerCode 一个开发任务") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || busy} rows={3}/>
+            <div className="composer-footer"><span>{isRunning ? STATUS_LABELS[session?.status ?? "requesting"] : session?.pendingUndo ? "文件撤销处理中" : `${folderName(workspaceRoot)} · Enter 发送`}</span>{isRunning ? <button className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button> : <button className="send-button" onClick={submit} disabled={!task.trim() || !workspaceRoot || isBusy || busy} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}</div>
           </div>
         </section>
       </main>
 
       {session?.pendingApproval && (
-        <div className="approval-backdrop">
-          <section className="approval-panel" role="dialog" aria-modal="true" aria-labelledby="approval-title">
-            <div className="approval-heading">
-              <span className="approval-icon">!</span>
-              <div><small>需要你的确认</small><h2 id="approval-title">{session.pendingApproval.title}</h2></div>
-            </div>
-            <p>{session.pendingApproval.description}</p>
-            <pre>{session.pendingApproval.details}</pre>
-            <div className="approval-actions">
-              <button className="reject" onClick={() => resolveApproval(false)}>拒绝</button>
-              <button className="approve" onClick={() => resolveApproval(true)}>批准并执行</button>
-            </div>
-            <span className="approval-note">拒绝后不会产生副作用，智能体可以继续处理。</span>
-          </section>
-        </div>
+        <div className="approval-backdrop"><section className="approval-panel" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+          <div className="approval-heading"><span className="approval-icon">{session.pendingApproval.operation === "undo" ? "↶" : "!"}</span><div><small>{session.pendingApproval.operation === "undo" ? "撤销也需要确认" : "需要你的确认"}</small><h2 id="approval-title">{session.pendingApproval.title}</h2></div></div>
+          <p>{session.pendingApproval.description}</p><pre>{session.pendingApproval.details}</pre>
+          <div className="approval-actions"><button className="reject" onClick={() => resolveApproval(false)}>拒绝</button><button className="approve" onClick={() => resolveApproval(true)}>{session.pendingApproval.operation === "undo" ? "确认撤销" : "批准并执行"}</button></div>
+          <span className="approval-note">{session.pendingApproval.operation === "undo" ? "执行前会再次校验文件状态，防止覆盖后续修改。" : "拒绝后不会产生副作用，智能体可以继续处理。"}</span>
+        </section></div>
       )}
     </div>
   );

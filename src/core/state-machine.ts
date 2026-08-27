@@ -19,9 +19,9 @@ const ALLOWED_TRANSITIONS: Record<SessionStatus, ReadonlySet<SessionStatus>> = {
     "failed",
   ]),
   executing_tool: new Set(["requesting", "cancelled", "failed"]),
-  completed: new Set(),
-  cancelled: new Set(),
-  failed: new Set(),
+  completed: new Set(["requesting"]),
+  cancelled: new Set(["requesting"]),
+  failed: new Set(["requesting"]),
 };
 
 export function transitionState(
@@ -29,6 +29,7 @@ export function transitionState(
   next: SessionStatus,
   reason: string,
   clock: Clock,
+  turnId: string,
 ): StateTransition {
   if (!ALLOWED_TRANSITIONS[current].has(next)) {
     throw new HammerCodeError(
@@ -37,5 +38,5 @@ export function transitionState(
     );
   }
 
-  return { from: current, to: next, reason, at: clock.now().toISOString() };
+  return { turnId, from: current, to: next, reason, at: clock.now().toISOString() };
 }
