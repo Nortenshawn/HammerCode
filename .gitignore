@@ -5,3 +5,14 @@
 # api 隐秘文件
 
 .env
+
+# Dependencies and build output
+node_modules/
+dist/
+release/
+coverage/
+*.log
+.DS_Store
+
+# Local HammerCode data
+.hammercode/

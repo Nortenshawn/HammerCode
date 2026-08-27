@@ -13,13 +13,22 @@
 - 产品优先形成可靠、透明、可解释的单工作区 agent 闭环，不以功能数量代替完成度。
 - 模型接入以 OpenAI-compatible API 为首版边界，允许配置 endpoint、model 和凭据。
 
+## 首版模型接入约定
+
+- 首版默认模型为 `deepseek-v4-flash`，默认 OpenAI-compatible base URL 为 `https://api.deepseek.com`，使用 `POST /chat/completions`、SSE 流式输出和 function tool calling。模型名、endpoint、思考模式与推理强度必须保持可配置，不得散落硬编码在 agent core 中。
+- DeepSeek V4 的思考模式通过请求字段 `thinking: { type: "enabled" | "disabled" }` 控制，首版默认开启；`reasoning_effort` 只允许经过配置校验的 `low`、`high` 或 `max`。
+- 流式解析必须兼容文本、`reasoning_content`、分片 `tool_calls`、`[DONE]` 以及 `stop`、`tool_calls`、`length`、`content_filter`、`insufficient_system_resource` 等结束原因。模型返回的 tool call 参数始终按不可信 JSON 处理。
+- 官方公布的模型上下文与输出上限只能作为能力上限，不能直接作为应用默认值。应用必须设置更保守且可配置的输入预算、单次输出上限、工具结果上限和 agent 轮次上限。
+- 当前不实现 Responses API 或厂商专属内置工具；所有代码执行和文件工具仍由本地 agent core 完成。未来接入其他 OpenAI-compatible 模型时，应复用同一模型端口，不在核心循环中加入厂商分支。
+- 本节依据 2026-08-27 查阅的 DeepSeek 官方 API 文档维护；接口升级时应先核对官方 Chat Completions、Tool Calls、Models & Pricing 和更新日志，再调整兼容层与测试。
+
 ## 不可违反的实现限制
 
 - 禁止在 Claude Code、Codex、OpenCode、DeepSeek Harness 或其他现成 agent 产品之上封装界面或转发任务。
 - 禁止使用任何 agent 框架或 agent SDK，包括但不限于 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen 和 CrewAI。
 - 可以使用模型厂商的普通 API 客户端库、OpenAI-compatible 网关和模型原生 tool calling 接口，也可以使用普通的 UI、协议、校验、日志及测试库。这些依赖不得替代本项目的 agent 核心逻辑。
 - 禁止依赖 API 服务端托管的代码执行、文件读写或工作区工具，包括 Code Interpreter、Files API 及同类能力。所有文件访问和命令执行必须由本应用在本机实现。
-- 下列核心逻辑必须自行设计、实现并测试：
+- 下列核心逻辑必须自行设计、实现并测试，自行实现指不照搬开源实现等，并非“手写实现”：
   - 对话历史、上下文预算与上下文压缩；
   - 工具 schema、参数校验、权限判断与本地执行；
   - 流式模型输出及 tool call 的组装、解析与校验；
@@ -81,6 +90,12 @@
 - 修改完成后应运行与改动相称的类型检查、单元测试、集成测试和构建验证。不得通过删除测试、降低断言或隐藏错误来获得通过结果。
 - 引入依赖前必须确认它不是 agent 框架或托管工具替代品，并说明它解决的具体基础设施问题。优先选择边界清晰、维护活跃且可本地运行的依赖。
 - 尊重仓库中已有的用户修改；开始编辑前先检查工作区状态，不覆盖、不回滚无关改动。
+
+## 版本控制交付
+
+- 完成一个可独立验收的重大任务后，必须先运行与改动相称的检查，再主动提交并推送当前分支，不等待用户重复提醒。
+- 提交前必须检查工作区和暂存区，确认真实 `.env`、凭据、构建缓存及其他不应入库的文件未被追踪；不得顺带提交或覆盖无关的用户改动。
+- 推送失败时必须保留本地提交，并明确说明失败原因和用户可采取的恢复操作；不得通过强制推送、改写共享历史或跳过保护规则绕过失败。
 
 ## 首版范围外事项
 

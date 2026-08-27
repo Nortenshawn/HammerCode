@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.main.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".test-dist",
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/core", "src/shared", "src/main/session-store.ts", "tests"]
+}

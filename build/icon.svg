@@ -1,0 +1,27 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="146" y1="96" x2="860" y2="930" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B232C"/>
+      <stop offset="1" stop-color="#080B0F"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="303" y1="254" x2="742" y2="781" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD884"/>
+      <stop offset="0.48" stop-color="#F4A640"/>
+      <stop offset="1" stop-color="#C96B1D"/>
+    </linearGradient>
+    <filter id="glow" x="130" y="108" width="764" height="808" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="36"/>
+    </filter>
+  </defs>
+  <rect x="54" y="54" width="916" height="916" rx="224" fill="url(#bg)"/>
+  <rect x="66" y="66" width="892" height="892" rx="212" stroke="#3A4652" stroke-width="24"/>
+  <path d="M305 705L681 329" stroke="#E89131" stroke-width="122" stroke-linecap="round" opacity="0.22" filter="url(#glow)"/>
+  <path d="M326 739L701 364" stroke="url(#metal)" stroke-width="96" stroke-linecap="round"/>
+  <path d="M611 230H810C838 230 860 252 860 280V358C860 386 838 408 810 408H611L526 326L611 230Z" fill="url(#metal)"/>
+  <path d="M526 326L611 230V408L526 326Z" fill="#B95E1B"/>
+  <path d="M214 726L298 642L382 726L298 810L214 726Z" fill="#F8BF5D"/>
+  <path d="M244 726L298 672L352 726L298 780L244 726Z" fill="#FFF0C2" opacity="0.45"/>
+  <path d="M344 259V765" stroke="#F6B34D" stroke-width="58" stroke-linecap="round" opacity="0.9"/>
+  <path d="M680 488V765" stroke="#F6B34D" stroke-width="58" stroke-linecap="round" opacity="0.9"/>
+  <path d="M356 545H668" stroke="#F6B34D" stroke-width="58" stroke-linecap="round"/>
+</svg>
