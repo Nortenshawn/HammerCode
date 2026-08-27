@@ -14,7 +14,7 @@ async function createWindow(): Promise<void> {
     minWidth: 980,
     minHeight: 680,
     title: "HammerCode",
-    backgroundColor: "#0d1117",
+    backgroundColor: "#f7f7f5",
     titleBarStyle: "hiddenInset",
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
@@ -58,6 +58,10 @@ function registerIpc(appController: AppController): void {
 
   handle("hammercode:bootstrap", () => appController.bootstrap());
   handle("hammercode:choose-workspace", () => appController.chooseWorkspace());
+  handle("hammercode:new-chat", () => appController.newChat());
+  handle("hammercode:select-session", (sessionId: unknown) =>
+    appController.selectSession(sessionId),
+  );
   handle("hammercode:start-task", (task: unknown) => appController.startTask(task));
   handle("hammercode:cancel-task", () => appController.cancelTask());
   handle("hammercode:resolve-approval", (id: unknown, approved: unknown) =>

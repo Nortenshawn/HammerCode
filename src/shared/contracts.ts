@@ -120,6 +120,15 @@ export interface AgentSession {
   updatedAt: string;
 }
 
+export interface SessionSummary {
+  id: string;
+  workspaceRoot: string;
+  title: string;
+  status: SessionStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PublicRuntimeConfig {
   model: string;
   apiBaseUrl: string;
@@ -133,6 +142,7 @@ export interface PublicRuntimeConfig {
 
 export interface AppBootstrap {
   session: AgentSession | null;
+  sessions: SessionSummary[];
   workspaceRoot: string | null;
   config: PublicRuntimeConfig;
 }
@@ -140,11 +150,14 @@ export interface AppBootstrap {
 export type RendererEvent =
   | { type: "session_snapshot"; session: AgentSession }
   | { type: "session_cleared" }
+  | { type: "sessions_changed"; sessions: SessionSummary[] }
   | { type: "notification"; level: "info" | "error"; message: string };
 
 export interface HammerCodeApi {
   bootstrap(): Promise<AppBootstrap>;
   chooseWorkspace(): Promise<string | null>;
+  newChat(): Promise<void>;
+  selectSession(sessionId: string): Promise<void>;
   startTask(task: string): Promise<{ sessionId: string }>;
   cancelTask(): Promise<void>;
   resolveApproval(approvalId: string, approved: boolean): Promise<void>;

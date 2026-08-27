@@ -25,7 +25,7 @@ Electron Main
        └─ Approval gateway
 ```
 
-renderer 使用 `nodeIntegration: false`、`contextIsolation: true` 和 `sandbox: true`。preload 只暴露选择工作区、开始/取消任务、审批、清空会话和接收安全快照六类操作。它不能读取文件、执行任意命令或访问环境变量。
+renderer 使用 `nodeIntegration: false`、`contextIsolation: true` 和 `sandbox: true`。preload 只暴露选择工作区、新建/选择聊天、开始/取消任务、审批、清空会话和接收安全快照等明确操作。它不能读取文件、执行任意命令或访问环境变量。
 
 API key 只由 main process 从环境变量或 `.env` 加载。公开配置只包含是否已配置 key，不包含值。网络错误进入 UI 前会清理 bearer token、常见 key 模式和 URL 敏感查询参数。
 
@@ -65,11 +65,11 @@ API key 只由 main process 从环境变量或 `.env` 加载。公开配置只�
 
 Token 估算采用保守字符启发式，不假装等于厂商 tokenizer。超过预算时保留初始用户目标和最近消息，把较早内容转换为明确标注的“本地压缩摘要”；压缩后仍超预算则终止，不发送不可控请求。
 
-会话快照区分用户消息、助手消息、tool call、tool result、状态转换和终止原因，使用 0600 权限临时文件加原子 rename 保存。启动时如果发现上次状态为请求中、待审批或执行中，会标记为 `interrupted/failed`，不会继续或重放副作用。
+会话快照区分用户消息、助手消息、tool call、tool result、状态转换和终止原因。单个工作区可以保存多条独立聊天，由小型索引记录当前选中项，每条聊天分别使用 0600 权限临时文件加原子 rename 保存。启动时如果发现任一聊天上次状态为请求中、待审批或执行中，会标记为 `interrupted/failed`，不会继续或重放副作用；旧版单会话文件会在首次启动时安全迁移。
 
 ## 当前限制
 
-- 首版为单窗口、单工作区、单会话，不实现多 agent、MCP 或插件。
+- 首版为单窗口、单工作区，可保存多条独立聊天；不实现多工作区、多 agent、MCP 或插件。
 - 文本搜索是本地安全实现，优先可靠性而非大型仓库索引性能。
 - 当前写工具是完整文件替换；diff 仅用于审批展示。
 - 高风险命令阻断采用明确规则集，不能证明任意 shell 字符串安全，因此剩余命令始终要求人工审批。
