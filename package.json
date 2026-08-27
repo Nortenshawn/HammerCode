@@ -51,7 +51,7 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "icon": "build/icon.icns",
+      "icon": "logos/logo.icns",
       "target": [
         "dir"
       ]

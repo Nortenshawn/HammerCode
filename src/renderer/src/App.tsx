@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import logoUrl from "../../../logos/logo.png";
 import type {
   AgentSession,
   AppBootstrap,
@@ -353,7 +354,7 @@ export function App() {
   };
 
   if (!bootstrap) {
-    return <main className="loading"><span className="loading-mark">H</span><p>正在打开 HammerCode…</p></main>;
+    return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
   }
 
   return (
@@ -361,7 +362,7 @@ export function App() {
       <aside className="sidebar">
         <div className="sidebar-drag"/>
         <header className="brand-row">
-          <button className="brand-button" aria-label="HammerCode">HammerCode <span>⌄</span></button>
+          <button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button>
         </header>
 
         <nav className="primary-nav" aria-label="主要导航">
@@ -403,7 +404,7 @@ export function App() {
         <section className="conversation" ref={conversationRef}>
           {!session ? (
             <div className="welcome">
-              <div className="welcome-mark">H</div>
+              <img className="welcome-mark" src={logoUrl} alt="HammerCode"/>
               <h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1>
               <p>{workspaceRoot ? "描述你想完成的开发任务。文件修改和命令执行仍会先向你确认。" : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>
               {!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}
