@@ -7,6 +7,7 @@ import type {
   AgentTurn,
   AppBootstrap,
   AssistantMessage,
+  EphemeralSideChatState,
   ModelRef,
   ModelConnectionTestResult,
   ModelTier,
@@ -22,8 +23,10 @@ import type {
   WorkspaceEntry,
 } from "../../shared/contracts";
 import { buildFileReviews, type FileReview } from "../../shared/file-reviews";
+import { fallbackChatTitle } from "../../shared/chat-title";
 import { renderDiffLines } from "./diff-renderer";
 import { detectComposerToken, formatWorkspaceMention, replaceComposerToken } from "./composer-tokens";
+import { computeWorkbenchLayout, DEFAULT_PANEL_RATIO, panelRatioFromDivider } from "./panel-layout";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -43,6 +46,7 @@ type IconName =
   | "chevron"
   | "file"
   | "folder"
+  | "branch"
   | "gear"
   | "plus"
   | "square"
@@ -57,6 +61,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     chevron: <path d="m9 18 6-6-6-6"/>,
     file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></>,
     folder: <><path d="M3 6h6l2 2h10v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/><path d="M1 10h20"/></>,
+    branch: <><circle cx="6" cy="5" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10"/><path d="M8 11h4a6 6 0 0 0 6-2"/></>,
     gear: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.37.37.7.6 1 .3.32.68.46 1.1.46h.1v4h-.1A1.7 1.7 0 0 0 19.4 15Z"/></>,
     plus: <><path d="M12 5v14"/><path d="M5 12h14"/></>,
     square: <rect x="4" y="4" width="16" height="16" rx="3"/>,
@@ -124,13 +129,6 @@ function formatClock(value?: string): string {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
-function formatListDate(value: string): string {
-  const date = new Date(value);
-  const today = new Date();
-  if (date.toDateString() === today.toDateString()) return formatClock(value);
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
-}
-
 function formatElapsed(start: string, end?: string): string {
   const milliseconds = Math.max(0, new Date(end ?? Date.now()).getTime() - new Date(start).getTime());
   const seconds = Math.floor(milliseconds / 1_000);
@@ -169,7 +167,7 @@ function summaryFromSession(session: AgentSession): SessionSummary {
   return {
     id: session.id,
     workspaceRoot: session.workspaceRoot,
-    title: session.task.trim().split(/\r?\n/, 1)[0]?.slice(0, 120) || "未命名对话",
+    title: fallbackChatTitle(session.title ?? session.task),
     status: session.status,
     turnCount: session.turns.length,
     changedFileCount: new Set(session.fileChanges.filter((change) => change.status === "applied").map((change) => change.path)).size,
@@ -401,12 +399,90 @@ function DiffDrawer({ review, busy, undoing, onClose, onUndo, onResizeStart }: {
   );
 }
 
+function SideChatPanel({
+  sideChat,
+  onClose,
+  onSend,
+  onCancel,
+  onResizeStart,
+}: {
+  sideChat: EphemeralSideChatState;
+  onClose: () => void;
+  onSend: (content: string) => Promise<void>;
+  onCancel: () => void;
+  onResizeStart: (clientX: number) => void;
+}) {
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const requesting = sideChat.status === "requesting";
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const element = scrollRef.current;
+      if (element) element.scrollTo({ top: element.scrollHeight });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [sideChat.updatedAt]);
+
+  const submit = async () => {
+    if (!input.trim() || requesting || sending) return;
+    setSending(true);
+    try {
+      await onSend(input);
+      setInput("");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <aside className="utility-panel side-chat-panel" aria-label="临时 BTW 侧边聊天">
+      <div className="panel-resize-handle" onPointerDown={(event) => { event.preventDefault(); onResizeStart(event.clientX); }} aria-hidden="true"/>
+      <header className="side-chat-header">
+        <div><span><Icon name="branch" size={15}/>BTW</span><strong>{sideChat.sourceTitle}</strong></div>
+        <button className="panel-close" onClick={onClose} aria-label="关闭 BTW">×</button>
+      </header>
+      <p className="side-chat-boundary">创建时复制主线快照 · 只读 · 关闭即消失</p>
+      <div className="side-chat-messages" ref={scrollRef}>
+        {sideChat.messages.length === 0 && !requesting && <div className="side-chat-welcome"><Icon name="branch" size={21}/><strong>临时问一件事</strong><p>回答只留在这里，不会写回主聊天，也不会调用工具。</p></div>}
+        {sideChat.messages.map((message) => message.role === "user"
+          ? <article className="side-chat-user" key={message.id}>{message.content}</article>
+          : <article className="side-chat-assistant" key={message.id}>{message.reasoningContent && <details><summary>思考过程</summary><p>{message.reasoningContent}</p></details>}<Markdown>{message.content}</Markdown></article>)}
+        {requesting && <article className="side-chat-assistant side-chat-streaming">
+          {sideChat.streamingReasoning && <details open><summary>正在思考</summary><p>{sideChat.streamingReasoning}</p></details>}
+          {sideChat.streamingText && <Markdown>{sideChat.streamingText}</Markdown>}
+          <span className="typing-caret"/>
+        </article>}
+        {sideChat.error && <div className={`side-chat-error ${sideChat.status === "cancelled" ? "cancelled" : ""}`}>{sideChat.error}</div>}
+      </div>
+      <footer className="side-chat-composer">
+        <textarea
+          rows={1}
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+          placeholder="询问当前主线"
+          disabled={requesting}
+        />
+        {requesting
+          ? <button className="side-chat-stop" onClick={onCancel} aria-label="停止 BTW"><Icon name="stop" size={14}/></button>
+          : <button className="side-chat-send" onClick={() => void submit()} disabled={!input.trim() || sending} aria-label="发送 BTW"><Icon name="arrow-up" size={16}/></button>}
+      </footer>
+    </aside>
+  );
+}
+
 function ChatList({ sessions, activeId, disabled, onSelect }: { sessions: SessionSummary[]; activeId?: string; disabled: boolean; onSelect: (id: string) => void }) {
   if (sessions.length === 0) return <p className="empty-chat-list">还没有聊天</p>;
   return <div className="chat-list">{sessions.map((item) => (
     <button className={`chat-item ${item.id === activeId ? "active" : ""}`} disabled={disabled} key={item.id} onClick={() => onSelect(item.id)}>
       <span className="chat-title">{item.title}</span>
-      <span className="chat-meta"><i className={`chat-state state-${item.status}`}/>{STATUS_LABELS[item.status]} · {item.turnCount} 轮 · {formatListDate(item.updatedAt)}</span>
     </button>
   ))}</div>;
 }
@@ -512,10 +588,12 @@ export function App() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [showFullAccessWarning, setShowFullAccessWarning] = useState(false);
   const [selectedReviewPath, setSelectedReviewPath] = useState<string | null>(null);
-  const [reviewWidth, setReviewWidth] = useState<number | null>(null);
+  const [sideChat, setSideChat] = useState<EphemeralSideChatState | null>(null);
+  const [panelRatio, setPanelRatio] = useState(DEFAULT_PANEL_RATIO);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [composerCursor, setComposerCursor] = useState(0);
-  const [paletteMode, setPaletteMode] = useState<"chats" | "models" | null>(null);
+  const [paletteMode, setPaletteMode] = useState<"models" | null>(null);
   const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [notice, setNotice] = useState<{ level: "info" | "error"; text: string } | null>(null);
@@ -557,6 +635,8 @@ export function App() {
         setPermissionMode("ask");
       }
       if (event.type === "sessions_changed") setSessions(event.sessions);
+      if (event.type === "side_chat_snapshot") setSideChat(event.sideChat);
+      if (event.type === "side_chat_closed") setSideChat(null);
       if (event.type === "workspace_changed") {
         setWorkspaceRoot(event.workspaceRoot);
         setWorkspaces(event.workspaces);
@@ -582,6 +662,12 @@ export function App() {
     return () => { mounted = false; unsubscribe(); };
   }, []);
 
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
   const isRunning = Boolean(session && ACTIVE_STATUSES.includes(session.status));
   const isBusy = isRunning || Boolean(session?.pendingUndo);
   const hasRunningSession = workspaces.some((workspace) =>
@@ -594,6 +680,11 @@ export function App() {
     [session?.fileChanges],
   );
   const selectedReview = fileReviews.find((review) => review.path === selectedReviewPath);
+  const panelOpen = Boolean(selectedReview || sideChat);
+  const workbenchLayout = useMemo(
+    () => computeWorkbenchLayout(viewportWidth, panelRatio),
+    [viewportWidth, panelRatio],
+  );
   const activeTurn = session?.turns.find((turn) => turn.id === session.activeTurnId);
   const composerToken = useMemo(() => detectComposerToken(task, composerCursor), [task, composerCursor]);
 
@@ -620,6 +711,7 @@ export function App() {
 
   useEffect(() => {
     setSelectedReviewPath(null);
+    setSideChat(null);
     autoScrollRef.current = true;
     setShowJumpToLatest(false);
   }, [session?.id]);
@@ -731,8 +823,32 @@ export function App() {
     }
   };
 
-  const selectSlashCommand = (id: "chats" | "models" | "compress") => {
+  const openSideChat = async () => {
+    if (!session) return;
+    try {
+      setSelectedReviewPath(null);
+      setSideChat(await window.hammerCode.openSideChat());
+      setNotice(null);
+    } catch (error) {
+      setNotice({ level: "error", text: userFacingError(error) });
+    }
+  };
+
+  const closeSideChat = async () => {
+    const current = sideChat;
+    setSideChat(null);
+    if (!current) return;
+    try { await window.hammerCode.closeSideChat(current.id); }
+    catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
+  };
+
+  const selectSlashCommand = (id: "side_chat" | "models" | "compress") => {
     replaceActiveToken("");
+    if (id === "side_chat") {
+      setPaletteMode(null);
+      void openSideChat();
+      return;
+    }
     if (id === "compress") {
       setPaletteMode(null);
       void compressContext();
@@ -747,14 +863,13 @@ export function App() {
     setPaletteMode(null);
   };
 
-  const startReviewResize = (clientX: number) => {
-    const sidebarWidth = window.innerWidth <= 1080 ? 260 : 340;
-    const initial = reviewWidth ?? Math.round((window.innerWidth - sidebarWidth) * 0.382);
+  const startPanelResize = (_clientX: number) => {
+    document.body.classList.add("panel-resizing");
     const onMove = (event: PointerEvent) => {
-      const maximum = Math.max(320, Math.min(720, window.innerWidth - sidebarWidth - 360));
-      setReviewWidth(Math.max(280, Math.min(maximum, initial + clientX - event.clientX)));
+      setPanelRatio(panelRatioFromDivider(window.innerWidth, event.clientX));
     };
     const onUp = () => {
+      document.body.classList.remove("panel-resizing");
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
     };
@@ -843,13 +958,11 @@ export function App() {
   if (!bootstrap) return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
 
   const slashCommands = [
-    { id: "chats" as const, label: "/侧边聊天", description: "切换当前项目中的聊天", disabled: sessions.length === 0 },
-    { id: "models" as const, label: "/模型（API）", description: "选择 Fast 或 Strong", disabled: false },
+    { id: "side_chat" as const, label: "/侧边聊天", description: "临时只读 BTW 分支 · /btw", disabled: !session },
+    { id: "models" as const, label: "/模型（API）", description: "选择 Fast 或 Strong", disabled: isBusy },
     { id: "compress" as const, label: "/压缩上下文", description: "立即生成当前聊天的持久化记忆", disabled: !session || isBusy },
   ].filter((item) => !composerToken?.query || `${item.label}${item.description}`.toLocaleLowerCase().includes(composerToken.query.toLocaleLowerCase()));
-  const paletteCount = paletteMode === "chats"
-    ? sessions.length
-    : paletteMode === "models"
+  const paletteCount = paletteMode === "models"
       ? bootstrap.config.availableModels.length
       : composerToken?.kind === "mention"
         ? mentionEntries.length
@@ -859,11 +972,6 @@ export function App() {
   const paletteOpen = paletteCount > 0 || Boolean(paletteMode) || Boolean(composerToken);
 
   const selectPaletteItem = (index: number) => {
-    if (paletteMode === "chats") {
-      const target = sessions[index];
-      if (target) { setPaletteMode(null); void selectSession(target.id); }
-      return;
-    }
     if (paletteMode === "models") {
       const option = bootstrap.config.availableModels[index];
       if (option?.hasApiKey) { setPaletteMode(null); void persistSettings(option.ref, permissionMode); }
@@ -905,8 +1013,16 @@ export function App() {
     }
   };
 
+  const panelVisible = panelOpen && !workbenchLayout.panelCollapsed;
+  const layoutStyle = {
+    "--sidebar-column": `${workbenchLayout.sidebarWidth}px`,
+    "--main-column": `${workbenchLayout.mainWidth}px`,
+    "--panel-column": `${workbenchLayout.panelWidth}px`,
+  } as CSSProperties;
+  const composerLocked = !workspaceRoot || anotherSessionIsRunning || busy || Boolean(session?.pendingUndo);
+
   return (
-    <div className={`app-shell ${selectedReview ? "review-open" : ""}`} style={reviewWidth ? { "--review-column": `${reviewWidth}px` } as CSSProperties : undefined}>
+    <div className={`app-shell ${panelVisible ? "panel-open" : ""} ${panelOpen && workbenchLayout.panelCollapsed ? "panel-auto-collapsed" : ""}`} style={layoutStyle}>
       <aside className="sidebar">
         <div className="sidebar-drag"/>
         <header className="brand-row"><button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button></header>
@@ -939,7 +1055,7 @@ export function App() {
 
       <main className="workspace">
         <header className="topbar">
-          <div className="topbar-title"><Icon name={view === "settings" ? "gear" : "folder"} size={17}/><strong>{view === "settings" ? "设置" : session?.task.split(/\r?\n/, 1)[0]?.slice(0, 64) || "新对话"}</strong>{view === "chat" && workspaceRoot && <span>{folderName(workspaceRoot)}</span>}</div>
+          <div className="topbar-title"><Icon name={view === "settings" ? "gear" : "folder"} size={17}/><strong>{view === "settings" ? "设置" : session ? fallbackChatTitle(session.title ?? session.task) : "新对话"}</strong>{view === "chat" && workspaceRoot && <span>{folderName(workspaceRoot)}</span>}</div>
           <div className="top-actions">{isRunning && activeTurn && <div className="run-status" aria-label="任务正在运行"><span className="run-status-dot"/>运行中 · <ElapsedTime start={activeTurn.createdAt} prefix="已运行"/></div>}{session?.pendingUndo?.status === "executing" && <span className="undo-running"><Icon name="undo" size={14}/>正在撤销</span>}</div>
         </header>
 
@@ -952,7 +1068,10 @@ export function App() {
               {TERMINAL_STATUSES.includes(session.status) && (
                 <ChangeReviewPanel
                   reviews={fileReviews}
-                  onOpen={(review) => setSelectedReviewPath(review.path)}
+                  onOpen={(review) => {
+                    if (sideChat) void closeSideChat();
+                    setSelectedReviewPath(review.path);
+                  }}
                 />
               )}
             </div>
@@ -963,22 +1082,21 @@ export function App() {
 
         {view === "chat" && <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
-          <div className={`composer ${isBusy ? "disabled" : ""}`}>
-            {paletteOpen && !isBusy && <div className="composer-palette" role="listbox" aria-label={paletteMode === "chats" ? "侧边聊天" : paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : "命令"} onMouseDown={(event) => event.preventDefault()}>
-              <header><strong>{paletteMode === "chats" ? "侧边聊天" : paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : "命令"}</strong><span>↑↓ 选择 · Enter 确认 · Esc 关闭</span></header>
+          <div className={`composer ${composerLocked ? "disabled" : ""}`}>
+            {paletteOpen && !busy && !session?.pendingUndo && <div className="composer-palette" role="listbox" aria-label={paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : "命令"} onMouseDown={(event) => event.preventDefault()}>
+              <header><strong>{paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : "命令"}</strong><span>↑↓ 选择 · Enter 确认 · Esc 关闭</span></header>
               <div className="palette-list">
-                {paletteMode === "chats" ? sessions.map((item, index) => <button key={item.id} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name="file" size={15}/><span><strong>{item.title}</strong><small>{STATUS_LABELS[item.status]} · {item.turnCount} 轮</small></span></button>)
-                  : paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
+                {paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
                     : composerToken?.kind === "mention" ? (mentionEntries.length > 0 ? mentionEntries.map((entry, index) => <button key={entry.path} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={entry.kind === "directory" ? "folder" : "file"} size={15}/><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>) : <p>没有匹配的工作区条目</p>)
-                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "chats" ? "file" : command.id === "models" ? "gear" : "chevron"} size={15}/><span><strong>{command.label}</strong><small>{command.description}</small></span></button>)}
+                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" ? "gear" : "chevron"} size={15}/><span><strong>{command.label}</strong><small>{command.description}</small></span></button>)}
               </div>
             </div>}
-            <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={workspaceRoot ? (anotherSessionIsRunning ? "另一条聊天正在运行，结束后即可发送" : session ? "继续追问；输入 / 使用命令，输入 @ 引用文件" : "交给 HammerCode 一个开发任务；输入 / 或 @") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || anotherSessionIsRunning || busy} rows={3}/>
-            <div className="composer-footer">
+            <div className="composer-row">
+              <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={workspaceRoot ? (anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={1}/>
               <div className="composer-controls">
                 <ContextRing session={session} budget={bootstrap.config.contextTokenBudget} autoCompactRatio={bootstrap.config.autoCompactRatio}/>
-                <label><span>模型</span><select value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelRef, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select></label>
-                <label><span>权限</span><select value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select></label>
+                <select aria-label="模型" title="模型" value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelRef, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select>
+                <select aria-label="权限" title="权限" value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select>
               </div>
               {isRunning
                 ? <button key="stop" className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button>
@@ -988,14 +1106,27 @@ export function App() {
         </section>}
       </main>
 
-      {view === "chat" && selectedReview && session && (
+      {view === "chat" && panelVisible && selectedReview && session && (
         <DiffDrawer
           review={selectedReview}
           busy={isBusy}
           undoing={session.pendingUndo?.changeId === selectedReview.latestChangeId}
           onClose={() => setSelectedReviewPath(null)}
           onUndo={() => void requestUndo(selectedReview.latestChangeId)}
-          onResizeStart={startReviewResize}
+          onResizeStart={startPanelResize}
+        />
+      )}
+
+      {view === "chat" && panelVisible && sideChat && (
+        <SideChatPanel
+          sideChat={sideChat}
+          onClose={() => void closeSideChat()}
+          onSend={async (content) => {
+            try { await window.hammerCode.sendSideChat(sideChat.id, content); }
+            catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
+          }}
+          onCancel={() => void window.hammerCode.cancelSideChat(sideChat.id)}
+          onResizeStart={startPanelResize}
         />
       )}
 

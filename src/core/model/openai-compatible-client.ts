@@ -62,15 +62,14 @@ export function buildChatCompletionBody(
   const common: Record<string, unknown> = {
     model: config.model,
     messages: request.messages,
-    tools: request.tools,
     stream: true,
     max_tokens: config.maxOutputTokens,
   };
+  if (request.tools.length > 0) common.tools = request.tools;
   if (config.provider === "zhipu") {
     return {
       ...common,
-      tool_choice: "auto",
-      tool_stream: true,
+      ...(request.tools.length > 0 ? { tool_choice: "auto", tool_stream: true } : {}),
       temperature: 1,
       top_p: 0.95,
       thinking: { type: "enabled", clear_thinking: false },

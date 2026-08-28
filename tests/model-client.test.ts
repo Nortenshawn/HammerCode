@@ -69,6 +69,13 @@ describe("OpenAI-compatible provider requests", () => {
     expect(body).not.toHaveProperty("stream_options");
   });
 
+  it.each(["deepseek", "zhipu"] as const)("omits tool fields for %s read-only text requests", (provider) => {
+    const body = buildChatCompletionBody(config(provider), { ...request, tools: [] });
+    expect(body).not.toHaveProperty("tools");
+    expect(body).not.toHaveProperty("tool_choice");
+    expect(body).not.toHaveProperty("tool_stream");
+  });
+
   it("parses shared reasoning, content, fragmented tool calls, usage and DONE events", async () => {
     const payload = [
       { choices: [{ delta: { reasoning_content: "先检查" }, finish_reason: null }] },

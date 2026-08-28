@@ -2,10 +2,12 @@ import path from "node:path";
 import { dialog, type BrowserWindow } from "electron";
 import { z } from "zod";
 import { AgentRunner } from "../core/agent-runner";
+import { fallbackChatTitle, generateChatTitle } from "../core/chat-title";
 import { createContextMemory, estimateTokens } from "../core/context";
 import { reconcilePendingUndo } from "../core/file-state";
 import { prepareFileUndo } from "../core/file-undo";
 import { OpenAICompatibleChatClient } from "../core/model/openai-compatible-client";
+import { EphemeralSideChat } from "../core/side-chat";
 import { WorkspaceBoundary } from "../core/security/path-boundary";
 import { DEFAULT_SYSTEM_PROMPT } from "../core/system-prompt";
 import { LocalToolExecutor } from "../core/tools/tool-executor";
@@ -17,6 +19,7 @@ import {
   PERMISSION_MODES,
   type AgentSession,
   type AppBootstrap,
+  type EphemeralSideChatState,
   type ModelConnectionInput,
   type ModelRef,
   type RendererEvent,
@@ -50,12 +53,14 @@ const modelConnectionSchema = z.object({
   apiBaseUrl: z.string().trim().min(1).max(2_048),
   apiKey: z.string().trim().min(1).max(16_384).optional(),
 }).strict();
+const sideChatIdSchema = z.string().regex(/^btw_[a-zA-Z0-9_-]{1,200}$/);
+const sideChatContentSchema = z.string().trim().min(1).max(20_000);
 
 function toSummary(session: AgentSession): SessionSummary {
   return {
     id: session.id,
     workspaceRoot: session.workspaceRoot,
-    title: session.task.trim().split(/\r?\n/, 1)[0]?.slice(0, 120) || "未命名对话",
+    title: fallbackChatTitle(session.title ?? session.task),
     status: session.status,
     turnCount: session.turns.length,
     changedFileCount: new Set(
@@ -77,6 +82,9 @@ export class AppController {
   private approvals: PendingApprovalGateway | null = null;
   private undoAbort: AbortController | null = null;
   private runningSessionId: string | null = null;
+  private sideChat: EphemeralSideChat | null = null;
+  private readonly titleRequests = new Set<string>();
+  private readonly pendingTitles = new Map<string, string>();
   private navigationRevision = 0;
 
   constructor(
@@ -110,6 +118,7 @@ export class AppController {
       buttonLabel: "选择工作区",
     });
     if (result.canceled || !result.filePaths[0]) return null;
+    this.destroySideChat();
     const boundary = await WorkspaceBoundary.create(result.filePaths[0]);
     this.navigationRevision += 1;
     await this.store.setWorkspaceRoot(boundary.root);
@@ -128,6 +137,7 @@ export class AppController {
     if (boundary.root !== requestedRoot) {
       throw new HammerCodeError("工作区真实路径已经变化，请重新添加", "WORKSPACE_PATH_CHANGED", true);
     }
+    this.destroySideChat();
     this.navigationRevision += 1;
     await this.store.selectWorkspace(boundary.root);
     await this.refreshNavigation();
@@ -136,6 +146,7 @@ export class AppController {
 
   async newChat(): Promise<void> {
     if (this.isUndoBusy()) throw new HammerCodeError("请先完成或取消当前撤销", "SESSION_BUSY", true);
+    this.destroySideChat();
     this.navigationRevision += 1;
     this.currentSession = null;
     if (this.workspaceRoot) await this.store.setActive(null);
@@ -153,6 +164,7 @@ export class AppController {
     if (!this.workspaces.some((workspace) => workspace.root === session.workspaceRoot)) {
       throw new HammerCodeError("聊天所属工作区不在项目索引中", "SESSION_WORKSPACE_MISMATCH", true);
     }
+    this.destroySideChat();
     this.navigationRevision += 1;
     await this.store.selectWorkspace(session.workspaceRoot);
     await this.store.setActive(id);
@@ -209,6 +221,11 @@ export class AppController {
         clock: systemClock,
         ids: uuidGenerator,
         onSessionChange: async (session) => {
+          const pendingTitle = this.pendingTitles.get(session.id);
+          if (pendingTitle) {
+            session.title = pendingTitle;
+            this.pendingTitles.delete(session.id);
+          }
           this.runningSessionId ??= session.id;
           const selected =
             this.currentSession?.id === session.id ||
@@ -261,6 +278,7 @@ export class AppController {
         if (this.runningSessionId === snapshot.id) this.runningSessionId = null;
         if (this.runner === runner) this.runner = null;
         if (this.approvals === approvals) this.approvals = null;
+        void this.generateAndPersistTitle(snapshot.id);
       });
     return { sessionId: snapshot.id };
   }
@@ -298,6 +316,48 @@ export class AppController {
     this.upsertWorkspace(session);
     this.emit({ type: "session_snapshot", session });
     return session.contextMemory;
+  }
+
+  openSideChat(): EphemeralSideChatState {
+    const source = this.currentSession;
+    if (!source) throw new HammerCodeError("请先打开一条主聊天", "NO_SESSION", true);
+    if (this.sideChat?.snapshot.sourceSessionId === source.id) return this.sideChat.snapshot;
+    this.destroySideChat();
+    const selected = this.resolveModel(source.modelTier, source.modelRef);
+    const modelConfig = selected.config;
+    const model = this.createModelClient(modelConfig);
+    let sideChat: EphemeralSideChat;
+    sideChat = new EphemeralSideChat({
+      model,
+      modelTier: source.modelTier,
+      modelRef: selected.modelRef,
+      source,
+      clock: systemClock,
+      ids: uuidGenerator,
+      onChange: (state) => {
+        if (this.sideChat === sideChat) this.emit({ type: "side_chat_snapshot", sideChat: state });
+      },
+    });
+    this.sideChat = sideChat;
+    this.emit({ type: "side_chat_snapshot", sideChat: sideChat.snapshot });
+    return sideChat.snapshot;
+  }
+
+  sendSideChat(idInput: unknown, contentInput: unknown): void {
+    const sideChat = this.requireSideChat(idInput);
+    const content = sideChatContentSchema.parse(contentInput);
+    void sideChat.send(content).catch((error: unknown) => {
+      this.emit({ type: "notification", level: "error", message: toErrorMessage(error) });
+    });
+  }
+
+  cancelSideChat(idInput: unknown): void {
+    this.requireSideChat(idInput).cancel();
+  }
+
+  closeSideChat(idInput: unknown): void {
+    this.requireSideChat(idInput);
+    this.destroySideChat();
   }
 
   async searchWorkspaceEntries(input: unknown) {
@@ -366,6 +426,7 @@ export class AppController {
 
   async clearSession(): Promise<void> {
     if (this.isBusy()) throw new HammerCodeError("请先取消当前任务或撤销", "SESSION_BUSY", true);
+    this.destroySideChat();
     this.currentSession = null;
     this.runner = null;
     this.approvals = null;
@@ -417,6 +478,88 @@ export class AppController {
 
   private isBusy(): boolean {
     return this.isRunning() || this.isUndoBusy();
+  }
+
+  shutdown(): void {
+    this.destroySideChat(false);
+    this.cancelTask("应用关闭，正在运行的任务已安全取消；重新打开后不会重放工具调用。");
+  }
+
+  private requireSideChat(idInput: unknown): EphemeralSideChat {
+    const id = sideChatIdSchema.parse(idInput);
+    if (!this.sideChat || this.sideChat.snapshot.id !== id) {
+      throw new HammerCodeError("BTW 已关闭或不存在", "SIDE_CHAT_NOT_FOUND", true);
+    }
+    return this.sideChat;
+  }
+
+  private destroySideChat(emit = true): void {
+    if (!this.sideChat) return;
+    this.sideChat.close();
+    this.sideChat = null;
+    if (emit) this.emit({ type: "side_chat_closed" });
+  }
+
+  private createModelClient(
+    modelConfig: RuntimeConfig["models"]["fast"],
+    overrides: { thinking?: "enabled" | "disabled"; maxOutputTokens?: number; requestTimeoutMs?: number } = {},
+  ): OpenAICompatibleChatClient {
+    return new OpenAICompatibleChatClient({
+      provider: modelConfig.provider,
+      apiKey: modelConfig.apiKey,
+      baseUrl: modelConfig.apiBaseUrl,
+      model: modelConfig.model,
+      thinking: overrides.thinking ?? modelConfig.thinking,
+      reasoningEffort: modelConfig.reasoningEffort,
+      maxOutputTokens: overrides.maxOutputTokens ?? modelConfig.maxOutputTokens,
+      requestTimeoutMs: overrides.requestTimeoutMs ?? modelConfig.requestTimeoutMs,
+    });
+  }
+
+  private async generateAndPersistTitle(sessionId: string): Promise<void> {
+    if (this.titleRequests.has(sessionId)) return;
+    this.titleRequests.add(sessionId);
+    try {
+      const session = await this.store.loadSession(sessionId, { preserveActive: true });
+      if (!session || session.title) return;
+      const fast = this.resolvedRuntimeConfig().models.fast;
+      const finalAnswer = [...session.messages].reverse().find(
+        (message) => message.role === "assistant" && Boolean(message.content) && !message.toolCalls?.length,
+      );
+      let title = fallbackChatTitle(session.task);
+      if (fast.apiKey) {
+        try {
+          title = await generateChatTitle(
+            this.createModelClient(fast, {
+              thinking: "disabled",
+              maxOutputTokens: Math.min(256, fast.maxOutputTokens),
+              requestTimeoutMs: Math.min(15_000, fast.requestTimeoutMs),
+            }),
+            session.task,
+            finalAnswer?.role === "assistant" ? finalAnswer.content : "",
+            new AbortController().signal,
+          );
+        } catch {
+          // Title generation never changes the outcome of the main task.
+        }
+      }
+      if (this.runningSessionId === sessionId) {
+        this.pendingTitles.set(sessionId, title);
+        return;
+      }
+      const latest = await this.store.loadSession(sessionId, { preserveActive: true });
+      if (!latest || latest.title) return;
+      latest.title = title;
+      await this.store.save(latest, { activate: this.currentSession?.id === latest.id });
+      if (this.currentSession?.id === latest.id) this.currentSession = latest;
+      this.upsertSummary(latest);
+      this.upsertWorkspace(latest, this.currentSession?.id === latest.id);
+      this.emit(this.currentSession?.id === latest.id
+        ? { type: "session_snapshot", session: latest }
+        : { type: "session_updated", session: latest });
+    } finally {
+      this.titleRequests.delete(sessionId);
+    }
   }
 
   private async performUndo(

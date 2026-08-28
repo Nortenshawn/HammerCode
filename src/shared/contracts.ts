@@ -239,6 +239,7 @@ export interface AgentSession {
   workspaceRoot: string;
   status: SessionStatus;
   task: string;
+  title?: string;
   modelTier: ModelTier;
   modelRef?: ModelRef;
   permissionMode: PermissionMode;
@@ -362,6 +363,33 @@ export interface SessionSettings {
   permissionMode: PermissionMode;
 }
 
+export const SIDE_CHAT_STATUSES = ["idle", "requesting", "completed", "cancelled", "failed"] as const;
+export type SideChatStatus = (typeof SIDE_CHAT_STATUSES)[number];
+
+export interface SideChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  reasoningContent?: string;
+  createdAt: string;
+}
+
+export interface EphemeralSideChatState {
+  id: string;
+  sourceSessionId: string;
+  sourceTitle: string;
+  sourceUpdatedAt: string;
+  modelTier: ModelTier;
+  modelRef: ModelRef;
+  status: SideChatStatus;
+  messages: SideChatMessage[];
+  streamingText: string;
+  streamingReasoning: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface StartTaskInput extends SessionSettings {
   task: string;
 }
@@ -371,6 +399,8 @@ export type RendererEvent =
   | { type: "session_updated"; session: AgentSession }
   | { type: "session_cleared" }
   | { type: "sessions_changed"; sessions: SessionSummary[] }
+  | { type: "side_chat_snapshot"; sideChat: EphemeralSideChatState }
+  | { type: "side_chat_closed" }
   | {
       type: "config_updated";
       config: PublicRuntimeConfig;
@@ -394,6 +424,10 @@ export interface HammerCodeApi {
   testModelConnection(input: ModelConnectionInput): Promise<ModelConnectionTestResult>;
   saveModelConnection(input: ModelConnectionInput): Promise<ModelConnectionTestResult>;
   compressContext(): Promise<ChatContextMemory>;
+  openSideChat(): Promise<EphemeralSideChatState>;
+  sendSideChat(sideChatId: string, content: string): Promise<void>;
+  cancelSideChat(sideChatId: string): Promise<void>;
+  closeSideChat(sideChatId: string): Promise<void>;
   searchWorkspaceEntries(query: string): Promise<WorkspaceEntry[]>;
   startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;

@@ -117,6 +117,8 @@ describe("session persistence", () => {
     const second = createSession("session_second", "修复类型错误", "2026-08-27T02:00:00.000Z");
 
     await store.save(first);
+    first.title = "项目结构检查";
+    await store.save(first);
     await store.save(second);
     let state = await store.loadState();
     expect(state.sessions.map((item) => item.id)).toEqual(["session_second", "session_first"]);
@@ -126,6 +128,8 @@ describe("session persistence", () => {
     await store.setActive("session_first");
     state = await store.loadState();
     expect(state.activeSession?.task).toBe("检查项目结构");
+    expect(state.activeSession?.title).toBe("项目结构检查");
+    expect(state.sessions.find((item) => item.id === "session_first")?.title).toBe("项目结构检查");
     expect(state.sessions).toHaveLength(2);
   });
 

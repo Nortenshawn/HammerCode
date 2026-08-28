@@ -85,6 +85,16 @@ function registerIpc(appController: AppController): void {
     appController.saveModelConnection(input),
   );
   handle("hammercode:compress-context", () => appController.compressContext());
+  handle("hammercode:open-side-chat", () => appController.openSideChat());
+  handle("hammercode:send-side-chat", (sideChatId: unknown, content: unknown) =>
+    appController.sendSideChat(sideChatId, content),
+  );
+  handle("hammercode:cancel-side-chat", (sideChatId: unknown) =>
+    appController.cancelSideChat(sideChatId),
+  );
+  handle("hammercode:close-side-chat", (sideChatId: unknown) =>
+    appController.closeSideChat(sideChatId),
+  );
   handle("hammercode:search-workspace-entries", (query: unknown) =>
     appController.searchWorkspaceEntries(query),
   );
@@ -107,5 +117,5 @@ app.whenReady().then(createWindow).catch((error: unknown) => {
 app.on("window-all-closed", () => app.quit());
 
 app.on("before-quit", () => {
-  controller?.cancelTask("应用关闭，正在运行的任务已安全取消；重新打开后不会重放工具调用。");
+  controller?.shutdown();
 });

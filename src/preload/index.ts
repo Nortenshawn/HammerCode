@@ -15,6 +15,13 @@ const api: HammerCodeApi = {
   saveModelConnection: (input) =>
     ipcRenderer.invoke("hammercode:save-model-connection", input),
   compressContext: () => ipcRenderer.invoke("hammercode:compress-context"),
+  openSideChat: () => ipcRenderer.invoke("hammercode:open-side-chat"),
+  sendSideChat: (sideChatId, content) =>
+    ipcRenderer.invoke("hammercode:send-side-chat", sideChatId, content),
+  cancelSideChat: (sideChatId) =>
+    ipcRenderer.invoke("hammercode:cancel-side-chat", sideChatId),
+  closeSideChat: (sideChatId) =>
+    ipcRenderer.invoke("hammercode:close-side-chat", sideChatId),
   searchWorkspaceEntries: (query) =>
     ipcRenderer.invoke("hammercode:search-workspace-entries", query),
   startTask: (request) => ipcRenderer.invoke("hammercode:start-task", request),

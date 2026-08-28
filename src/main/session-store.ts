@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { closeUnresolvedToolCalls } from "../core/session-recovery";
+import { fallbackChatTitle } from "../shared/chat-title";
 import {
   MODEL_TIERS,
   PERMISSION_MODES,
@@ -198,6 +199,7 @@ const sessionSchema = z.object({
   workspaceRoot: z.string(),
   status: z.enum(SESSION_STATUSES),
   task: z.string(),
+  title: z.string().max(120).optional(),
   modelTier: z.enum(MODEL_TIERS).optional(),
   modelRef: z.string().min(1).max(1_000).optional(),
   permissionMode: z.enum(PERMISSION_MODES).optional(),
@@ -359,6 +361,7 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
     workspaceRoot: parsed.workspaceRoot,
     status: parsed.status,
     task: parsed.task,
+    title: parsed.title,
     modelTier: parsed.modelTier ?? turns.at(-1)?.modelTier ?? "fast",
     modelRef: builtinModelRef(parsed.modelTier ?? turns.at(-1)?.modelTier ?? defaultModelTier),
     permissionMode: parsed.permissionMode ?? defaultPermissionMode,
@@ -395,7 +398,7 @@ function toSummary(session: AgentSession): SessionSummary {
   return {
     id: session.id,
     workspaceRoot: session.workspaceRoot,
-    title: session.task.trim().split(/\r?\n/, 1)[0]?.slice(0, 120) || "未命名对话",
+    title: fallbackChatTitle(session.title ?? session.task),
     status: session.status,
     turnCount: session.turns.length,
     changedFileCount: new Set(
