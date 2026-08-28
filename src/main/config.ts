@@ -12,7 +12,7 @@ const modelConfigSchema = z.object({
   model: z.string().min(1),
   thinking: z.enum(["enabled", "disabled"]),
   reasoningEffort: z.enum(["low", "high", "max"]),
-  maxOutputTokens: z.number().int().min(256).max(131_072),
+  maxOutputTokens: z.number().int().min(256).max(384_000),
   requestTimeoutMs: z.number().int().min(5_000).max(600_000),
 });
 const configSchema = z.object({
@@ -57,7 +57,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     : [path.join(app.getAppPath(), ".env"), path.join(app.getPath("userData"), ".env")];
   for (const configPath of localConfigPaths) dotenv.config({ path: configPath, quiet: true });
 
-  const requestTimeoutMs = readInteger(process.env.HAMMERCODE_REQUEST_TIMEOUT_MS, 180_000);
+  const requestTimeoutMs = readInteger(process.env.HAMMERCODE_REQUEST_TIMEOUT_MS, 600_000);
   const parsed = configSchema.safeParse({
     models: {
       fast: {
@@ -88,7 +88,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
         maxOutputTokens: readInteger(
           process.env.HAMMERCODE_FAST_MAX_OUTPUT_TOKENS ??
             process.env.HAMMERCODE_MAX_OUTPUT_TOKENS,
-          16_384,
+          32_768,
         ),
         requestTimeoutMs,
       },
@@ -104,7 +104,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
         reasoningEffort: process.env.HAMMERCODE_STRONG_REASONING_EFFORT ?? "max",
         maxOutputTokens: readInteger(
           process.env.HAMMERCODE_STRONG_MAX_OUTPUT_TOKENS,
-          16_384,
+          32_768,
         ),
         requestTimeoutMs,
       },
@@ -118,6 +118,13 @@ export function loadRuntimeConfig(): RuntimeConfig {
   if (!parsed.success) {
     const safeIssues = parsed.error.issues.map((issue) => issue.path.join(".")).join("、");
     throw new HammerCodeError(`运行配置无效：${safeIssues}`, "INVALID_CONFIG", true);
+  }
+  if (parsed.data.models.strong.maxOutputTokens > 131_072) {
+    throw new HammerCodeError(
+      "运行配置无效：models.strong.maxOutputTokens 超过 GLM-5.3-Flash 的 128K 上限",
+      "INVALID_CONFIG",
+      true,
+    );
   }
   for (const model of Object.values(parsed.data.models)) validateEndpoint(model.apiBaseUrl);
   return parsed.data;

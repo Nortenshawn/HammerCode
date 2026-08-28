@@ -17,10 +17,10 @@
 
 - 当前提供 `fast` 与 `strong` 两个显式模型档位：`fast` 默认使用 `deepseek-v4-flash`，默认 OpenAI-compatible base URL 为 `https://api.deepseek.com`；`strong` 默认使用 `glm-5.3-flash`，默认智谱 base URL 为 `https://open.bigmodel.cn/api/paas/v4`。两者都使用 `POST /chat/completions`、Bearer 鉴权、SSE 流式输出和 function tool calling。
 - 模型档位、模型名、endpoint、思考模式、推理强度、输出预算和请求超时必须集中配置，不得散落硬编码在 agent core 中。每个 turn 必须固化实际模型档位，不允许运行中切换或在失败时静默回退到另一模型。
-- DeepSeek V4 的思考模式通过请求字段 `thinking: { type: "enabled" | "disabled" }` 控制，当前默认开启；`reasoning_effort` 只允许经过配置校验的 `low`、`high` 或 `max`。
+- DeepSeek V4 的思考模式通过请求字段 `thinking: { type: "enabled" | "disabled" }` 控制，当前默认开启；`reasoning_effort` 只允许经过配置校验的 `low`、`high` 或 `max`，日常 agent 任务默认使用 `high`。思考模式请求不得发送官方明确不兼容的 `tool_choice`。
 - GLM-5.3-Flash 的 `thinking.type` 只允许 `enabled`，默认发送 `thinking.clear_thinking: false`、`reasoning_effort: max`、`stream: true` 和 `tool_stream: true`。应用必须按厂商配置生成请求体，不得把 DeepSeek 专用字段无条件发送给智谱，反之亦然。
 - 流式解析必须兼容文本、`reasoning_content`、分片 `tool_calls`、`[DONE]` 以及 `stop`、`tool_calls`、`length`、`content_filter`、`insufficient_system_resource` 等结束原因。模型返回的 tool call 参数始终按不可信 JSON 处理。
-- 官方公布的模型上下文与输出上限只能作为能力上限，不能直接作为应用默认值。应用必须设置更保守且可配置的输入预算、单次输出上限、工具结果上限和 agent 轮次上限。
+- 官方公布的模型上下文与输出上限只能作为能力上限，不能直接作为应用默认值。DeepSeek V4 当前输出能力上限按 384K 校验，GLM-5.3-Flash 按 128K 校验；应用默认两档均为 32K 单次输出、600 秒请求超时，并保持输入预算、输出预算、工具结果上限和 agent 轮次上限可配置。
 - 新增 Responses API、厂商扩展或其他模型时，必须先更新 `docs/DEVELOPMENT_PLAN.md` 并保持本地工具安全边界；OpenAI-compatible 模型应优先复用同一模型端口，不在核心循环中散布厂商分支。
 - 本节依据 2026-08-28 查阅的 DeepSeek 与智谱官方 API 文档维护；接口升级时应先核对各自官方模型页、Chat Completions、Tool Calls 和更新日志，再调整兼容层与测试。
 
@@ -116,7 +116,7 @@
 ## 在线端到端测试沙箱
 
 - `/Users/norten/Developer/HammerTest` 是用户明确授权的可破坏在线验收工作区。需要真实模型、文件副作用或命令执行验证时，只能在解析真实路径后确认仍为该目录的前提下创建、修改和删除测试内容，不得把 HammerCode 仓库或其他目录当作在线测试目标。
-- 涉及模型协议、agent 循环、工具、审批、会话持久化、连续对话或桌面交互的重大改动，除离线自动测试外，必须尽可能使用当前已配置的真实 DeepSeek API 在该沙箱完成在线端到端测试。服务不可用时应记录失败阶段和可重试方式，不得用模拟测试冒充在线测试通过。
+- 涉及模型协议、agent 循环、工具、审批、会话持久化、连续对话或桌面交互的重大改动，除离线自动测试外，必须尽可能使用当前已配置的真实 Fast 与 Strong 模型在该沙箱完成在线端到端测试；仅影响单一 provider 时至少实测对应模型。服务不可用时应记录失败阶段和可重试方式，不得用模拟测试冒充在线测试通过。
 - 在线验收至少应覆盖：从空目录读取事实、经界面审批创建或修改文件、经界面审批运行验证命令、同一聊天继续追问且不重放旧副作用、重启后恢复会话，以及通过反向 diff 审批撤销最近文件修改。
 - 在线测试必须沿用正式应用的配置加载和安全边界，不得为了测试绕过审批、路径检查或本地工具。可以由应用读取现有本地环境配置，但测试代码、命令输出和报告均不得读取、打印、复制或持久化真实 `.env` 与 API key。
 - 每轮在线测试应使用可识别的测试文件或运行标记，并在交付说明中记录模型、覆盖场景、实际副作用和最终结果；测试产物默认保留在 HammerTest 供人工复核，除非用户要求清理。

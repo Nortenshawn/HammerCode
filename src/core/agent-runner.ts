@@ -34,6 +34,7 @@ export class AgentRunner {
   private session: AgentSession | null = null;
   private runAbort: AbortController | null = null;
   private running = false;
+  private cancellationDetail = "任务已由用户取消";
 
   constructor(
     private readonly dependencies: AgentDependencies,
@@ -140,8 +141,9 @@ export class AgentRunner {
     return this.runPreparedTurn("用户继续对话");
   }
 
-  cancel(): void {
-    this.runAbort?.abort(new DOMException("用户取消任务", "AbortError"));
+  cancel(detail = "任务已由用户取消"): void {
+    this.cancellationDetail = detail;
+    this.runAbort?.abort(new DOMException(detail, "AbortError"));
   }
 
   private assertCanRun(input: string): void {
@@ -151,6 +153,7 @@ export class AgentRunner {
 
   private async runPreparedTurn(startReason: string): Promise<AgentSession> {
     this.running = true;
+    this.cancellationDetail = "任务已由用户取消";
     const abort = new AbortController();
     this.runAbort = abort;
     try {
@@ -164,7 +167,7 @@ export class AgentRunner {
         () => this.dependencies.ids.next("message"),
       );
       if (isAbortError(error) || abort.signal.aborted) {
-        await this.terminate("cancelled", "任务已由用户取消");
+        await this.terminate("cancelled", this.cancellationDetail);
       } else {
         const reason: TerminationReason =
           error instanceof HammerCodeError && error.code === "CONTEXT_OVERFLOW"
@@ -420,7 +423,7 @@ export class AgentRunner {
     const turn = this.currentTurn();
     session.terminationReason = reason;
     turn.terminationReason = reason;
-    if (reason !== "completed" && reason !== "cancelled") {
+    if (reason !== "completed") {
       session.error = detail;
       turn.error = detail;
     }

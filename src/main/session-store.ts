@@ -339,10 +339,6 @@ function sortSummaries(items: SessionSummary[]): SessionSummary[] {
   return items.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
-function sortWorkspaces(items: WorkspaceSummary[]): WorkspaceSummary[] {
-  return items.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-}
-
 export class SessionStore {
   private readonly dataDirectory: string;
   private readonly indexPath: string;
@@ -357,8 +353,9 @@ export class SessionStore {
     this.legacyPath = path.join(dataDirectory, "active-session.json");
   }
 
-  async loadState(): Promise<SessionStoreState> {
+  async loadState(options: { liveSessionIds?: readonly string[] } = {}): Promise<SessionStoreState> {
     const index = await this.readIndex();
+    const liveSessionIds = new Set(options.liveSessionIds ?? []);
     const workspaceSummaries: WorkspaceSummary[] = [];
     let activeSession: AgentSession | null = null;
     let activeSessions: SessionSummary[] = [];
@@ -366,7 +363,7 @@ export class SessionStore {
       const sessions: AgentSession[] = [];
       const validIds: string[] = [];
       for (const id of workspace.sessionIds) {
-        const session = await this.readSession(id);
+        const session = await this.readSession(id, liveSessionIds.has(id));
         if (!session || session.workspaceRoot !== workspace.root) continue;
         validIds.push(id);
         sessions.push(session);
@@ -389,7 +386,9 @@ export class SessionStore {
     return {
       activeSession,
       sessions: activeSessions,
-      workspaces: sortWorkspaces(workspaceSummaries),
+      // Keep the explicit insertion order from the index. Selecting a project or
+      // chat must not make the sidebar jump by moving that project to the top.
+      workspaces: workspaceSummaries,
       workspaceRoot: index.activeWorkspaceRoot,
     };
   }
@@ -398,12 +397,12 @@ export class SessionStore {
     return (await this.loadState()).activeSession;
   }
 
-  async loadSession(id: string): Promise<AgentSession | null> {
+  async loadSession(id: string, options: { preserveActive?: boolean } = {}): Promise<AgentSession | null> {
     this.assertSafeSessionId(id);
-    return this.readSession(id);
+    return this.readSession(id, options.preserveActive === true);
   }
 
-  async save(session: AgentSession): Promise<void> {
+  async save(session: AgentSession, options: { activate?: boolean } = {}): Promise<void> {
     this.assertSafeSessionId(session.id);
     const parsed = sessionSchema.parse(session);
     const normalized = normalizeSessionShape(parsed);
@@ -421,13 +420,15 @@ export class SessionStore {
       index.workspaces.push(workspace);
     }
     await this.writeSession(normalized);
-    workspace.activeSessionId = normalized.id;
     workspace.sessionIds = [
       normalized.id,
       ...workspace.sessionIds.filter((id) => id !== normalized.id),
     ];
     workspace.updatedAt = now;
-    index.activeWorkspaceRoot = workspace.root;
+    if (options.activate !== false) {
+      workspace.activeSessionId = normalized.id;
+      index.activeWorkspaceRoot = workspace.root;
+    }
     await this.writeIndex(index);
   }
 
@@ -573,7 +574,7 @@ export class SessionStore {
     }
   }
 
-  private async readSession(id: string): Promise<AgentSession | null> {
+  private async readSession(id: string, preserveActive = false): Promise<AgentSession | null> {
     if (!SAFE_SESSION_ID.test(id)) return null;
     const raw = await this.readText(this.sessionPath(id));
     if (raw === null) return null;
@@ -581,7 +582,7 @@ export class SessionStore {
       const parsed = sessionSchema.safeParse(JSON.parse(raw) as unknown);
       if (!parsed.success || parsed.data.id !== id) return null;
       const session = normalizeSessionShape(parsed.data);
-      if (ACTIVE_STATUSES.has(session.status)) {
+      if (ACTIVE_STATUSES.has(session.status) && !preserveActive) {
         const normalized = this.normalizeInterrupted(session);
         await this.writeSession(normalized);
         return normalized;

@@ -22,6 +22,7 @@ async function createWindow(): Promise<void> {
       nodeIntegration: false,
       sandbox: true,
       devTools: !app.isPackaged,
+      backgroundThrottling: false,
     },
   });
 
@@ -70,7 +71,9 @@ function registerIpc(appController: AppController): void {
   );
   handle("hammercode:start-task", (request: unknown) => appController.startTask(request));
   handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));
-  handle("hammercode:cancel-task", () => appController.cancelTask());
+  handle("hammercode:cancel-task", () =>
+    appController.cancelTask("用户点击了停止按钮，任务已安全取消。"),
+  );
   handle("hammercode:resolve-approval", (id: unknown, approved: unknown) =>
     appController.resolveApproval(id, approved),
   );
@@ -85,5 +88,5 @@ app.whenReady().then(createWindow).catch((error: unknown) => {
 app.on("window-all-closed", () => app.quit());
 
 app.on("before-quit", () => {
-  controller?.cancelTask();
+  controller?.cancelTask("应用关闭，正在运行的任务已安全取消；重新打开后不会重放工具调用。");
 });

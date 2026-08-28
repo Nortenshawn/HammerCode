@@ -143,6 +143,7 @@ describe("session persistence", () => {
     await store.save(secondA);
     await store.save(onlyB);
     let state = await store.loadState();
+    expect(state.workspaces.map((workspace) => workspace.root)).toEqual([rootA, rootB]);
     expect(state.workspaceRoot).toBe(rootB);
     expect(state.activeSession?.id).toBe("session_b1");
     expect(state.workspaces).toEqual(expect.arrayContaining([
@@ -153,6 +154,7 @@ describe("session persistence", () => {
 
     await store.selectWorkspace(rootA);
     state = await store.loadState();
+    expect(state.workspaces.map((workspace) => workspace.root)).toEqual([rootA, rootB]);
     expect(state.workspaceRoot).toBe(rootA);
     expect(state.activeSession?.id).toBe("session_a2");
     expect(state.sessions.map((item) => item.id)).toEqual(["session_a2", "session_a1"]);
@@ -161,6 +163,7 @@ describe("session persistence", () => {
     await store.selectWorkspace(rootB);
     await store.selectWorkspace(rootA);
     state = await store.loadState();
+    expect(state.workspaces.map((workspace) => workspace.root)).toEqual([rootA, rootB]);
     expect(state.activeSession?.id).toBe("session_a1");
   });
 
@@ -187,6 +190,30 @@ describe("session persistence", () => {
     await store.selectWorkspace(rootB);
     state = await store.loadState();
     expect(state.activeSession?.id).toBe("session_clear_b");
+  });
+
+  it("saves a background session without changing the selected workspace or chat", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const rootA = "/tmp/project-background-a";
+    const rootB = "/tmp/project-background-b";
+    const running = createSession("session_running", "Running", "2026-08-27T01:00:00.000Z", rootA);
+    const selected = createSession("session_selected", "Selected", "2026-08-27T02:00:00.000Z", rootB);
+    await store.save(running);
+    await store.save(selected);
+
+    running.status = "requesting";
+    running.updatedAt = "2026-08-27T03:00:00.000Z";
+    await store.save(running, { activate: false });
+
+    const state = await store.loadState({ liveSessionIds: ["session_running"] });
+    expect(state.workspaceRoot).toBe(rootB);
+    expect(state.activeSession?.id).toBe("session_selected");
+    expect(state.workspaces.find((workspace) => workspace.root === rootA)).toMatchObject({
+      activeSessionId: "session_running",
+      sessions: [expect.objectContaining({ id: "session_running", status: "requesting" })],
+    });
   });
 
   it("migrates a v1 workspace index and old chat settings to safe defaults", async () => {

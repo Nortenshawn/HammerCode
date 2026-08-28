@@ -7,6 +7,8 @@ export interface FileReview {
   path: string;
   kind: "create" | "modify" | "delete";
   diff: string;
+  additions: number;
+  deletions: number;
   truncated: boolean;
   appliedChangeCount: number;
   revertedChangeCount: number;
@@ -23,6 +25,22 @@ interface FileReviewAccumulator {
 
 function sameContent(left: string | null, right: string | null): boolean {
   return left === right;
+}
+
+function countDiffLines(diff: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  let inHunk = false;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (line.startsWith("+")) additions += 1;
+    else if (line.startsWith("-")) deletions += 1;
+  }
+  return { additions, deletions };
 }
 
 export function buildFileReviews(changes: FileChange[]): FileReview[] {
@@ -66,10 +84,13 @@ export function buildFileReviews(changes: FileChange[]): FileReview[] {
       "当前工作区",
       { context: 4 },
     );
+    const counts = countDiffLines(fullDiff);
     reviews.push({
       path: item.path,
       kind,
       diff: fullDiff.slice(0, MAX_REVIEW_DIFF_CHARS),
+      additions: counts.additions,
+      deletions: counts.deletions,
       truncated: fullDiff.length > MAX_REVIEW_DIFF_CHARS,
       appliedChangeCount: item.applied.length,
       revertedChangeCount: item.revertedCount,

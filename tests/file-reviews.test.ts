@@ -27,7 +27,7 @@ describe("cumulative file reviews", () => {
       change("change_2", "two\n", "three\n", "applied"),
     ]);
     expect(reviews).toHaveLength(1);
-    expect(reviews[0]).toMatchObject({ path: "src/a.ts", appliedChangeCount: 2, latestChangeId: "change_2" });
+    expect(reviews[0]).toMatchObject({ path: "src/a.ts", additions: 1, deletions: 1, appliedChangeCount: 2, latestChangeId: "change_2" });
     expect(reviews[0].diff).toContain("-one");
     expect(reviews[0].diff).toContain("+three");
   });
@@ -37,8 +37,17 @@ describe("cumulative file reviews", () => {
       change("change_1", "one\n", "two\n", "applied"),
       change("change_2", "two\n", "three\n", "reverted"),
     ]);
-    expect(reviews[0]).toMatchObject({ appliedChangeCount: 1, revertedChangeCount: 1, latestChangeId: "change_1" });
+    expect(reviews[0]).toMatchObject({ additions: 1, deletions: 1, appliedChangeCount: 1, revertedChangeCount: 1, latestChangeId: "change_1" });
     expect(reviews[0].diff).toContain("+two");
     expect(reviews[0].diff).not.toContain("+three");
+  });
+
+  it("counts changed source lines that resemble unified diff headers", () => {
+    const reviews = buildFileReviews([
+      change("change_1", "--old marker\n", "++new marker\n", "applied"),
+    ]);
+    expect(reviews[0]).toMatchObject({ additions: 1, deletions: 1 });
+    expect(reviews[0].diff).toContain("---old marker");
+    expect(reviews[0].diff).toContain("+++new marker");
   });
 });

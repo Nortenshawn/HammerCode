@@ -17,7 +17,9 @@ Preload（contextBridge）
         ▼
 Electron Main
   ├─ AppController / SessionStore
-  ├─ DeepSeekChatClient
+  ├─ OpenAICompatibleChatClient
+  │    ├─ DeepSeek provider profile
+  │    └─ Zhipu provider profile
   └─ AgentRunner
        ├─ Context manager
        ├─ Tool executor
@@ -37,7 +39,7 @@ API key 只由 main process 从环境变量或 `.env` 加载。公开配置只�
 2. 请求 OpenAI-compatible `/chat/completions` 流并逐片展示思考与文本。
 3. 按 tool call 索引组装 `id`、函数名和 JSON 参数。
 4. 若模型正常 `stop`，会话完成；若请求工具，则逐个校验并执行。
-5. 只读工具自动执行。写入、删除和命令进入审批；拒绝作为结构化 tool result 回传模型。成功的文本文件副作用同时写入可逆变更记录。
+5. 只读工具自动执行。写入、精确文本替换、删除和命令先经过相同的安全准备阶段，再按聊天权限进入逐项审批或完全访问自动批准；拒绝作为结构化 tool result 回传模型。成功的文本文件副作用同时写入可逆变更记录。
 6. 工具结果加入消息历史，开始下一轮。达到轮次上限即失败终止，不会无限循环。
 
 `length`、`content_filter`、`insufficient_system_resource`、无效分片、上下文溢出、网络错误和用户取消都有明确终止路径。
@@ -75,13 +77,15 @@ API key 只由 main process 从环境变量或 `.env` 加载。公开配置只�
 
 Token 估算采用保守字符启发式，不假装等于厂商 tokenizer。超过预算时保留初始用户目标和最近消息，把较早内容转换为明确标注的“本地压缩摘要”；压缩后仍超预算则终止，不发送不可控请求。
 
-会话快照区分 turn、用户消息、助手消息、tool call、tool result、状态转换、文件变更和终止原因。单个工作区可以保存多条独立聊天，由小型索引记录当前选中项，每条聊天分别使用 0600 权限临时文件加原子 rename 保存。启动时如果发现任一聊天上次状态为请求中、待审批或执行中，会闭合未完成的 tool call、标记为 `interrupted/failed`，不会继续或重放副作用；旧版单会话文件会在首次启动时安全迁移并补齐 turn 归属。
+会话快照区分 turn、用户消息、助手消息、tool call、tool result、状态转换、文件变更和终止原因。多工作区 v2 索引保存项目顺序、每个项目的聊天集合和活动聊天；每条聊天分别使用 0600 权限临时文件加原子 rename 保存。启动时如果发现聊天上次状态为请求中、待审批或执行中，会闭合未完成的 tool call、标记为 `interrupted/failed`，不会继续或重放副作用。应用运行期间，main process 会显式传入正在执行的聊天 ID，因此用户切换项目或聊天时不会把真实后台任务误判为崩溃残留。
+
+AgentRunner 每次只运行一条聊天，但导航与执行生命周期解耦。后台 session 更新通过独立事件写回对应项目，不改变用户当前选中项；全局仍只允许一项 agent 任务，避免审批与工具执行并发竞态。
 
 ## 当前限制
 
-- 首版为单窗口、单工作区，可保存多条独立聊天；不实现多工作区、多 agent、MCP 或插件。
+- 当前为单窗口、多工作区导航和单 agent 执行；暂不并行运行多条 agent 任务。
 - 文本搜索是本地安全实现，优先可靠性而非大型仓库索引性能。
-- 当前写工具是完整文本文件替换；二进制文件及大于 1 MB 的文件不支持写入、删除审查或撤销。
+- 文本修改同时支持完整写入和 `old_text → new_text` 精确替换；二进制文件及大于 1 MB 的文件不支持写入、删除审查或撤销。
 - 撤销粒度是单次文件副作用，不是 Git commit；命令产生的文件变化不进入自动撤销记录。
 - 高风险命令阻断采用明确规则集，不能证明任意 shell 字符串安全，因此剩余命令始终要求人工审批。
 - Token 预算为估算值；服务端仍可能因其 tokenizer 或动态限制返回长度错误。

@@ -60,6 +60,21 @@ const schemas = {
         }),
     })
     .strict(),
+  edit_file: z
+    .object({
+      path: z.string(),
+      old_text: z.string().min(1).max(MAX_WRITE_BYTES),
+      new_text: z
+        .string()
+        .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_WRITE_BYTES, {
+          message: "替换内容超过大小限制",
+        })
+        .refine((value) => !value.includes("\0"), {
+          message: "二进制内容不支持安全修改与撤销",
+        }),
+      replace_all: z.boolean().default(false),
+    })
+    .strict(),
   delete_file: z.object({ path: z.string() }).strict(),
   run_command: z
     .object({
@@ -140,6 +155,8 @@ export class LocalToolExecutor implements ToolExecutorPort {
         return this.prepareSearch(call);
       case "write_file":
         return this.prepareWrite(call, now);
+      case "edit_file":
+        return this.prepareEdit(call, now);
       case "delete_file":
         return this.prepareDelete(call, now);
       case "run_command":
@@ -299,7 +316,6 @@ export class LocalToolExecutor implements ToolExecutorPort {
         patch,
       },
       execute: async () => {
-        const checkedTarget = await this.boundary.resolveForWrite(args.path);
         const current = await readWorkspaceTextState(this.boundary, args.path);
         if (current.hash !== previousHash) {
           return {
@@ -309,25 +325,7 @@ export class LocalToolExecutor implements ToolExecutorPort {
             errorCode: "STALE_WRITE",
           };
         }
-        await mkdir(path.dirname(checkedTarget), { recursive: true });
-        await this.boundary.resolveForWrite(args.path);
-        const temp = path.join(
-          path.dirname(checkedTarget),
-          `.${path.basename(checkedTarget)}.hammercode-${process.pid}-${Date.now()}`,
-        );
-        const handle = await open(temp, "wx", 0o600);
-        try {
-          await handle.writeFile(args.content, "utf8");
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
-        try {
-          await rename(temp, checkedTarget);
-        } catch (error) {
-          await rm(temp, { force: true });
-          throw error;
-        }
+        await this.writeTextAtomically(args.path, args.content);
         return {
           ok: true,
           summary: `${previous === null ? "已创建" : "已修改"} ${args.path}`,
@@ -337,6 +335,115 @@ export class LocalToolExecutor implements ToolExecutorPort {
         };
       },
     };
+  }
+
+  private async prepareEdit(call: ToolCall, now: Date): Promise<PreparedToolCall> {
+    const args = parseArguments("edit_file", call.arguments);
+    await this.boundary.resolveForWrite(args.path);
+    const previousState = await readWorkspaceTextState(this.boundary, args.path);
+    if (previousState.content === null || previousState.hash === null) {
+      throw new HammerCodeError("精确修改要求目标文件已经存在", "PATH_NOT_FOUND", true);
+    }
+    const occurrences = previousState.content.split(args.old_text).length - 1;
+    if (occurrences === 0) {
+      throw new HammerCodeError("待替换文本与当前文件不匹配，请重新读取文件", "EDIT_TEXT_NOT_FOUND", true);
+    }
+    if (occurrences > 1 && !args.replace_all) {
+      throw new HammerCodeError(
+        `待替换文本出现 ${occurrences} 次；请提供更精确的 old_text 或显式启用 replace_all`,
+        "EDIT_TEXT_AMBIGUOUS",
+        true,
+      );
+    }
+    const nextContent = args.replace_all
+      ? previousState.content.split(args.old_text).join(args.new_text)
+      : `${previousState.content.slice(0, previousState.content.indexOf(args.old_text))}${args.new_text}${previousState.content.slice(previousState.content.indexOf(args.old_text) + args.old_text.length)}`;
+    if (Buffer.byteLength(nextContent, "utf8") > MAX_WRITE_BYTES) {
+      throw new HammerCodeError("修改后的文件超过大小限制", "FILE_TOO_LARGE", true);
+    }
+    if (nextContent === previousState.content) {
+      throw new HammerCodeError("精确修改没有产生内容变化", "NO_CHANGES", true);
+    }
+    const patch = createTwoFilesPatch(
+      `a/${args.path}`,
+      `b/${args.path}`,
+      previousState.content,
+      nextContent,
+      "修改前",
+      "修改后",
+      { context: 4 },
+    );
+    const request = approval(
+      this.ids,
+      call,
+      "精确修改文件",
+      `${args.replace_all ? `替换 ${occurrences} 处` : "替换 1 处"} ${args.path}`,
+      patch,
+      "write",
+      now,
+    );
+    return {
+      call,
+      summary: request.description,
+      target: args.path,
+      requiresApproval: true,
+      approvalRequest: request,
+      fileMutation: {
+        path: args.path,
+        kind: "modify",
+        beforeContent: previousState.content,
+        afterContent: nextContent,
+        beforeHash: previousState.hash,
+        afterHash: hashText(nextContent),
+        patch,
+      },
+      execute: async () => {
+        const current = await readWorkspaceTextState(this.boundary, args.path);
+        if (current.hash !== previousState.hash) {
+          return {
+            ok: false,
+            summary: "文件在审批期间发生变化，未修改",
+            output: "请重新读取文件并生成新的精确修改。",
+            errorCode: "STALE_WRITE",
+          };
+        }
+        await this.writeTextAtomically(args.path, nextContent);
+        return {
+          ok: true,
+          summary: `已精确修改 ${args.path}`,
+          output: patch.slice(0, 120_000),
+          truncated: patch.length > 120_000,
+          metadata: {
+            path: args.path,
+            replacements: args.replace_all ? occurrences : 1,
+            bytesWritten: Buffer.byteLength(nextContent),
+          },
+        };
+      },
+    };
+  }
+
+  private async writeTextAtomically(relativePath: string, content: string): Promise<void> {
+    const checkedTarget = await this.boundary.resolveForWrite(relativePath);
+    await mkdir(path.dirname(checkedTarget), { recursive: true });
+    await this.boundary.resolveForWrite(relativePath);
+    const temp = path.join(
+      path.dirname(checkedTarget),
+      `.${path.basename(checkedTarget)}.hammercode-${process.pid}-${Date.now()}`,
+    );
+    const handle = await open(temp, "wx", 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await rename(temp, checkedTarget);
+    } catch (error) {
+      await rm(temp, { force: true });
+      throw error;
+    }
   }
 
   private async prepareDelete(call: ToolCall, now: Date): Promise<PreparedToolCall> {

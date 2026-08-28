@@ -175,10 +175,11 @@ describe("agent runner", () => {
     );
     const run = runner.start("cancel me", "/tmp");
     await Promise.resolve();
-    runner.cancel();
+    runner.cancel("应用关闭，任务已安全取消");
     const result = await run;
     expect(result.status).toBe("cancelled");
     expect(result.terminationReason).toBe("cancelled");
+    expect(result.error).toBe("应用关闭，任务已安全取消");
   });
 
   it("continues the same chat after completion without replaying historical work", async () => {

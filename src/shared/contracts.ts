@@ -245,6 +245,7 @@ export interface StartTaskInput extends SessionSettings {
 
 export type RendererEvent =
   | { type: "session_snapshot"; session: AgentSession }
+  | { type: "session_updated"; session: AgentSession }
   | { type: "session_cleared" }
   | { type: "sessions_changed"; sessions: SessionSummary[] }
   | {

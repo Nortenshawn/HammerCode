@@ -17,7 +17,7 @@ import type {
   ToolTrace,
   WorkspaceSummary,
 } from "../../shared/contracts";
-import { buildFileReviews } from "../../shared/file-reviews";
+import { buildFileReviews, type FileReview } from "../../shared/file-reviews";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -80,6 +80,27 @@ function formatListDate(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
 }
 
+function formatElapsed(start: string, end?: string): string {
+  const milliseconds = Math.max(0, new Date(end ?? Date.now()).getTime() - new Date(start).getTime());
+  const seconds = Math.floor(milliseconds / 1_000);
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${remainder} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分`;
+}
+
+function ElapsedTime({ start, end, prefix }: { start: string; end?: string; prefix: string }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (end) return;
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [end]);
+  return <span className="elapsed-time">{prefix} {formatElapsed(start, end)}</span>;
+}
+
 function parseToolContent(content: string): { summary: string; output: string; ok: boolean } {
   try {
     const value = JSON.parse(content) as { summary?: unknown; output?: unknown; ok?: unknown };
@@ -111,7 +132,7 @@ function upsertSessionSummary(items: SessionSummary[], session: AgentSession): S
   return [summary, ...items.filter((item) => item.id !== summary.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
-function upsertWorkspaceSession(items: WorkspaceSummary[], session: AgentSession): WorkspaceSummary[] {
+function upsertWorkspaceSession(items: WorkspaceSummary[], session: AgentSession, activate = true): WorkspaceSummary[] {
   return items.map((workspace) => {
     if (workspace.root !== session.workspaceRoot) return workspace;
     const sessions = upsertSessionSummary(workspace.sessions, session);
@@ -119,7 +140,7 @@ function upsertWorkspaceSession(items: WorkspaceSummary[], session: AgentSession
       ...workspace,
       sessions,
       sessionCount: sessions.length,
-      activeSessionId: session.id,
+      activeSessionId: activate ? session.id : workspace.activeSessionId,
       updatedAt: session.updatedAt,
     };
   });
@@ -127,6 +148,60 @@ function upsertWorkspaceSession(items: WorkspaceSummary[], session: AgentSession
 
 function Markdown({ children }: { children: string }) {
   return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>;
+}
+
+interface RenderedDiffLine {
+  kind: "addition" | "deletion" | "context" | "hunk" | "meta";
+  text: string;
+  oldLine?: number;
+  newLine?: number;
+}
+
+function renderDiffLines(diff: string): RenderedDiffLine[] {
+  const rendered: RenderedDiffLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (match) {
+        oldLine = Number(match[1]);
+        newLine = Number(match[2]);
+      }
+      rendered.push({ kind: "hunk", text: line });
+      continue;
+    }
+    if (!inHunk && (line.startsWith("---") || line.startsWith("+++"))) continue;
+    if (line.startsWith("Index:") || line.startsWith("====") || line.startsWith("diff ")) {
+      rendered.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (line.startsWith("+")) {
+      rendered.push({ kind: "addition", text: line.slice(1), newLine });
+      newLine += 1;
+      continue;
+    }
+    if (line.startsWith("-")) {
+      rendered.push({ kind: "deletion", text: line.slice(1), oldLine });
+      oldLine += 1;
+      continue;
+    }
+    if (line.startsWith("\\")) {
+      rendered.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (!inHunk) {
+      rendered.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (!line && rendered.length > 0) continue;
+    rendered.push({ kind: "context", text: line.startsWith(" ") ? line.slice(1) : line, oldLine, newLine });
+    oldLine += 1;
+    newLine += 1;
+  }
+  return rendered;
 }
 
 const TOOL_STATUS_LABELS: Record<ToolTrace["status"], string> = {
@@ -192,7 +267,7 @@ function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession;
         <span className={`activity-orb ${terminal ? "done" : "live"}`}>{terminal ? <Icon name="check" size={13}/> : <span/>}</span>
         <span className="work-process-title">
           <strong>{terminal ? "过程与工具调用" : STATUS_LABELS[turn.status]}</strong>
-          <small>{terminal ? `${tracesForTurn.length} 次工具调用 · ${turnLabel}` : `实时展示模型思考与执行链 · ${turnLabel}`}</small>
+          <small>{terminal ? <>{tracesForTurn.length} 次工具调用 · {turnLabel} · <ElapsedTime start={turn.createdAt} end={turn.finishedAt ?? turn.updatedAt} prefix="用时"/></> : <>实时展示模型思考与执行链 · {turnLabel} · <ElapsedTime start={turn.createdAt} prefix="已运行"/></>}</small>
         </span>
         <Icon name="chevron" size={15}/>
       </summary>
@@ -246,27 +321,47 @@ function TurnView({ session, turn, index }: { session: AgentSession; turn: Agent
   );
 }
 
-function ChangeReviewPanel({ session, busy, onUndo }: { session: AgentSession; busy: boolean; onUndo: (changeId: string) => void }) {
-  const reviews = useMemo(() => buildFileReviews(session.fileChanges), [session.fileChanges]);
+function ChangeReviewPanel({ reviews, onOpen }: { reviews: FileReview[]; onOpen: (review: FileReview) => void }) {
   if (reviews.length === 0) return null;
+  const additions = reviews.reduce((total, review) => total + review.additions, 0);
+  const deletions = reviews.reduce((total, review) => total + review.deletions, 0);
   return (
     <section className="change-review" aria-label="文件修改审阅">
-      <header className="change-review-heading"><div><span className="review-icon"><Icon name="file" size={15}/></span><span><strong>文件修改</strong><small>{reviews.length} 个文件 · 本聊天累计 diff</small></span></div></header>
+      <header className="change-review-heading"><div><span className="review-icon"><Icon name="file" size={17}/></span><span><strong>已编辑 {reviews.length} 个文件</strong><small>点击文件，在右侧查看渲染后的变更</small></span></div><span className="review-total"><b>+{additions}</b><em>-{deletions}</em></span></header>
       <div className="review-files">
-        {reviews.map((review) => {
-          const undoing = session.pendingUndo?.changeId === review.latestChangeId;
-          return (
-            <article className="review-file" key={review.path}>
-              <header>
-                <div><code>{review.path}</code><span className={`change-kind kind-${review.kind}`}>{review.kind === "create" ? "新增" : review.kind === "delete" ? "删除" : "修改"}</span></div>
-                <button disabled={busy} onClick={() => onUndo(review.latestChangeId)}><Icon name="undo" size={14}/>{undoing ? (session.pendingUndo?.status === "executing" ? "正在撤销" : "等待确认") : "撤销最近修改"}</button>
-              </header>
-              <details><summary>查看累计 diff <span>{review.appliedChangeCount} 次生效修改{review.revertedChangeCount ? ` · ${review.revertedChangeCount} 次已撤销` : ""}</span></summary><pre className="diff-view">{review.diff}{review.truncated ? "\n…（diff 已截断）" : ""}</pre></details>
-            </article>
-          );
-        })}
+        {reviews.map((review) => (
+          <button className="review-file" key={review.path} onClick={() => onOpen(review)}>
+            <span className="review-file-name"><code>{review.path}</code><small>{review.kind === "create" ? "新增" : review.kind === "delete" ? "删除" : "修改"}</small></span>
+            <span className="review-stats"><b>+{review.additions}</b><em>-{review.deletions}</em><Icon name="chevron" size={16}/></span>
+          </button>
+        ))}
       </div>
     </section>
+  );
+}
+
+function DiffDrawer({ review, busy, undoing, onClose, onUndo }: { review: FileReview; busy: boolean; undoing: boolean; onClose: () => void; onUndo: () => void }) {
+  const lines = useMemo(() => renderDiffLines(review.diff), [review.diff]);
+  return (
+    <aside className="diff-drawer" aria-label={`${review.path} 变更详情`}>
+      <header className="diff-drawer-header">
+        <div><small>文件变更</small><strong>{review.path}</strong></div>
+        <button className="diff-close" onClick={onClose} aria-label="关闭变更详情">×</button>
+      </header>
+      <div className="diff-drawer-summary"><span>{review.kind === "create" ? "新增文件" : review.kind === "delete" ? "删除文件" : "修改文件"}</span><b>+{review.additions}</b><em>-{review.deletions}</em><small>{review.appliedChangeCount} 次生效修改{review.revertedChangeCount ? ` · ${review.revertedChangeCount} 次已撤销` : ""}</small></div>
+      <div className="rendered-diff" role="table" aria-label="渲染后的代码差异">
+        {lines.map((line, index) => (
+          <div className={`diff-line diff-line-${line.kind}`} role="row" key={`${index}-${line.kind}`}>
+            <span className="diff-old" role="cell">{line.oldLine ?? ""}</span>
+            <span className="diff-new" role="cell">{line.newLine ?? ""}</span>
+            <span className="diff-marker" role="cell">{line.kind === "addition" ? "+" : line.kind === "deletion" ? "−" : ""}</span>
+            <code role="cell">{line.text || " "}</code>
+          </div>
+        ))}
+        {review.truncated && <div className="diff-truncated">diff 超过安全展示上限，已截断</div>}
+      </div>
+      <footer className="diff-drawer-actions"><button disabled={busy} onClick={onUndo}><Icon name="undo" size={16}/>{undoing ? "正在撤销" : "撤销最近修改"}</button></footer>
+    </aside>
   );
 }
 
@@ -285,6 +380,7 @@ export function App() {
   const [session, setSession] = useState<AgentSession | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [expandedRoots, setExpandedRoots] = useState<Set<string>>(new Set());
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [modelTier, setModelTier] = useState<ModelTier>("fast");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("ask");
@@ -292,8 +388,11 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [showFullAccessWarning, setShowFullAccessWarning] = useState(false);
+  const [selectedReviewPath, setSelectedReviewPath] = useState<string | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [notice, setNotice] = useState<{ level: "info" | "error"; text: string } | null>(null);
   const conversationRef = useRef<HTMLElement>(null);
+  const autoScrollRef = useRef(true);
 
   useEffect(() => {
     let mounted = true;
@@ -303,6 +402,7 @@ export function App() {
       setSession(value.session);
       setSessions(value.sessions);
       setWorkspaces(value.workspaces);
+      setExpandedRoots(new Set(value.workspaces.map((workspace) => workspace.root)));
       setWorkspaceRoot(value.workspaceRoot);
       setModelTier(value.session?.modelTier ?? "fast");
       setPermissionMode(value.session?.permissionMode ?? "ask");
@@ -315,6 +415,10 @@ export function App() {
         setModelTier(event.session.modelTier);
         setPermissionMode(event.session.permissionMode);
       }
+      if (event.type === "session_updated") {
+        setSessions((items) => upsertSessionSummary(items, event.session));
+        setWorkspaces((items) => upsertWorkspaceSession(items, event.session, false));
+      }
       if (event.type === "session_cleared") {
         setSession(null);
         setModelTier("fast");
@@ -326,6 +430,11 @@ export function App() {
         setWorkspaces(event.workspaces);
         setSessions(event.sessions);
         setSession(event.session);
+        setExpandedRoots((roots) => {
+          const next = new Set(roots);
+          if (event.workspaceRoot) next.add(event.workspaceRoot);
+          return next;
+        });
         setModelTier(event.session?.modelTier ?? "fast");
         setPermissionMode(event.session?.permissionMode ?? "ask");
       }
@@ -336,13 +445,53 @@ export function App() {
 
   const isRunning = Boolean(session && ACTIVE_STATUSES.includes(session.status));
   const isBusy = isRunning || Boolean(session?.pendingUndo);
+  const hasRunningSession = workspaces.some((workspace) =>
+    workspace.sessions.some((item) => ACTIVE_STATUSES.includes(item.status)),
+  );
+  const anotherSessionIsRunning = hasRunningSession && !isRunning;
   const selectedModel = bootstrap?.config.models[modelTier];
+  const fileReviews = useMemo(
+    () => session ? buildFileReviews(session.fileChanges) : [],
+    [session?.fileChanges],
+  );
+  const selectedReview = fileReviews.find((review) => review.path === selectedReviewPath);
+  const activeTurn = session?.turns.find((turn) => turn.id === session.activeTurnId);
+
+  useEffect(() => {
+    setSelectedReviewPath(null);
+    autoScrollRef.current = true;
+    setShowJumpToLatest(false);
+  }, [session?.id]);
+
+  useEffect(() => {
+    if (selectedReviewPath && !selectedReview) setSelectedReviewPath(null);
+  }, [selectedReview, selectedReviewPath]);
 
   useEffect(() => {
     const conversation = conversationRef.current;
-    if (!conversation || !session) return;
-    conversation.scrollTo({ top: conversation.scrollHeight, behavior: "smooth" });
+    if (!conversation || !session || !autoScrollRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      conversation.scrollTo({ top: conversation.scrollHeight });
+      setShowJumpToLatest(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [session?.updatedAt]);
+
+  const handleConversationScroll = () => {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+    const atBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 72;
+    autoScrollRef.current = atBottom;
+    setShowJumpToLatest(!atBottom);
+  };
+
+  const scrollToLatest = () => {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+    autoScrollRef.current = true;
+    conversation.scrollTo({ top: conversation.scrollHeight, behavior: "smooth" });
+    setShowJumpToLatest(false);
+  };
 
   const chooseWorkspace = async () => {
     setBusy(true);
@@ -351,22 +500,38 @@ export function App() {
     finally { setBusy(false); }
   };
 
-  const selectWorkspace = async (root: string) => {
-    if (isBusy || root === workspaceRoot) return;
+  const toggleWorkspace = (root: string) => {
+    setExpandedRoots((roots) => {
+      const next = new Set(roots);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  };
+
+  const startChatInWorkspace = async (root: string) => {
+    if (busy) return;
     setBusy(true);
-    try { await window.hammerCode.selectWorkspace(root); setNotice(null); }
-    catch (error) { setNotice({ level: "error", text: String(error) }); }
-    finally { setBusy(false); }
+    try {
+      if (root !== workspaceRoot) await window.hammerCode.selectWorkspace(root);
+      await window.hammerCode.newChat();
+      setTask("");
+      setNotice(null);
+    } catch (error) {
+      setNotice({ level: "error", text: String(error) });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const newChat = async () => {
-    if (isBusy) return;
+    if (busy) return;
     try { await window.hammerCode.newChat(); setTask(""); setNotice(null); }
     catch (error) { setNotice({ level: "error", text: String(error) }); }
   };
 
   const selectSession = async (id: string) => {
-    if (isBusy || id === session?.id) return;
+    if (id === session?.id) return;
     setBusy(true);
     try { await window.hammerCode.selectSession(id); setNotice(null); }
     catch (error) { setNotice({ level: "error", text: String(error) }); }
@@ -425,8 +590,10 @@ export function App() {
   };
 
   const submit = async () => {
-    if (!task.trim() || !workspaceRoot || isBusy || !selectedModel?.hasApiKey) return;
+    if (!task.trim() || !workspaceRoot || isBusy || anotherSessionIsRunning || !selectedModel?.hasApiKey) return;
     setBusy(true);
+    autoScrollRef.current = true;
+    setShowJumpToLatest(false);
     setNotice(null);
     try {
       await window.hammerCode.startTask({ task, modelTier, permissionMode });
@@ -449,18 +616,22 @@ export function App() {
   if (!bootstrap) return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${selectedReview ? "review-open" : ""}`}>
       <aside className="sidebar">
         <div className="sidebar-drag"/>
         <header className="brand-row"><button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button></header>
-        <nav className="primary-nav" aria-label="主要导航"><button className="new-chat-button" onClick={newChat} disabled={isBusy || !workspaceRoot}><Icon name="plus" size={17}/><span>新对话</span></button></nav>
+        <nav className="primary-nav" aria-label="主要导航"><button className="new-chat-button" onClick={newChat} disabled={busy || !workspaceRoot}><Icon name="plus" size={17}/><span>新对话</span></button></nav>
         <section className="projects-section">
-          <div className="section-heading"><span>项目</span><button onClick={chooseWorkspace} disabled={busy || isBusy} aria-label="添加工作区"><Icon name="plus" size={14}/></button></div>
+          <div className="section-heading"><span>项目</span><button onClick={chooseWorkspace} disabled={busy || Boolean(session?.pendingUndo)} aria-label="添加工作区"><Icon name="plus" size={14}/></button></div>
           <div className="project-list">
             {workspaces.map((workspace) => (
               <section className={`project-group ${workspace.root === workspaceRoot ? "active" : ""}`} key={workspace.root}>
-                <button className="project-row" onClick={() => void selectWorkspace(workspace.root)} disabled={busy || isBusy} title={workspace.root}><Icon name="folder" size={17}/><span>{workspace.name}</span><small>{workspace.sessionCount || ""}</small></button>
-                <ChatList sessions={workspace.sessions} activeId={session?.id} disabled={isBusy || busy} onSelect={(id) => void selectSession(id)}/>
+                <div className="project-row" title={workspace.root}><button className="project-toggle" onClick={() => toggleWorkspace(workspace.root)} aria-expanded={expandedRoots.has(workspace.root)}><span className={`project-chevron ${expandedRoots.has(workspace.root) ? "expanded" : ""}`}><Icon name="chevron" size={14}/></span><Icon name="folder" size={18}/><span>{workspace.name}</span><small>{workspace.sessionCount || ""}</small></button><button className="project-add-chat" onClick={() => void startChatInWorkspace(workspace.root)} disabled={busy || Boolean(session?.pendingUndo)} aria-label={`在 ${workspace.name} 中新建聊天`} title="新建聊天"><Icon name="plus" size={14}/></button></div>
+                {expandedRoots.has(workspace.root) && (
+                  workspace.sessions.length > 0
+                    ? <ChatList sessions={workspace.sessions} activeId={session?.id} disabled={busy || Boolean(session?.pendingUndo)} onSelect={(id) => void selectSession(id)}/>
+                    : <button className="empty-chat-list" disabled={busy || Boolean(session?.pendingUndo)} onClick={() => void startChatInWorkspace(workspace.root)}>在此项目开始新对话</button>
+                )}
               </section>
             ))}
             {workspaces.length === 0 && <button className="empty-projects" onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}
@@ -475,34 +646,53 @@ export function App() {
       <main className="workspace">
         <header className="topbar">
           <div className="topbar-title"><Icon name="folder" size={17}/><strong>{session?.task.split(/\r?\n/, 1)[0]?.slice(0, 64) || "新对话"}</strong>{workspaceRoot && <span>{folderName(workspaceRoot)}</span>}</div>
-          <div className="top-actions">{isRunning && <button className="stop-button" onClick={() => window.hammerCode.cancelTask()}><Icon name="stop" size={14}/>停止</button>}{session?.pendingUndo?.status === "executing" && <span className="undo-running"><Icon name="undo" size={14}/>正在撤销</span>}</div>
+          <div className="top-actions">{isRunning && activeTurn && <div className="run-status" aria-label="任务正在运行"><span className="run-status-dot"/>运行中 · <ElapsedTime start={activeTurn.createdAt} prefix="已运行"/></div>}{session?.pendingUndo?.status === "executing" && <span className="undo-running"><Icon name="undo" size={14}/>正在撤销</span>}</div>
         </header>
 
-        <section className="conversation" ref={conversationRef}>
+        <section className="conversation" ref={conversationRef} onScroll={handleConversationScroll}>
           {!session ? (
             <div className="welcome"><img className="welcome-mark" src={logoUrl} alt="HammerCode"/><h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1><p>{workspaceRoot ? (permissionMode === "ask" ? "描述你想完成的开发任务。文件修改和命令执行会逐次向你确认。" : "完全访问已选中：普通工作区操作会自动执行，安全边界仍然生效。") : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>{!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}{workspaceRoot && !selectedModel?.hasApiKey && <div className="config-warning">{modelTier === "fast" ? "Fast" : "Strong"} 模型尚未配置本地 API key，请切换可用模型或完成配置。</div>}</div>
           ) : (
             <div className="message-stack">
               {session.turns.map((turn, index) => <TurnView key={turn.id} session={session} turn={turn} index={index}/>)}
-              {TERMINAL_STATUSES.includes(session.status) && <ChangeReviewPanel session={session} busy={isBusy} onUndo={(id) => void requestUndo(id)}/>}
+              {TERMINAL_STATUSES.includes(session.status) && (
+                <ChangeReviewPanel
+                  reviews={fileReviews}
+                  onOpen={(review) => setSelectedReviewPath(review.path)}
+                />
+              )}
             </div>
           )}
         </section>
 
+        {showJumpToLatest && <button className="jump-latest" onClick={scrollToLatest}><span>↓</span>{isRunning ? "查看最新进度" : "回到底部"}</button>}
+
         <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${isBusy ? "disabled" : ""}`}>
-            <textarea value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} placeholder={workspaceRoot ? (session ? "继续追问、补充要求或纠正上一轮" : "交给 HammerCode 一个开发任务") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || busy} rows={3}/>
+            <textarea value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); void submit(); } }} placeholder={workspaceRoot ? (anotherSessionIsRunning ? "另一条聊天正在运行，结束后即可发送" : session ? "继续追问、补充要求或纠正上一轮" : "交给 HammerCode 一个开发任务") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || anotherSessionIsRunning || busy} rows={3}/>
             <div className="composer-footer">
               <div className="composer-controls">
                 <label><span>模型</span><select value={modelTier} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelTier, permissionMode)}><option value="fast">Fast · {bootstrap.config.models.fast.model}</option><option value="strong" disabled={!bootstrap.config.models.strong.hasApiKey}>Strong · {bootstrap.config.models.strong.model}{bootstrap.config.models.strong.hasApiKey ? "" : "（未配置）"}</option></select></label>
                 <label><span>权限</span><select value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select></label>
               </div>
-              {isRunning ? <button className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button> : <button className="send-button" onClick={submit} disabled={!task.trim() || !workspaceRoot || isBusy || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
+              {isRunning
+                ? <button key="stop" className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button>
+                : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={!task.trim() || !workspaceRoot || isBusy || anotherSessionIsRunning || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
             </div>
           </div>
         </section>
       </main>
+
+      {selectedReview && session && (
+        <DiffDrawer
+          review={selectedReview}
+          busy={isBusy}
+          undoing={session.pendingUndo?.changeId === selectedReview.latestChangeId}
+          onClose={() => setSelectedReviewPath(null)}
+          onUndo={() => void requestUndo(selectedReview.latestChangeId)}
+        />
+      )}
 
       {showFullAccessWarning && (
         <div className="approval-backdrop"><section className="approval-panel permission-warning" role="dialog" aria-modal="true" aria-labelledby="full-access-title">

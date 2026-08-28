@@ -49,6 +49,7 @@ describe("OpenAI-compatible provider requests", () => {
       stream_options: { include_usage: true },
     });
     expect(body).not.toHaveProperty("tool_stream");
+    expect(body).not.toHaveProperty("tool_choice");
     expect(body).not.toHaveProperty("temperature");
   });
 
@@ -57,6 +58,7 @@ describe("OpenAI-compatible provider requests", () => {
     expect(body).toMatchObject({
       model: "glm-5.3-flash",
       stream: true,
+      tool_choice: "auto",
       tool_stream: true,
       max_tokens: 4096,
       reasoning_effort: "max",

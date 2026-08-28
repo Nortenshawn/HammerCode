@@ -63,6 +63,8 @@ export class AppController {
   private runner: AgentRunner | null = null;
   private approvals: PendingApprovalGateway | null = null;
   private undoAbort: AbortController | null = null;
+  private runningSessionId: string | null = null;
+  private navigationRevision = 0;
 
   constructor(
     private readonly window: BrowserWindow,
@@ -86,9 +88,7 @@ export class AppController {
   }
 
   async chooseWorkspace(): Promise<string | null> {
-    if (this.isBusy()) {
-      throw new HammerCodeError("任务或撤销运行时不能切换工作区", "SESSION_BUSY", true);
-    }
+    if (this.isUndoBusy()) throw new HammerCodeError("撤销运行时不能切换工作区", "SESSION_BUSY", true);
     const result = await dialog.showOpenDialog(this.window, {
       title: "选择 HammerCode 工作区",
       properties: ["openDirectory", "createDirectory"],
@@ -96,6 +96,7 @@ export class AppController {
     });
     if (result.canceled || !result.filePaths[0]) return null;
     const boundary = await WorkspaceBoundary.create(result.filePaths[0]);
+    this.navigationRevision += 1;
     await this.store.setWorkspaceRoot(boundary.root);
     await this.refreshNavigation();
     this.emitWorkspaceChanged();
@@ -103,9 +104,7 @@ export class AppController {
   }
 
   async selectWorkspace(input: unknown): Promise<void> {
-    if (this.isBusy()) {
-      throw new HammerCodeError("任务或撤销运行时不能切换工作区", "SESSION_BUSY", true);
-    }
+    if (this.isUndoBusy()) throw new HammerCodeError("撤销运行时不能切换工作区", "SESSION_BUSY", true);
     const requestedRoot = workspaceRootSchema.parse(input);
     if (!this.workspaces.some((workspace) => workspace.root === requestedRoot)) {
       throw new HammerCodeError("找不到这个工作区", "WORKSPACE_NOT_FOUND", true);
@@ -114,36 +113,35 @@ export class AppController {
     if (boundary.root !== requestedRoot) {
       throw new HammerCodeError("工作区真实路径已经变化，请重新添加", "WORKSPACE_PATH_CHANGED", true);
     }
+    this.navigationRevision += 1;
     await this.store.selectWorkspace(boundary.root);
     await this.refreshNavigation();
-    this.runner = null;
-    this.approvals = null;
     this.emitWorkspaceChanged();
   }
 
   async newChat(): Promise<void> {
-    if (this.isBusy()) throw new HammerCodeError("请先停止当前任务或撤销", "SESSION_BUSY", true);
+    if (this.isUndoBusy()) throw new HammerCodeError("请先完成或取消当前撤销", "SESSION_BUSY", true);
+    this.navigationRevision += 1;
     this.currentSession = null;
-    this.runner = null;
-    this.approvals = null;
     if (this.workspaceRoot) await this.store.setActive(null);
     await this.refreshNavigation();
     this.emitWorkspaceChanged();
   }
 
   async selectSession(idInput: unknown): Promise<void> {
-    if (this.isBusy()) throw new HammerCodeError("任务或撤销运行时不能切换聊天", "SESSION_BUSY", true);
+    if (this.isUndoBusy()) throw new HammerCodeError("撤销运行时不能切换聊天", "SESSION_BUSY", true);
     const id = sessionIdSchema.parse(idInput);
-    const session = await this.store.loadSession(id);
+    const session = await this.store.loadSession(id, {
+      preserveActive: id === this.runningSessionId,
+    });
     if (!session) throw new HammerCodeError("找不到这条聊天记录", "SESSION_NOT_FOUND", true);
     if (!this.workspaces.some((workspace) => workspace.root === session.workspaceRoot)) {
       throw new HammerCodeError("聊天所属工作区不在项目索引中", "SESSION_WORKSPACE_MISMATCH", true);
     }
+    this.navigationRevision += 1;
     await this.store.selectWorkspace(session.workspaceRoot);
     await this.store.setActive(id);
     await this.refreshNavigation();
-    this.runner = null;
-    this.approvals = null;
     this.emitWorkspaceChanged();
   }
 
@@ -151,7 +149,7 @@ export class AppController {
     const settings = settingsSchema.parse(input);
     const session = this.currentSession;
     if (!session) throw new HammerCodeError("当前没有聊天", "NO_SESSION", true);
-    if (this.isBusy()) {
+    if (this.runningSessionId === session.id || this.isUndoBusy()) {
       throw new HammerCodeError("任务、审批或撤销运行时不能切换模型或权限", "SESSION_BUSY", true);
     }
     if (settings.modelTier !== session.modelTier && !this.config.models[settings.modelTier].apiKey) {
@@ -200,6 +198,7 @@ export class AppController {
       maxOutputTokens: modelConfig.maxOutputTokens,
       requestTimeoutMs: modelConfig.requestTimeoutMs,
     });
+    const startNavigationRevision = this.navigationRevision;
     const runner = new AgentRunner(
       {
         model,
@@ -208,11 +207,18 @@ export class AppController {
         clock: systemClock,
         ids: uuidGenerator,
         onSessionChange: async (session) => {
-          this.currentSession = session;
+          this.runningSessionId ??= session.id;
+          const selected =
+            this.currentSession?.id === session.id ||
+            (this.navigationRevision === startNavigationRevision &&
+              this.workspaceRoot === session.workspaceRoot);
+          if (selected) this.currentSession = session;
           this.upsertSummary(session);
-          this.upsertWorkspace(session);
-          await this.store.save(session);
-          this.emit({ type: "session_snapshot", session });
+          this.upsertWorkspace(session, selected);
+          await this.store.save(session, { activate: selected });
+          this.emit(selected
+            ? { type: "session_snapshot", session }
+            : { type: "session_updated", session });
         },
       },
       {
@@ -233,17 +239,24 @@ export class AppController {
     const snapshot = runner.snapshot;
     if (!snapshot) throw new HammerCodeError("无法创建会话", "SESSION_CREATE_FAILED");
     this.currentSession = snapshot;
+    this.runningSessionId = snapshot.id;
     this.upsertSummary(snapshot);
     this.upsertWorkspace(snapshot);
     this.emit({ type: "session_snapshot", session: snapshot });
-    void run.catch((error: unknown) => {
-      this.emit({ type: "notification", level: "error", message: toErrorMessage(error) });
-    });
+    void run
+      .catch((error: unknown) => {
+        this.emit({ type: "notification", level: "error", message: toErrorMessage(error) });
+      })
+      .finally(() => {
+        if (this.runningSessionId === snapshot.id) this.runningSessionId = null;
+        if (this.runner === runner) this.runner = null;
+        if (this.approvals === approvals) this.approvals = null;
+      });
     return { sessionId: snapshot.id };
   }
 
-  cancelTask(): void {
-    this.runner?.cancel();
+  cancelTask(detail = "任务已由用户取消"): void {
+    this.runner?.cancel(detail);
     this.approvals?.cancel();
     this.undoAbort?.abort(new DOMException("用户取消撤销", "AbortError"));
   }
@@ -317,39 +330,41 @@ export class AppController {
     );
   }
 
-  private upsertWorkspace(session: AgentSession): void {
+  private upsertWorkspace(session: AgentSession, activate = this.currentSession?.id === session.id): void {
     const existing = this.workspaces.find((workspace) => workspace.root === session.workspaceRoot);
+    const sessions = session.workspaceRoot === this.workspaceRoot
+      ? this.sessions
+      : [
+          toSummary(session),
+          ...(existing?.sessions.filter((item) => item.id !== session.id) ?? []),
+        ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     const summary: WorkspaceSummary = {
       root: session.workspaceRoot,
       name: path.basename(session.workspaceRoot) || session.workspaceRoot,
-      sessionCount:
-        session.workspaceRoot === this.workspaceRoot
-          ? this.sessions.length
-          : existing?.sessionCount ?? 1,
-      sessions:
-        session.workspaceRoot === this.workspaceRoot
-          ? this.sessions
-          : existing?.sessions ?? [toSummary(session)],
-      activeSessionId: session.id,
+      sessionCount: sessions.length,
+      sessions,
+      activeSessionId: activate ? session.id : existing?.activeSessionId ?? null,
       updatedAt: session.updatedAt,
     };
-    this.workspaces = [
-      summary,
-      ...this.workspaces.filter((workspace) => workspace.root !== session.workspaceRoot),
-    ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  }
-
-  private isRunning(): boolean {
-    return Boolean(
-      this.currentSession &&
-        ["requesting", "awaiting_approval", "executing_tool"].includes(
-          this.currentSession.status,
-        ),
+    if (!existing) {
+      this.workspaces = [...this.workspaces, summary];
+      return;
+    }
+    this.workspaces = this.workspaces.map((workspace) =>
+      workspace.root === session.workspaceRoot ? summary : workspace,
     );
   }
 
+  private isRunning(): boolean {
+    return this.runningSessionId !== null;
+  }
+
+  private isUndoBusy(): boolean {
+    return this.undoAbort !== null || Boolean(this.currentSession?.pendingUndo);
+  }
+
   private isBusy(): boolean {
-    return this.isRunning() || Boolean(this.currentSession?.pendingUndo);
+    return this.isRunning() || this.isUndoBusy();
   }
 
   private async performUndo(
@@ -434,7 +449,9 @@ export class AppController {
   }
 
   private async refreshNavigation(): Promise<void> {
-    const state = await this.store.loadState();
+    const state = await this.store.loadState({
+      liveSessionIds: this.runningSessionId ? [this.runningSessionId] : [],
+    });
     this.currentSession = state.activeSession;
     this.sessions = state.sessions;
     this.workspaces = state.workspaces;

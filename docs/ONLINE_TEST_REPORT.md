@@ -99,3 +99,58 @@ HammerTest 保留以下文件供人工复核：
 ## Strong 待补测说明
 
 GLM-5.3-Flash 的 endpoint、Bearer 鉴权、流式 `reasoning_content`、`tool_stream`、分片 `tool_calls`、`thinking` 和 `reasoning_effort` 已按官方文档实现，并由离线 provider 测试覆盖。由于本机 `.env` 当前没有 `GLM_API_KEY`，本报告不把请求体测试或模拟 SSE 冒充真实在线通过。凭据安全配置完成后，应在 HammerTest 新建独立 Strong 工作区，补跑流式思考、文件修改、普通命令和重启恢复四项场景。
+
+## HC-ONLINE-2026-08-28-03
+
+- 时间：2026-08-28 16:27–17:14（Asia/Shanghai）
+- 基线提交：`55ee548`
+- 正式界面：Electron 生产构建页面，通过 main/preload/renderer 完整链路操作
+- 模型：真实 `fast = deepseek-v4-flash` 与真实 `strong = glm-5.3-flash`
+- 工作区：`/Users/norten/Developer/HammerTest/Phase5FastGomoku`、`/Users/norten/Developer/HammerTest/Phase5StrongRefactor`
+- 会话数据：独立临时 userData `/tmp/hammercode-phase5-ui.M5l1Xh`
+- 凭据：由正式配置加载器读取；界面、终端、测试输出和本报告均未展示或记录密钥值
+- 运行配置：Fast `reasoning_effort=high`，Strong `reasoning_effort=max`，两档默认输出预算 32768；发现真实长推理超时后将统一请求超时提高到 600000 ms
+
+## Fast 完整开发与界面验收
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 输出预算校准 | 复杂五子棋任务在旧 16K 预算下以 `length` 结束；提高到 32K 后同等推理强度完成，不通过降为 `low` 换取表面成功 | 通过，配置修复 |
+| 从空目录开发 | 经真实 UI 审批创建 `index.html`、`styles.css`、`game.js`、`test.js` | 通过 |
+| 工具与验证 | 7 次工具调用，最终 `node test.js` 为 12/12，通过语法检查 | 通过 |
+| Markdown 与过程折叠 | 完成前持续展示思考、工具链和模型文本；完成后过程折叠，最终标题、列表、表格和行内代码按 GFM 渲染 | 通过 |
+| 浏览器产物验收 | 实际打开页面并验证黑白轮流、横向五连胜、悔棋和重新开始；方向键焦点移动正常 | 通过 |
+| 文件审查 | 4 个新文件累计显示 `+632/-0`，文件卡片可打开渲染后的代码差异 | 通过 |
+
+## Strong 精确编辑与完全访问验收
+
+首个空目录复杂生成任务在旧 300 秒超时下被请求控制器终止，因此将正式默认超时提高到 600 秒。第二次复杂生成由用户点击停止，持久化原因明确为“用户点击了停止按钮”，没有伪装成模型失败或应用退出。随后改用可确定复核的调试夹具继续真实验收。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 失败基线 | 读取 `README.md`、`task-store.js`、`test.js`，执行 `node test.js` 得到预期 1/12 通过 | 通过 |
+| 精确修改 | 使用 `edit_file` 四次修复规范化、重复 id、不可变 reducer、过滤与序列化；没有整文件重写 | 通过 |
+| 完全访问审计 | 写入和普通命令均记录 `full_access`；初始非零测试命令保留真实失败结果，最终命令保留成功结果 | 通过 |
+| 最终验证 | `node test.js` 为 12/12，`node --check task-store.js` 通过，并创建 `VALIDATION.md` | 通过 |
+| 文件审查 | `task-store.js` 与 `VALIDATION.md` 累计显示 `+144/-16`；红绿逐行 diff 在右侧并排栏展示 | 通过 |
+
+## 运行中导航与侧栏验收
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 项目行直接新建 | 点击 `Phase5FastGomoku` 文件夹右侧 `+`，不进入已有聊天即可创建新聊天 | 通过 |
+| 运行中切换聊天 | 发送读取四个文件的 Fast 任务后立即切换到另一项目的 Strong 历史聊天；原聊天仍在侧栏显示“思考中” | 通过 |
+| 切回继续流式 | 8 秒时切回，已显示 `list_files` 与四次 `read_file`；任务在 16 秒正常完成，共 5 次调用 | 通过 |
+| 不误恢复/不重放 | 切换期间没有把后台任务标记为应用中断，没有重复任何工具；只读任务没有文件副作用 | 通过 |
+| 停止入口 | 顶部只展示不可交互运行计时，唯一停止按钮位于输入区右下角，窄宽度不再暴露右上角高误触取消按钮 | 通过 |
+| 并排代码审查 | diff 打开后形成项目栏、聊天、审查栏三列，主区与审查区接近 1.618:1 共同压缩，没有覆盖聊天 | 通过 |
+
+## 最终测试产物
+
+- `Phase5FastGomoku`：保留可直接打开的五子棋项目和 12 项零依赖逻辑测试。
+- `Phase5StrongRefactor/task-store.js`：保留修复后的状态管理模块；外部复核仍为 12/12。
+- `Phase5StrongRefactor/VALIDATION.md`：保留失败基线、修复点和最终验证记录。
+
+## 结论
+
+两档模型均已通过真实 API 和正式桌面链路。Fast 证明从零创建、审批、测试、Markdown 和浏览器产物闭环；Strong 证明长思考、精确编辑、完全访问审计和失败基线修复闭环。运行中导航、项目行直接新建聊天、停止入口和并排代码审查均通过实际 UI 操作，不以静态截图或模拟状态冒充交互结果。

@@ -69,6 +69,52 @@ describe("local tool executor", () => {
     expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe("user edit\n");
   });
 
+  it("edits one exact text region without rewriting through the model", async () => {
+    await writeFile(path.join(workspace, "a.txt"), "alpha\nbeta\ngamma\n");
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+    const prepared = await executor.prepare(
+      {
+        id: "edit_1",
+        name: "edit_file",
+        arguments: JSON.stringify({ path: "a.txt", old_text: "beta", new_text: "BETA" }),
+      },
+      new Date(),
+    );
+
+    expect(prepared.requiresApproval).toBe(true);
+    expect(prepared.approvalRequest?.details).toContain("-beta");
+    expect(prepared.approvalRequest?.details).toContain("+BETA");
+    expect(prepared.fileMutation).toMatchObject({
+      path: "a.txt",
+      kind: "modify",
+      beforeContent: "alpha\nbeta\ngamma\n",
+      afterContent: "alpha\nBETA\ngamma\n",
+    });
+    const result = await prepared.execute({
+      signal: new AbortController().signal,
+      approvals: { request: async () => true },
+      now: () => new Date(),
+    });
+    expect(result).toMatchObject({ ok: true, metadata: { replacements: 1 } });
+    expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe("alpha\nBETA\ngamma\n");
+  });
+
+  it("rejects ambiguous exact edits unless replace_all is explicit", async () => {
+    await writeFile(path.join(workspace, "a.txt"), "same\nsame\n");
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+
+    await expect(executor.prepare(
+      {
+        id: "edit_ambiguous",
+        name: "edit_file",
+        arguments: JSON.stringify({ path: "a.txt", old_text: "same", new_text: "changed" }),
+      },
+      new Date(),
+    )).rejects.toMatchObject({ code: "EDIT_TEXT_AMBIGUOUS" });
+  });
+
   it("rejects binary writes because they cannot be safely reviewed or undone", async () => {
     const boundary = await WorkspaceBoundary.create(workspace);
     const executor = new LocalToolExecutor(boundary, ids);

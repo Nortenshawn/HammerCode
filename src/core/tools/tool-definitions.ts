@@ -55,7 +55,7 @@ export const TOOL_DEFINITIONS: ModelToolDefinition[] = [
     type: "function",
     function: {
       name: "write_file",
-      description: "创建或完整替换工作区内文本文件。执行前必须由用户审批 diff。",
+      description: "创建或完整替换工作区内文本文件。适合新文件；修改既有大文件时优先使用 edit_file。执行受当前权限模式控制。",
       parameters: {
         type: "object",
         properties: {
@@ -70,8 +70,26 @@ export const TOOL_DEFINITIONS: ModelToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "edit_file",
+      description: "用精确 old_text→new_text 修改既有 UTF-8 文本文件，避免完整重写。默认要求 old_text 只出现一次；多处替换必须显式设置 replace_all。执行受当前权限模式控制。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          old_text: { type: "string", minLength: 1 },
+          new_text: { type: "string" },
+          replace_all: { type: "boolean", description: "是否替换所有精确匹配，默认 false" },
+        },
+        required: ["path", "old_text", "new_text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "delete_file",
-      description: "删除工作区内单个文件。不能删除目录，执行前必须审批。",
+      description: "删除工作区内单个文件。不能删除目录，执行受当前权限模式控制。",
       parameters: {
         type: "object",
         properties: { path: { type: "string" } },
@@ -84,7 +102,7 @@ export const TOOL_DEFINITIONS: ModelToolDefinition[] = [
     type: "function",
     function: {
       name: "run_command",
-      description: "在工作区内运行 zsh 命令。所有命令均需审批，高风险命令会直接拒绝。",
+      description: "在工作区内运行 zsh 命令。执行受当前权限模式控制；高风险命令始终直接拒绝。",
       parameters: {
         type: "object",
         properties: {

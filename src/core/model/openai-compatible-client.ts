@@ -63,7 +63,6 @@ export function buildChatCompletionBody(
     model: config.model,
     messages: request.messages,
     tools: request.tools,
-    tool_choice: "auto",
     stream: true,
     max_tokens: config.maxOutputTokens,
     reasoning_effort: config.reasoningEffort,
@@ -71,6 +70,7 @@ export function buildChatCompletionBody(
   if (config.provider === "zhipu") {
     return {
       ...common,
+      tool_choice: "auto",
       tool_stream: true,
       temperature: 1,
       top_p: 0.95,
