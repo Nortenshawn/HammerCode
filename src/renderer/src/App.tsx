@@ -284,6 +284,35 @@ function TurnMetrics({ turn }: { turn: AgentTurn }) {
   );
 }
 
+function SubagentTasksView({ session, turn }: { session: AgentSession; turn: AgentTurn }) {
+  const tasks = (session.subtasks ?? []).filter((task) => task.parentTurnId === turn.id);
+  if (tasks.length === 0) return null;
+  return (
+    <section className="subagent-tasks" aria-label="隔离子任务">
+      <header><strong>子任务</strong><span>{tasks.filter((task) => task.status === "completed").length}/{tasks.length} 已完成</span></header>
+      <div className="subagent-list">
+        {tasks.map((task) => (
+          <details className={`subagent-card subagent-${task.status}`} key={task.id} open={!['completed', 'cancelled', 'failed'].includes(task.status)}>
+            <summary>
+              <span className={`subagent-dot ${task.status}`}/>
+              <span><strong>{task.role === "analysis" ? "代码分析" : task.role === "test_localization" ? "测试定位" : "代码审查"}</strong><small>{task.mode === "patch_proposal" ? "补丁提案 · 不落盘" : "只读调查"}</small></span>
+              <em>{task.status === "completed" ? "已完成" : task.status === "failed" ? "失败" : task.status === "cancelled" ? "已取消" : "运行中"}</em>
+            </summary>
+            <div className="subagent-detail">
+              <p>{task.task}</p>
+              <div className="subagent-budget"><span>轮次 {task.metrics?.roundsUsed ?? 0}/{task.budget.maxRounds}</span><span>工具 {task.metrics?.toolCalls ?? 0}/{task.budget.maxToolCalls}</span><span>{task.effectivePermission === "proposal_only" ? "仅提案" : "只读"}</span></div>
+              <ol>{task.plan.steps.map((step) => <li key={step.id} className={`subagent-step-${step.status}`}><span>{step.status === "completed" ? "✓" : step.status === "in_progress" ? "•" : ""}</span>{step.title}</li>)}</ol>
+              {task.result && <div className="subagent-result"><strong>{task.result.summary}</strong>{task.result.findings.map((finding) => <div key={`${task.id}-${finding.title}`}><p>{finding.title}：{finding.detail}</p>{finding.evidence.map((evidence, index) => <code key={`${evidence.path}-${evidence.line ?? 0}-${index}`}>{evidence.path}{evidence.line ? `:${evidence.line}` : ""} · {evidence.detail}</code>)}</div>)}</div>}
+              {task.patches.length > 0 && <p className="subagent-proposals">{task.patches.length} 个候选补丁，均未写入磁盘</p>}
+              {task.error && <p className="subagent-error">{task.error}</p>}
+            </div>
+          </details>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession; turn: AgentTurn; finalMessageId?: string }) {
   const terminal = TERMINAL_STATUSES.includes(turn.status);
   const tracesForTurn = session.toolTraces.filter((trace) => trace.turnId === turn.id);
@@ -306,6 +335,7 @@ function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession;
       <div className="process-timeline">
         <TurnPlanView turn={turn}/>
         <TurnMetrics turn={turn}/>
+        <SubagentTasksView session={session} turn={turn}/>
         {!hasContent && <div className="process-placeholder">正在理解这轮请求…</div>}
         {processMessages.map((message) => {
           if (message.role === "tool") {
@@ -502,6 +532,7 @@ function SettingsView({
   const [keys, setKeys] = useState<Record<ModelTier, string>>({ fast: "", strong: "" });
   const [checking, setChecking] = useState<{ tier: ModelTier; mode: "test" | "save" } | null>(null);
   const [lastResults, setLastResults] = useState<Partial<Record<ModelTier, ModelConnectionTestResult>>>({});
+  const [deletingMemory, setDeletingMemory] = useState<string | null>(null);
 
   useEffect(() => {
     setUrls({
@@ -530,6 +561,19 @@ function SettingsView({
     }
   };
 
+  const deleteMemory = async (memoryId: string) => {
+    if (deletingMemory) return;
+    setDeletingMemory(memoryId);
+    try {
+      await window.hammerCode.deleteProjectMemory(memoryId);
+      onNotice({ level: "info", text: "项目记忆已删除。" });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setDeletingMemory(null);
+    }
+  };
+
   return (
     <section className="settings-view">
       <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>HammerCode 只保留 Fast 与 Strong 两个固定模型。API Key 由 macOS 安全存储加密，重启后仍可使用，但不会回显到界面。</p></header>
@@ -548,6 +592,16 @@ function SettingsView({
           {(lastResults[tier] || model.connectionMessage || model.lastCheckedAt) && <div className={`api-test-result ${model.connectionStatus === "error" ? "failed" : ""}`}><span className={`connection-dot ${model.connectionStatus === "error" ? "error" : "ready"}`}/><div><strong>{lastResults[tier] ? "连接可用" : statusLabel}</strong><p>{lastResults[tier]?.apiBaseUrl ?? model.apiBaseUrl}{model.connectionMessage ? ` · ${model.connectionMessage}` : ""}</p>{model.lastCheckedAt && <small>最近检测 {new Date(model.lastCheckedAt).toLocaleString("zh-CN")}</small>}</div></div>}
         </section>;
       })}
+      <section className="settings-card memory-settings-card">
+        <div className="settings-card-title"><div><h2>项目记忆</h2><p>当前工作区跨聊天共享。每条记录保留来源、置信级别和失效状态；删除不会影响聊天原始历史。</p></div><span>{bootstrap.projectMemory?.records.filter((record) => record.status === "active").length ?? 0} 条有效</span></div>
+        {!bootstrap.workspaceRoot ? <p className="memory-empty">选择工作区后可查看项目记忆。</p> : !bootstrap.projectMemory?.records.length ? <p className="memory-empty">这个工作区还没有项目记忆。</p> : <div className="memory-list">
+          {bootstrap.projectMemory.records.map((record) => <article className={`memory-item memory-${record.status}`} key={record.id}>
+            <div><strong>{record.subject}</strong><span>{record.kind === "decision" ? "决定" : record.kind === "constraint" ? "约束" : record.kind === "verification" ? "验证" : "事实"} · {record.confidence === "tool_verified" ? "工具核验" : record.confidence === "user_confirmed" ? "用户确认" : "模型推断"} · {record.status === "active" ? "有效" : record.status === "conflicted" ? "冲突" : record.status === "invalidated" ? "已失效" : "已删除"}</span></div>
+            <p>{record.statement}</p>
+            <footer><code>{record.source.label}</code>{record.status !== "deleted" && <button disabled={Boolean(deletingMemory)} onClick={() => void deleteMemory(record.id)}>{deletingMemory === record.id ? "删除中…" : "删除"}</button>}</footer>
+          </article>)}
+        </div>}
+      </section>
     </section>
   );
 }
@@ -662,6 +716,9 @@ export function App() {
           ...current,
           config: event.config,
         } : current);
+      }
+      if (event.type === "project_memory_updated") {
+        setBootstrap((current) => current ? { ...current, projectMemory: event.memory } : current);
       }
       if (event.type === "notification") setNotice({ level: event.level, text: event.message });
     });

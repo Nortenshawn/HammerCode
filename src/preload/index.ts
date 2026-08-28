@@ -24,6 +24,8 @@ const api: HammerCodeApi = {
     ipcRenderer.invoke("hammercode:close-side-chat", sideChatId),
   searchWorkspaceEntries: (query) =>
     ipcRenderer.invoke("hammercode:search-workspace-entries", query),
+  listProjectMemory: () => ipcRenderer.invoke("hammercode:list-project-memory"),
+  deleteProjectMemory: (memoryId) => ipcRenderer.invoke("hammercode:delete-project-memory", memoryId),
   startTask: (request) => ipcRenderer.invoke("hammercode:start-task", request),
   requestUndo: (changeId) => ipcRenderer.invoke("hammercode:request-undo", changeId),
   cancelTask: () => ipcRenderer.invoke("hammercode:cancel-task"),

@@ -322,3 +322,45 @@ Phase 8 的比例布局、分界边界、窄窗折叠/恢复、真实 BTW 多轮
 | 用户停止 | 第二次启动压缩后点击停止；界面恢复可输入状态，压缩次数仍为 4，旧记忆保持不变 | 通过 |
 
 本轮没有修改 HammerTest 内的任何文件。在线调用只用于模型摘要和压缩后只读续问；成功、输出耗尽、取消、意外工具调用和自动阈值路径另由 130 项自动测试覆盖。
+
+## HC-ONLINE-2026-08-29-04
+
+- 时间：2026-08-29 03:57–04:00（Asia/Shanghai）
+- 基线提交：`9d37941`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer 完整链路操作并在退出后重启恢复
+- 模型：真实 `fast = deepseek-v4-flash`
+- 工作区：`/Users/norten/Developer/HammerTest/Phase9`
+- 凭据：仅由正式配置加载器和 main process 使用；界面、终端、测试输出和本报告均未展示、打印或复制密钥值
+
+### 受限并行子任务与主 Agent 写入
+
+主任务先建立六步 Plan，然后一次调用 `spawn_subagents` 并行启动两个只读子任务：`analysis` 分析 `Phase9/counter.js`，`test_localization` 定位 `Phase9/counter.test.js` 的契约断言。两者均继承 Fast 模型选择，但父聊天为请求批准时，子任务实际权限仍固定为只读。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 独立状态与预算 | 界面同时显示两个子任务，各自拥有独立 Plan、8 轮、30 次工具和 5 分钟预算；最终均为 completed | 通过 |
+| 权限隔离 | 子任务只使用 `update_plan`、`list_files`、`read_file`；工具列表没有写文件、通用命令、项目记忆或递归编排入口 | 通过 |
+| 带来源结论 | 子任务定位 `counter.js:1` 当前值 40 与 `counter.test.js:6` 严格断言 42；主 Agent 发现一次行号分歧后亲自重新读取并复核 | 通过 |
+| 结构化边界 | 主 Agent tool result 只收到摘要、发现、文件/行号证据、预算和风险；子任务完整消息/原始工具输出仅保存在独立审计状态 | 通过 |
+| 主 Agent 独占写入 | `edit_file` 仍弹出请求批准 diff；批准后仅将 `counter.js:1` 从 40 改为 42，子任务没有磁盘副作用 | 通过 |
+| 命令风险分层 | `node --test Phase9/counter.test.js` 被识别为普通本地测试并自动执行；退出码 0，1 pass / 0 fail | 通过 |
+
+### 项目记忆与跨聊天召回
+
+文件修改和成功测试分别自动产生一条 `tool_verified` 记忆；主 Agent 使用 `remember_project` 写入 `phase9-counter-contract` 决定，明确标记为 `model_inference`。设置页显示三条有效记录及各自来源，没有把模型决定伪装为工具事实。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 文件事实 | `file:Phase9/counter.js` 保存 after hash，来源为本轮 `edit_file` | 通过 |
+| 验证事实 | Node 测试的 1/1 通过结果保存为工作区修订绑定验证，来源为本轮 `run_command` | 通过 |
+| 模型决定 | `phase9-counter-contract` 保存 `PHASE9_MEMORY_MARKER` 与 expectedCounter=42，界面显示“模型推断” | 通过 |
+| 新聊天召回 | 新建独立聊天并明确禁止工具；0 次工具调用准确回答主题、值及 `model_inference` 置信级别 | 通过 |
+| 重启恢复 | 退出并重启应用后，新聊天回答、原主聊天、两个 completed 子任务、Plan/预算和项目记忆均恢复；没有重新请求模型或重放工具 | 通过 |
+
+### 离线隔离、受控提案与交付检查
+
+- 自动测试验证 1/3/4 及单 turn 累计上限、子 Agent 伪造越权工具阻断、父取消传播、结构化输出、会话重启持久化、同路径写入租约冲突/释放，以及 `patch_proposal` 生成独立 diff 但磁盘内容不变。
+- 顶层 `git push` 在完全访问下仍进入 `always` 审批，子 Agent 没有任何远端工具；本轮未实际执行 push、部署、发布、上传、提权或破坏性命令。
+- `npm run typecheck`、26 个测试文件共 145 项测试、生产构建和 Apple Silicon 目录包全部通过；未签名目录包符合当前本地演示阶段预期。
+
+最终测试产物保留在 `HammerTest/Phase9`：`counter.js` 当前值为 42，`counter.test.js` 外部复核仍为 1/1 通过，`package.json` 仅声明 ESM。该目录可用于人工复核真实模型闭环，未清理。

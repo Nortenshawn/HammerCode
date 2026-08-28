@@ -4,9 +4,12 @@ import { z } from "zod";
 import { closeUnresolvedToolCalls } from "../core/session-recovery";
 import { fallbackChatTitle } from "../shared/chat-title";
 import {
+  BUILTIN_MODEL_REFS,
   MODEL_TIERS,
   PERMISSION_MODES,
   SESSION_STATUSES,
+  SUBAGENT_MODES,
+  SUBAGENT_ROLES,
   type AgentSession,
   type AgentTurn,
   type ModelRef,
@@ -194,6 +197,77 @@ const authorizationSchema = z.enum([
   "full_access",
   "safety_blocked",
 ]);
+const subagentEvidenceSchema = z.object({
+  path: z.string(),
+  line: z.number().int().positive().optional(),
+  detail: z.string(),
+});
+const subagentFindingSchema = z.object({
+  title: z.string(),
+  detail: z.string(),
+  confidence: z.enum(["high", "medium", "low"]),
+  evidence: z.array(subagentEvidenceSchema),
+});
+const subagentResultSchema = z.object({
+  summary: z.string(),
+  findings: z.array(subagentFindingSchema),
+  relatedFiles: z.array(z.string()),
+  verificationSuggestions: z.array(z.string()),
+  risks: z.array(z.string()),
+});
+const subagentPatchSchema = z.object({
+  id: z.string(),
+  path: z.string(),
+  kind: z.enum(["create", "modify", "delete"]),
+  beforeHash: z.string().nullable(),
+  afterHash: z.string().nullable(),
+  patch: z.string(),
+  createdAt: z.string(),
+});
+const subagentBudgetSchema = z.object({
+  maxRounds: z.number().int().positive(),
+  maxToolCalls: z.number().int().positive(),
+  maxRunTimeMs: z.number().int().positive(),
+  contextTokenBudget: z.number().int().positive(),
+});
+const subagentSchema = z.object({
+  id: z.string(),
+  parentSessionId: z.string(),
+  parentTurnId: z.string(),
+  role: z.enum(SUBAGENT_ROLES),
+  mode: z.enum(SUBAGENT_MODES),
+  task: z.string(),
+  status: z.enum(["pending", "requesting", "executing_tool", "completed", "cancelled", "failed"]),
+  modelTier: z.enum(MODEL_TIERS),
+  modelRef: z.enum(BUILTIN_MODEL_REFS),
+  parentPermissionMode: z.enum(PERMISSION_MODES),
+  effectivePermission: z.enum(["read_only", "proposal_only"]),
+  budget: subagentBudgetSchema,
+  metrics: metricsSchema.optional(),
+  plan: planSchema,
+  messages: z.array(messageSchema),
+  toolTraces: z.array(z.object({
+    turnId: z.string().optional(),
+    call: toolCallSchema,
+    status: traceStatusSchema,
+    summary: z.string(),
+    target: z.string().optional(),
+    approval: approvalSchema.optional(),
+    result: toolResultSchema.optional(),
+    startedAt: z.string().optional(),
+    finishedAt: z.string().optional(),
+    durationMs: z.number().optional(),
+    fileChangeId: z.string().optional(),
+    authorization: authorizationSchema.optional(),
+    approvalPolicy: z.enum(["none", "permission_mode", "always"]).optional(),
+  })),
+  patches: z.array(subagentPatchSchema),
+  result: subagentResultSchema.optional(),
+  error: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  finishedAt: z.string().optional(),
+});
 const sessionSchema = z.object({
   id: z.string(),
   workspaceRoot: z.string(),
@@ -238,6 +312,7 @@ const sessionSchema = z.object({
   pendingApproval: approvalSchema.optional(),
   pendingUndo: pendingUndoSchema.optional(),
   contextMemory: contextMemorySchema.optional(),
+  subtasks: z.array(subagentSchema).max(200).optional(),
   terminationReason: terminationSchema.optional(),
   error: z.string().optional(),
   createdAt: z.string(),
@@ -387,6 +462,21 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
       mode: parsed.contextMemory.mode ?? "explicit",
       compactionCount: parsed.contextMemory.compactionCount ?? 1,
     } : undefined,
+    subtasks: parsed.subtasks?.map((task) => ({
+      ...task,
+      metrics: task.metrics ? {
+        ...task.metrics,
+        currentContextTokens: task.metrics.currentContextTokens ?? 0,
+      } : undefined,
+      messages: task.messages.map((message) => ({
+        ...message,
+        turnId: message.turnId ?? task.parentTurnId,
+      })) as ConversationMessage[],
+      toolTraces: task.toolTraces.map((trace) => ({
+        ...trace,
+        turnId: trace.turnId ?? task.parentTurnId,
+      })),
+    })),
     terminationReason: parsed.terminationReason,
     error: parsed.error,
     createdAt: parsed.createdAt,

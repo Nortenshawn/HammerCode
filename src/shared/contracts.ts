@@ -234,6 +234,75 @@ export interface PendingUndo {
   createdAt: string;
 }
 
+export const SUBAGENT_ROLES = ["analysis", "test_localization", "code_review"] as const;
+export type SubagentRole = (typeof SUBAGENT_ROLES)[number];
+export const SUBAGENT_MODES = ["read_only", "patch_proposal"] as const;
+export type SubagentMode = (typeof SUBAGENT_MODES)[number];
+export type SubagentStatus = "pending" | "requesting" | "executing_tool" | "completed" | "cancelled" | "failed";
+
+export interface SubagentEvidence {
+  path: string;
+  line?: number;
+  detail: string;
+}
+
+export interface SubagentFinding {
+  title: string;
+  detail: string;
+  confidence: "high" | "medium" | "low";
+  evidence: SubagentEvidence[];
+}
+
+export interface SubagentResult {
+  summary: string;
+  findings: SubagentFinding[];
+  relatedFiles: string[];
+  verificationSuggestions: string[];
+  risks: string[];
+}
+
+export interface SubagentPatchProposal {
+  id: string;
+  path: string;
+  kind: FileChangeKind;
+  beforeHash: string | null;
+  afterHash: string | null;
+  patch: string;
+  createdAt: string;
+}
+
+export interface SubagentBudget {
+  maxRounds: number;
+  maxToolCalls: number;
+  maxRunTimeMs: number;
+  contextTokenBudget: number;
+}
+
+export interface SubagentTask {
+  id: string;
+  parentSessionId: string;
+  parentTurnId: string;
+  role: SubagentRole;
+  mode: SubagentMode;
+  task: string;
+  status: SubagentStatus;
+  modelTier: ModelTier;
+  modelRef: ModelRef;
+  parentPermissionMode: PermissionMode;
+  effectivePermission: "read_only" | "proposal_only";
+  budget: SubagentBudget;
+  metrics?: TurnRunMetrics;
+  plan: TurnPlan;
+  messages: ConversationMessage[];
+  toolTraces: ToolTrace[];
+  patches: SubagentPatchProposal[];
+  result?: SubagentResult;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+}
+
 export interface AgentSession {
   id: string;
   workspaceRoot: string;
@@ -254,6 +323,7 @@ export interface AgentSession {
   pendingApproval?: ApprovalRequest;
   pendingUndo?: PendingUndo;
   contextMemory?: ChatContextMemory;
+  subtasks?: SubagentTask[];
   terminationReason?: TerminationReason;
   error?: string;
   createdAt: string;
@@ -338,6 +408,57 @@ export interface WorkspaceEntry {
   kind: "file" | "directory";
 }
 
+export type ProjectMemoryKind = "fact" | "decision" | "constraint" | "verification";
+export type ProjectMemoryConfidence = "tool_verified" | "user_confirmed" | "model_inference";
+export type ProjectMemoryStatus = "active" | "conflicted" | "invalidated" | "deleted";
+
+export interface ProjectMemorySource {
+  type: "tool" | "user" | "model" | "subagent";
+  sessionId?: string;
+  turnId?: string;
+  toolCallId?: string;
+  toolName?: string;
+  subtaskId?: string;
+  label: string;
+}
+
+export type ProjectMemoryInvalidation =
+  | { type: "none" }
+  | { type: "file_hash"; path: string; expectedHash: string }
+  | { type: "workspace_revision"; revision: number }
+  | { type: "expires_at"; expiresAt: string };
+
+export interface ProjectMemoryRecord {
+  id: string;
+  workspaceRoot: string;
+  kind: ProjectMemoryKind;
+  subject: string;
+  statement: string;
+  confidence: ProjectMemoryConfidence;
+  source: ProjectMemorySource;
+  invalidation: ProjectMemoryInvalidation;
+  status: ProjectMemoryStatus;
+  conflictWith: string[];
+  invalidatedReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+export interface ProjectMemorySnapshot {
+  workspaceRoot: string;
+  revision: number;
+  records: ProjectMemoryRecord[];
+  updatedAt: string;
+}
+
+export interface ProjectMemoryRecall {
+  records: ProjectMemoryRecord[];
+  rendered: string;
+  truncated: boolean;
+  characterCount: number;
+}
+
 export interface PublicRuntimeConfig {
   models: Record<ModelTier, PublicModelConfig>;
   availableModels: PublicModelOption[];
@@ -354,6 +475,7 @@ export interface AppBootstrap {
   sessions: SessionSummary[];
   workspaces: WorkspaceSummary[];
   workspaceRoot: string | null;
+  projectMemory: ProjectMemorySnapshot | null;
   config: PublicRuntimeConfig;
 }
 
@@ -401,6 +523,7 @@ export type RendererEvent =
   | { type: "sessions_changed"; sessions: SessionSummary[] }
   | { type: "side_chat_snapshot"; sideChat: EphemeralSideChatState }
   | { type: "side_chat_closed" }
+  | { type: "project_memory_updated"; memory: ProjectMemorySnapshot | null }
   | {
       type: "config_updated";
       config: PublicRuntimeConfig;
@@ -429,6 +552,8 @@ export interface HammerCodeApi {
   cancelSideChat(sideChatId: string): Promise<void>;
   closeSideChat(sideChatId: string): Promise<void>;
   searchWorkspaceEntries(query: string): Promise<WorkspaceEntry[]>;
+  listProjectMemory(): Promise<ProjectMemorySnapshot | null>;
+  deleteProjectMemory(memoryId: string): Promise<ProjectMemorySnapshot | null>;
   startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;
   cancelTask(): Promise<void>;

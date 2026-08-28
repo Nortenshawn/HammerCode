@@ -2,6 +2,16 @@ import type {
   AgentSession,
   ApprovalRequest,
   FileChangeKind,
+  FileChange,
+  ModelRef,
+  ModelTier,
+  PermissionMode,
+  ProjectMemoryKind,
+  ProjectMemoryRecall,
+  ProjectMemoryRecord,
+  SubagentMode,
+  SubagentRole,
+  SubagentTask,
   ToolCall,
   ToolResult,
 } from "../shared/contracts";
@@ -81,8 +91,68 @@ export interface AgentDependencies {
   approvals: ApprovalGateway;
   clock: Clock;
   ids: IdGenerator;
+  projectMemory?: ProjectMemoryPort;
+  subagents?: SubagentCoordinatorPort;
+  writeLeases?: WorkspaceWriteLeasePort;
   wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   onSessionChange?: (session: AgentSession) => void | Promise<void>;
+}
+
+export interface ProjectMemoryPort {
+  retrieve(
+    workspaceRoot: string,
+    query: string,
+    options?: { maxRecords?: number; maxCharacters?: number },
+  ): Promise<ProjectMemoryRecall>;
+  rememberInference(input: {
+    workspaceRoot: string;
+    kind: ProjectMemoryKind;
+    subject: string;
+    statement: string;
+    invalidation?: { type: "none" } | { type: "file_hash"; path: string; expectedHash: string } | { type: "expires_at"; expiresAt: string };
+    source: { sessionId: string; turnId: string; toolCallId: string };
+  }): Promise<ProjectMemoryRecord>;
+  recordToolFact(input: {
+    workspaceRoot: string;
+    sessionId: string;
+    turnId: string;
+    call: ToolCall;
+    target?: string;
+    result: ToolResult;
+    fileChange?: FileChange;
+  }): Promise<ProjectMemoryRecord | null>;
+}
+
+export interface SubagentSpawnInput {
+  role: SubagentRole;
+  mode: SubagentMode;
+  task: string;
+}
+
+export interface SubagentCoordinatorPort {
+  spawn(input: {
+    workspaceRoot: string;
+    parentSessionId: string;
+    parentTurnId: string;
+    parentModelTier: ModelTier;
+    parentModelRef: ModelRef;
+    parentPermissionMode: PermissionMode;
+    tasks: SubagentSpawnInput[];
+    signal: AbortSignal;
+    onUpdate(task: SubagentTask): void | Promise<void>;
+  }): Promise<SubagentTask[]>;
+}
+
+export interface WorkspaceWriteLease {
+  path: string;
+  ownerId: string;
+  acquiredAt: string;
+}
+
+export interface WorkspaceWriteLeasePort {
+  acquire(path: string, ownerId: string, now: Date): WorkspaceWriteLease;
+  release(path: string, ownerId: string): void;
+  releaseOwner(ownerId: string): void;
 }
 
 export interface ToolExecutionContext {

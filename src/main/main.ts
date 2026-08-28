@@ -3,7 +3,9 @@ import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
 import { AppController, safeIpcError } from "./controller";
 import { loadRuntimeConfig } from "./config";
 import { ModelCredentialStore } from "./model-credential-store";
+import { ProjectMemoryStore } from "./project-memory-store";
 import { SessionStore } from "./session-store";
+import { systemClock, uuidGenerator } from "../core/utils";
 
 let mainWindow: BrowserWindow | null = null;
 let controller: AppController | null = null;
@@ -43,7 +45,13 @@ async function createWindow(): Promise<void> {
       decrypt: (value) => safeStorage.decryptString(value),
     },
   );
-  controller = new AppController(mainWindow, config, store, modelCredentials);
+  const projectMemory = new ProjectMemoryStore(
+    path.join(app.getPath("userData"), "project-memory"),
+    systemClock,
+    uuidGenerator,
+    (snapshot) => controller?.handleProjectMemoryChange(snapshot),
+  );
+  controller = new AppController(mainWindow, config, store, modelCredentials, projectMemory);
   await controller.initialize();
   registerIpc(controller);
 
@@ -97,6 +105,10 @@ function registerIpc(appController: AppController): void {
   );
   handle("hammercode:search-workspace-entries", (query: unknown) =>
     appController.searchWorkspaceEntries(query),
+  );
+  handle("hammercode:list-project-memory", () => appController.listProjectMemory());
+  handle("hammercode:delete-project-memory", (memoryId: unknown) =>
+    appController.deleteProjectMemory(memoryId),
   );
   handle("hammercode:start-task", (request: unknown) => appController.startTask(request));
   handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));

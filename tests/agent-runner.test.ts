@@ -12,6 +12,8 @@ import type {
   ModelClient,
   ModelRequest,
   ModelStreamChunk,
+  ProjectMemoryPort,
+  SubagentCoordinatorPort,
   ToolExecutorPort,
 } from "../src/core/types";
 import { HammerCodeError } from "../src/core/types";
@@ -739,5 +741,136 @@ describe("agent runner", () => {
       expect.objectContaining({ role: "assistant", content: oldConclusion }),
     ]));
     expect(resumed.turns.at(-1)?.metrics).toMatchObject({ modelRequests: 3, retryCount: 1 });
+  });
+
+  it("injects bounded source-bearing project memory and labels model writes as inference", async () => {
+    const { ids, clock } = fixtures();
+    const writes: Array<{ kind: string; subject: string; statement: string }> = [];
+    const memory: ProjectMemoryPort = {
+      retrieve: async () => ({
+        records: [],
+        rendered: "[decision] package-manager: 使用 npm（置信：user_confirmed；来源：用户确认）",
+        truncated: false,
+        characterCount: 78,
+      }),
+      rememberInference: async (input) => {
+        writes.push(input);
+        return {
+          id: "memory_1",
+          workspaceRoot: "/tmp",
+          kind: input.kind,
+          subject: input.subject,
+          statement: input.statement,
+          confidence: "model_inference",
+          source: { type: "model", label: "模型推断" },
+          invalidation: { type: "none" },
+          status: "active",
+          conflictWith: [],
+          createdAt: "2026-08-29T00:00:00.000Z",
+          updatedAt: "2026-08-29T00:00:00.000Z",
+        };
+      },
+      recordToolFact: async () => null,
+    };
+    const model = new ScriptedModel([
+      [
+        { toolCallDeltas: [{ index: 0, id: "remember_1", name: "remember_project", arguments: '{"kind":"decision","subject":"test-runner","statement":"使用 Vitest"}' }], finishReason: "tool_calls" },
+      ],
+      [{ content: "已记录。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: { definitions: [], prepare: async () => { throw new Error("unused"); } },
+        approvals: approve,
+        ids,
+        clock,
+        projectMemory: memory,
+      },
+      { maxRounds: 3, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+    const result = await runner.start("记录测试框架决定", "/tmp");
+    expect(result.status).toBe("completed");
+    expect(model.requests[0].messages[0]).toMatchObject({ role: "system" });
+    expect(JSON.stringify(model.requests[0].messages[0])).toContain("来源：用户确认");
+    expect(model.requests[0].tools.map((tool) => tool.function.name)).toEqual(expect.arrayContaining([
+      "search_project_memory", "remember_project",
+    ]));
+    expect(writes).toEqual([expect.objectContaining({ kind: "decision", subject: "test-runner", statement: "使用 Vitest" })]);
+    expect(result.toolTraces.find((trace) => trace.call.name === "remember_project")?.result?.metadata).toMatchObject({
+      confidence: "model_inference",
+    });
+  });
+
+  it("enforces a cumulative maximum of three subagents in one parent turn", async () => {
+    const { ids, clock } = fixtures();
+    let spawnCalls = 0;
+    const coordinator: SubagentCoordinatorPort = {
+      spawn: async (input) => {
+        spawnCalls += 1;
+        return Promise.all(input.tasks.map(async (specification, index) => {
+          const now = clock.now().toISOString();
+          const task = {
+            id: `subtask_${spawnCalls}_${index}`,
+            parentSessionId: input.parentSessionId,
+            parentTurnId: input.parentTurnId,
+            role: specification.role,
+            mode: specification.mode,
+            task: specification.task,
+            status: "completed" as const,
+            modelTier: input.parentModelTier,
+            modelRef: input.parentModelRef,
+            parentPermissionMode: input.parentPermissionMode,
+            effectivePermission: specification.mode === "patch_proposal" ? "proposal_only" as const : "read_only" as const,
+            budget: { maxRounds: 8, maxToolCalls: 30, maxRunTimeMs: 300_000, contextTokenBudget: 64_000 },
+            plan: {
+              revision: 1,
+              steps: [{ id: "done", title: "done", status: "completed" as const }],
+              createdAt: now,
+              updatedAt: now,
+            },
+            messages: [],
+            toolTraces: [],
+            patches: [],
+            result: { summary: "done", findings: [], relatedFiles: [], verificationSuggestions: [], risks: [] },
+            createdAt: now,
+            updatedAt: now,
+            finishedAt: now,
+          };
+          await input.onUpdate(task);
+          return task;
+        }));
+      },
+    };
+    const twoTasks = {
+      tasks: [
+        { role: "analysis", mode: "read_only", task: "A" },
+        { role: "test_localization", mode: "read_only", task: "B" },
+      ],
+    };
+    const model = new ScriptedModel([
+      [{ toolCallDeltas: [{ index: 0, id: "spawn_first", name: "spawn_subagents", arguments: JSON.stringify(twoTasks) }], finishReason: "tool_calls" }],
+      [{ toolCallDeltas: [{ index: 0, id: "spawn_second", name: "spawn_subagents", arguments: JSON.stringify(twoTasks) }], finishReason: "tool_calls" }],
+      [{ content: "已遵守累计上限。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: { definitions: [], prepare: async () => { throw new Error("unused"); } },
+        approvals: approve,
+        ids,
+        clock,
+        subagents: coordinator,
+      },
+      { maxRounds: 4, maxToolCalls: 10, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+    const result = await runner.start("并行完成四个独立调查，但必须遵守系统上限。", "/tmp");
+    expect(result.status).toBe("completed");
+    expect(result.subtasks).toHaveLength(2);
+    expect(spawnCalls).toBe(1);
+    expect(result.toolTraces.find((trace) => trace.call.id === "spawn_second")?.result).toMatchObject({
+      ok: false,
+      errorCode: "SUBAGENT_LIMIT",
+    });
   });
 });

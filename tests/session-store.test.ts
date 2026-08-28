@@ -352,4 +352,68 @@ describe("session persistence", () => {
       expect.objectContaining({ id: "session_legacy", title: "保留旧聊天" }),
     ]);
   });
+
+  it("persists isolated subtask plans, evidence, budgets and patch proposals", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const at = "2026-08-29T00:00:00.000Z";
+    const session = createSession("session_subtasks", "parallel review", at);
+    session.subtasks = [{
+      id: "subtask_1",
+      parentSessionId: session.id,
+      parentTurnId: session.activeTurnId,
+      role: "code_review",
+      mode: "patch_proposal",
+      task: "review source.ts",
+      status: "completed",
+      modelTier: "fast",
+      modelRef: "builtin:fast",
+      parentPermissionMode: "full_access",
+      effectivePermission: "proposal_only",
+      budget: { maxRounds: 8, maxToolCalls: 30, maxRunTimeMs: 300_000, contextTokenBudget: 64_000 },
+      plan: {
+        revision: 1,
+        steps: [{ id: "inspect", title: "检查来源", status: "completed" }],
+        createdAt: at,
+        updatedAt: at,
+      },
+      messages: [{ id: "sub_message", turnId: "sub_turn", role: "assistant", content: "structured", createdAt: at }],
+      toolTraces: [],
+      patches: [{
+        id: "proposal_1",
+        path: "source.ts",
+        kind: "modify",
+        beforeHash: "before",
+        afterHash: "after",
+        patch: "diff",
+        createdAt: at,
+      }],
+      result: {
+        summary: "reviewed",
+        findings: [{
+          title: "finding",
+          detail: "detail",
+          confidence: "high",
+          evidence: [{ path: "source.ts", line: 1, detail: "source" }],
+        }],
+        relatedFiles: ["source.ts"],
+        verificationSuggestions: ["run tests"],
+        risks: [],
+      },
+      createdAt: at,
+      updatedAt: at,
+      finishedAt: at,
+    }];
+    const store = new SessionStore(directory);
+    await store.save(session);
+    const restored = await store.load();
+    expect(restored?.subtasks?.[0]).toMatchObject({
+      status: "completed",
+      parentPermissionMode: "full_access",
+      effectivePermission: "proposal_only",
+      plan: { steps: [{ status: "completed" }] },
+      result: { findings: [{ evidence: [{ path: "source.ts", line: 1 }] }] },
+      patches: [{ path: "source.ts", patch: "diff" }],
+    });
+  });
 });

@@ -10,10 +10,12 @@ import { prepareFileUndo } from "../core/file-undo";
 import { OpenAICompatibleChatClient } from "../core/model/openai-compatible-client";
 import { EphemeralSideChat } from "../core/side-chat";
 import { WorkspaceBoundary } from "../core/security/path-boundary";
+import { RestrictedSubagentCoordinator } from "../core/subagent-coordinator";
 import { DEFAULT_SYSTEM_PROMPT } from "../core/system-prompt";
 import { LocalToolExecutor } from "../core/tools/tool-executor";
 import { HammerCodeError } from "../core/types";
 import { isAbortError, redactSecrets, systemClock, toErrorMessage, uuidGenerator } from "../core/utils";
+import { WorkspaceWriteLeaseManager } from "../core/write-leases";
 import {
   BUILTIN_MODEL_REFS,
   MODEL_TIERS,
@@ -23,6 +25,7 @@ import {
   type EphemeralSideChatState,
   type ModelConnectionInput,
   type ModelRef,
+  type ProjectMemorySnapshot,
   type RendererEvent,
   type SessionSettings,
   type SessionSummary,
@@ -32,6 +35,7 @@ import { PendingApprovalGateway } from "./approval-gateway";
 import type { RuntimeConfig } from "./config";
 import { toPublicConfig } from "./config";
 import { ModelCredentialStore } from "./model-credential-store";
+import { ProjectMemoryStore } from "./project-memory-store";
 import { SessionStore } from "./session-store";
 import { searchWorkspace } from "./workspace-search";
 
@@ -56,6 +60,7 @@ const modelConnectionSchema = z.object({
 }).strict();
 const sideChatIdSchema = z.string().regex(/^btw_[a-zA-Z0-9_-]{1,200}$/);
 const sideChatContentSchema = z.string().trim().min(1).max(20_000);
+const projectMemoryIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 
 function toSummary(session: AgentSession): SessionSummary {
   return {
@@ -78,6 +83,7 @@ export class AppController {
   private workspaceRoot: string | null = null;
   private workspaces: WorkspaceSummary[] = [];
   private currentSession: AgentSession | null = null;
+  private currentProjectMemory: ProjectMemorySnapshot | null = null;
   private sessions: SessionSummary[] = [];
   private runner: AgentRunner | null = null;
   private approvals: PendingApprovalGateway | null = null;
@@ -94,6 +100,7 @@ export class AppController {
     private readonly config: RuntimeConfig,
     private readonly store: SessionStore,
     private readonly modelCredentials: ModelCredentialStore,
+    private readonly projectMemory: ProjectMemoryStore,
   ) {}
 
   async initialize(): Promise<void> {
@@ -108,6 +115,7 @@ export class AppController {
       sessions: this.sessions,
       workspaces: this.workspaces,
       workspaceRoot: this.workspaceRoot,
+      projectMemory: this.currentProjectMemory,
       config: this.publicConfig(),
     };
   }
@@ -204,6 +212,7 @@ export class AppController {
     const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
     const approvals = new PendingApprovalGateway();
     const tools = new LocalToolExecutor(boundary, uuidGenerator);
+    const writeLeases = new WorkspaceWriteLeaseManager();
     const model = new OpenAICompatibleChatClient({
       provider: modelConfig.provider,
       apiKey: modelConfig.apiKey,
@@ -214,6 +223,23 @@ export class AppController {
       maxOutputTokens: modelConfig.maxOutputTokens,
       requestTimeoutMs: modelConfig.requestTimeoutMs,
     });
+    const subagents = new RestrictedSubagentCoordinator(
+      model,
+      boundary,
+      systemClock,
+      uuidGenerator,
+      writeLeases,
+      {
+        maxRounds: Math.min(8, this.config.maxAgentRounds),
+        maxToolCalls: Math.min(30, this.config.maxToolCalls),
+        maxRunTimeMs: Math.min(300_000, this.config.maxRunTimeMs),
+        maxModelRetries: this.config.maxModelRetries,
+        retryBaseDelayMs: this.config.retryBaseDelayMs,
+        retryMaxDelayMs: this.config.retryMaxDelayMs,
+        maxOutputTokens: Math.min(16_384, modelConfig.maxOutputTokens),
+        contextTokenBudget: Math.min(64_000, this.config.contextTokenBudget),
+      },
+    );
     const startNavigationRevision = this.navigationRevision;
     const runner = new AgentRunner(
       {
@@ -222,6 +248,9 @@ export class AppController {
         approvals,
         clock: systemClock,
         ids: uuidGenerator,
+        projectMemory: this.projectMemory,
+        subagents,
+        writeLeases,
         onSessionChange: async (session) => {
           const pendingTitle = this.pendingTitles.get(session.id);
           if (pendingTitle) {
@@ -397,6 +426,25 @@ export class AppController {
     if (!this.workspaceRoot) return [];
     const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
     return searchWorkspace(boundary, query);
+  }
+
+  async listProjectMemory(): Promise<ProjectMemorySnapshot | null> {
+    if (!this.workspaceRoot) return null;
+    this.currentProjectMemory = await this.projectMemory.snapshot(this.workspaceRoot);
+    return this.currentProjectMemory;
+  }
+
+  async deleteProjectMemory(idInput: unknown): Promise<ProjectMemorySnapshot | null> {
+    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+    const id = projectMemoryIdSchema.parse(idInput);
+    this.currentProjectMemory = await this.projectMemory.delete(this.workspaceRoot, id);
+    return this.currentProjectMemory;
+  }
+
+  handleProjectMemoryChange(snapshot: ProjectMemorySnapshot): void {
+    if (snapshot.workspaceRoot !== this.workspaceRoot) return;
+    this.currentProjectMemory = snapshot;
+    this.emit({ type: "project_memory_updated", memory: snapshot });
   }
 
   cancelTask(detail = "任务已由用户取消"): void {
@@ -731,6 +779,9 @@ export class AppController {
     this.sessions = state.sessions;
     this.workspaces = state.workspaces;
     this.workspaceRoot = state.workspaceRoot;
+    this.currentProjectMemory = this.workspaceRoot
+      ? await this.projectMemory.snapshot(this.workspaceRoot)
+      : null;
   }
 
   private emitWorkspaceChanged(): void {
@@ -741,6 +792,7 @@ export class AppController {
       sessions: this.sessions,
       session: this.currentSession,
     });
+    this.emit({ type: "project_memory_updated", memory: this.currentProjectMemory });
   }
 
   private emit(event: RendererEvent): void {
