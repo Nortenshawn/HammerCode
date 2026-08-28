@@ -18,11 +18,12 @@ import { HammerCodeError } from "../src/core/types";
 
 class ScriptedModel implements ModelClient {
   readonly requests: ModelRequest[] = [];
-  constructor(private readonly scripts: ModelStreamChunk[][]) {}
+  constructor(private readonly scripts: Array<ModelStreamChunk[] | Error>) {}
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamChunk> {
     this.requests.push(request);
     const script = this.scripts.shift();
     if (!script) throw new Error("unexpected model request");
+    if (script instanceof Error) throw script;
     for (const chunk of script) yield chunk;
   }
 }
@@ -696,6 +697,8 @@ describe("agent runner", () => {
     const oldConclusion = `第一轮长结论：${"x".repeat(7_000)}`;
     const model = new ScriptedModel([
       [{ content: oldConclusion, finishReason: "stop" }],
+      new HammerCodeError("temporary", "MODEL_SERVER_ERROR", true),
+      [{ content: "原始目标必须保留；第一轮已完成。", finishReason: "stop" }],
       [{ content: "已依据压缩记忆继续。", finishReason: "stop" }],
     ]);
     const runner = new AgentRunner(
@@ -705,6 +708,7 @@ describe("agent runner", () => {
         approvals: approve,
         ids,
         clock,
+        wait: async () => {},
       },
       {
         maxRounds: 2,
@@ -723,13 +727,17 @@ describe("agent runner", () => {
     });
     expect(resumed.messages).toHaveLength(first.messages.length + 2);
     expect(resumed.turns.at(-1)?.metrics?.contextCompactions).toBe(1);
-    expect(model.requests[1].messages[0]).toMatchObject({ role: "system" });
-    expect(JSON.stringify(model.requests[1].messages[0])).toContain("必须保留原始目标");
-    expect(model.requests[1].messages).toEqual(expect.arrayContaining([
+    expect(model.requests[1].tools).toEqual([]);
+    expect(model.requests[2].tools).toEqual([]);
+    expect(JSON.stringify(model.requests[2].messages)).toContain("必须保留原始目标");
+    expect(model.requests[3].messages[0]).toMatchObject({ role: "system" });
+    expect(JSON.stringify(model.requests[3].messages[0])).toContain("原始目标必须保留");
+    expect(model.requests[3].messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ role: "user", content: "继续下一阶段" }),
     ]));
-    expect(model.requests[1].messages).not.toEqual(expect.arrayContaining([
+    expect(model.requests[3].messages).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ role: "assistant", content: oldConclusion }),
     ]));
+    expect(resumed.turns.at(-1)?.metrics).toMatchObject({ modelRequests: 3, retryCount: 1 });
   });
 });

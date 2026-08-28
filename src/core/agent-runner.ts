@@ -11,10 +11,10 @@ import type {
   ToolResult,
   ToolTrace,
 } from "../shared/contracts";
+import { compactContextWithModel } from "./context-compactor";
 import {
   buildContextFacts,
   buildModelContext,
-  createContextMemory,
   estimateTokens,
   historyAfterContextMemory,
   systemPromptWithContextMemory,
@@ -46,6 +46,7 @@ export class AgentRunner {
   private running = false;
   private cancellationDetail = "任务已由用户取消";
   private runDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingAutoCompactionSource: AgentSession | null = null;
 
   constructor(
     private readonly dependencies: AgentDependencies,
@@ -62,6 +63,7 @@ export class AgentRunner {
     settings: TurnExecutionSettings = DEFAULT_TURN_SETTINGS,
   ): Promise<AgentSession> {
     this.assertCanRun(task);
+    this.pendingAutoCompactionSource = null;
     const now = this.dependencies.clock.now().toISOString();
     const turnId = this.dependencies.ids.next("turn");
     const userMessageId = this.dependencies.ids.next("message");
@@ -129,10 +131,9 @@ export class AgentRunner {
       now,
       () => this.dependencies.ids.next("message"),
     );
-    const autoCompacted = this.shouldAutoCompact(this.session);
-    if (autoCompacted) {
-      this.session.contextMemory = createContextMemory(this.session, now, "automatic");
-    }
+    this.pendingAutoCompactionSource = this.shouldAutoCompact(this.session)
+      ? cloneValue(this.session)
+      : null;
     const turnId = this.dependencies.ids.next("turn");
     const userMessageId = this.dependencies.ids.next("message");
     this.session.turns.push({
@@ -145,7 +146,7 @@ export class AgentRunner {
       planRequired: isComplexTask(input),
       planCheckpoints: [],
       retryEvents: [],
-      metrics: this.initialMetrics(autoCompacted),
+      metrics: this.initialMetrics(false),
       createdAt: now,
       updatedAt: now,
     });
@@ -190,6 +191,7 @@ export class AgentRunner {
     );
     try {
       await this.moveTo("requesting", startReason);
+      await this.compactPendingContext(abort.signal);
       await this.runLoop(abort.signal);
     } catch (error) {
       const now = this.dependencies.clock.now().toISOString();
@@ -215,8 +217,68 @@ export class AgentRunner {
       this.runDeadlineTimer = null;
       this.running = false;
       this.runAbort = null;
+      this.pendingAutoCompactionSource = null;
     }
     return this.requireSession();
+  }
+
+  private async compactPendingContext(signal: AbortSignal): Promise<void> {
+    const source = this.pendingAutoCompactionSource;
+    if (!source) return;
+    const session = this.requireSession();
+    const turn = this.currentTurn();
+    const metrics = turn.metrics!;
+    session.streamingReasoning = "正在压缩上下文…";
+    await this.publish();
+    try {
+      while (true) {
+        if (signal.aborted) throw signal.reason;
+        metrics.modelRequests += 1;
+        await this.publish();
+        try {
+          const result = await compactContextWithModel(
+            this.dependencies.model,
+            source,
+            this.dependencies.clock.now().toISOString(),
+            "automatic",
+            signal,
+          );
+          session.contextMemory = result.memory;
+          metrics.contextCompactions += 1;
+          metrics.promptTokens += result.promptTokens;
+          metrics.completionTokens += result.completionTokens;
+          metrics.tokenUsageEstimated ||= result.usageEstimated;
+          metrics.currentContextTokens = estimateTokens(
+            `${systemPromptWithContextMemory(this.options.systemPrompt, result.memory)}\n${JSON.stringify(historyAfterContextMemory(session))}`,
+          );
+          break;
+        } catch (error) {
+          const retryReason = this.retryReasonFor(error);
+          if (!retryReason || metrics.retryCount >= metrics.maxRetries || signal.aborted) throw error;
+          metrics.retryCount += 1;
+          const requestedDelay = error instanceof HammerCodeError ? error.retryAfterMs : undefined;
+          const exponential = this.retryBaseDelayMs() * 2 ** (metrics.retryCount - 1);
+          const delayMs = Math.min(this.retryMaxDelayMs(), requestedDelay ?? exponential);
+          turn.retryEvents = [
+            ...(turn.retryEvents ?? []),
+            {
+              attempt: metrics.retryCount,
+              reason: retryReason,
+              delayMs,
+              createdAt: this.dependencies.clock.now().toISOString(),
+            },
+          ];
+          metrics.promptTokens += estimateTokens(JSON.stringify(source.messages));
+          metrics.tokenUsageEstimated = true;
+          await this.publish();
+          await this.wait(delayMs, signal);
+        }
+      }
+    } finally {
+      session.streamingReasoning = "";
+      this.pendingAutoCompactionSource = null;
+    }
+    await this.publish();
   }
 
   private async runLoop(signal: AbortSignal): Promise<void> {

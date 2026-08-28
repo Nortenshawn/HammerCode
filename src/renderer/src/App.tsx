@@ -24,6 +24,7 @@ import type {
 } from "../../shared/contracts";
 import { buildFileReviews, type FileReview } from "../../shared/file-reviews";
 import { fallbackChatTitle } from "../../shared/chat-title";
+import { filterComposerCommands, type ComposerCommandId } from "./composer-commands";
 import { renderDiffLines } from "./diff-renderer";
 import { detectComposerToken, formatWorkspaceMention, replaceComposerToken } from "./composer-tokens";
 import { computeWorkbenchLayout, DEFAULT_PANEL_RATIO, panelRatioFromDivider } from "./panel-layout";
@@ -437,13 +438,13 @@ function SideChatPanel({
   };
 
   return (
-    <aside className="utility-panel side-chat-panel" aria-label="临时 BTW 侧边聊天">
+    <aside className="utility-panel side-chat-panel" aria-label="侧边聊天">
       <div className="panel-resize-handle" onPointerDown={(event) => { event.preventDefault(); onResizeStart(event.clientX); }} aria-hidden="true"/>
       <header className="side-chat-header">
-        <div><span><Icon name="branch" size={15}/>BTW</span><strong>{sideChat.sourceTitle}</strong></div>
-        <button className="panel-close" onClick={onClose} aria-label="关闭 BTW">×</button>
+        <div><Icon name="branch" size={15}/><strong>侧边聊天</strong></div>
+        <button className="panel-close" onClick={onClose} aria-label="关闭侧边聊天">×</button>
       </header>
-      <p className="side-chat-boundary">创建时复制主线快照 · 只读 · 关闭即消失</p>
+      <p className="side-chat-boundary">侧边聊天是临时聊天，关闭后会消失</p>
       <div className="side-chat-messages" ref={scrollRef}>
         {sideChat.messages.length === 0 && !requesting && <div className="side-chat-welcome"><Icon name="branch" size={21}/><strong>临时问一件事</strong><p>回答只留在这里，不会写回主聊天，也不会调用工具。</p></div>}
         {sideChat.messages.map((message) => message.role === "user"
@@ -555,10 +556,12 @@ function ContextRing({
   session,
   budget,
   autoCompactRatio,
+  compacting,
 }: {
   session: AgentSession | null;
   budget: number;
   autoCompactRatio: number;
+  compacting: boolean;
 }) {
   const turn = session?.turns.find((item) => item.id === session.activeTurnId) ?? session?.turns.at(-1);
   const used = turn?.metrics?.currentContextTokens ?? 0;
@@ -566,8 +569,10 @@ function ContextRing({
   const radius = 8;
   const circumference = 2 * Math.PI * radius;
   const compactions = session?.contextMemory?.compactionCount ?? turn?.metrics?.contextCompactions ?? 0;
-  const tooltip = `已用 ${Math.round(ratio * 100)}% · 记忆窗口 ${formatMemoryTokens(used)}/${formatMemoryTokens(budget)} · 自动压缩 ${Math.round(autoCompactRatio * 100)}% · 已压缩 ${compactions} 次`;
-  return <span className={`context-ring ${session ? "" : "empty"}`} title={tooltip} role="img" aria-label={tooltip}>
+  const tooltip = compacting
+    ? "正在使用模型压缩上下文，完成前不会替换现有记忆"
+    : `已用 ${Math.round(ratio * 100)}% · 记忆窗口 ${formatMemoryTokens(used)}/${formatMemoryTokens(budget)} · 自动压缩 ${Math.round(autoCompactRatio * 100)}% · 已压缩 ${compactions} 次`;
+  return <span className={`context-ring ${session ? "" : "empty"} ${compacting ? "compacting" : ""}`} title={tooltip} role="img" aria-label={tooltip}>
     <svg viewBox="0 0 22 22" aria-hidden="true"><circle className="context-ring-track" cx="11" cy="11" r={radius}/><circle className="context-ring-value" cx="11" cy="11" r={radius} strokeDasharray={circumference} strokeDashoffset={circumference * (1 - ratio)}/></svg>
   </span>;
 }
@@ -585,6 +590,7 @@ export function App() {
   const [view, setView] = useState<"chat" | "settings">("chat");
   const [task, setTask] = useState("");
   const [busy, setBusy] = useState(false);
+  const [contextCompacting, setContextCompacting] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [showFullAccessWarning, setShowFullAccessWarning] = useState(false);
   const [selectedReviewPath, setSelectedReviewPath] = useState<string | null>(null);
@@ -813,12 +819,15 @@ export function App() {
   const compressContext = async () => {
     if (!session || isBusy || busy) return;
     setBusy(true);
+    setContextCompacting(true);
     try {
       await window.hammerCode.compressContext();
       setNotice(null);
     } catch (error) {
-      setNotice({ level: "error", text: userFacingError(error) });
+      const message = userFacingError(error);
+      setNotice(message.includes("上下文压缩已停止") ? null : { level: "error", text: message });
     } finally {
+      setContextCompacting(false);
       setBusy(false);
     }
   };
@@ -842,7 +851,7 @@ export function App() {
     catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
   };
 
-  const selectSlashCommand = (id: "side_chat" | "models" | "compress") => {
+  const selectSlashCommand = (id: ComposerCommandId) => {
     replaceActiveToken("");
     if (id === "side_chat") {
       setPaletteMode(null);
@@ -957,11 +966,10 @@ export function App() {
 
   if (!bootstrap) return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
 
-  const slashCommands = [
-    { id: "side_chat" as const, label: "/侧边聊天", description: "临时只读 BTW 分支 · /btw", disabled: !session },
-    { id: "models" as const, label: "/模型（API）", description: "选择 Fast 或 Strong", disabled: isBusy },
-    { id: "compress" as const, label: "/压缩上下文", description: "立即生成当前聊天的持久化记忆", disabled: !session || isBusy },
-  ].filter((item) => !composerToken?.query || `${item.label}${item.description}`.toLocaleLowerCase().includes(composerToken.query.toLocaleLowerCase()));
+  const slashCommands = filterComposerCommands(composerToken?.query ?? "").map((command) => ({
+    ...command,
+    disabled: command.id === "side_chat" ? !session : command.id === "models" ? isBusy : !session || isBusy,
+  }));
   const paletteCount = paletteMode === "models"
       ? bootstrap.config.availableModels.length
       : composerToken?.kind === "mention"
@@ -1084,22 +1092,22 @@ export function App() {
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${composerLocked ? "disabled" : ""}`}>
             {paletteOpen && !busy && !session?.pendingUndo && <div className="composer-palette" role="listbox" aria-label={paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : "命令"} onMouseDown={(event) => event.preventDefault()}>
-              <header><strong>{paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : "命令"}</strong><span>↑↓ 选择 · Enter 确认 · Esc 关闭</span></header>
+              <header><strong>{paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : "命令"}</strong></header>
               <div className="palette-list">
                 {paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
                     : composerToken?.kind === "mention" ? (mentionEntries.length > 0 ? mentionEntries.map((entry, index) => <button key={entry.path} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={entry.kind === "directory" ? "folder" : "file"} size={15}/><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>) : <p>没有匹配的工作区条目</p>)
-                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" ? "gear" : "chevron"} size={15}/><span><strong>{command.label}</strong><small>{command.description}</small></span></button>)}
+                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={`command-palette-row ${index === paletteIndex ? "active" : ""}`} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" ? "gear" : "chevron"} size={15}/><strong>{command.label}</strong></button>)}
               </div>
             </div>}
             <div className="composer-row">
-              <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={workspaceRoot ? (anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={1}/>
+              <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={workspaceRoot ? (contextCompacting ? "正在压缩上下文" : anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={1}/>
               <div className="composer-controls">
-                <ContextRing session={session} budget={bootstrap.config.contextTokenBudget} autoCompactRatio={bootstrap.config.autoCompactRatio}/>
+                <ContextRing session={session} budget={bootstrap.config.contextTokenBudget} autoCompactRatio={bootstrap.config.autoCompactRatio} compacting={contextCompacting}/>
                 <select aria-label="模型" title="模型" value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelRef, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select>
                 <select aria-label="权限" title="权限" value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select>
               </div>
-              {isRunning
-                ? <button key="stop" className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button>
+              {isRunning || contextCompacting
+                ? <button key="stop" className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label={contextCompacting ? "停止上下文压缩" : "停止任务"}><Icon name="stop" size={15}/></button>
                 : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={!task.trim() || !workspaceRoot || isBusy || anotherSessionIsRunning || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
             </div>
           </div>

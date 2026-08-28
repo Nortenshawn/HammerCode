@@ -3,7 +3,8 @@ import { dialog, type BrowserWindow } from "electron";
 import { z } from "zod";
 import { AgentRunner } from "../core/agent-runner";
 import { fallbackChatTitle, generateChatTitle } from "../core/chat-title";
-import { createContextMemory, estimateTokens } from "../core/context";
+import { compactContextWithModel, type ModelContextCompactionResult } from "../core/context-compactor";
+import { estimateTokens, systemPromptWithContextMemory } from "../core/context";
 import { reconcilePendingUndo } from "../core/file-state";
 import { prepareFileUndo } from "../core/file-undo";
 import { OpenAICompatibleChatClient } from "../core/model/openai-compatible-client";
@@ -12,7 +13,7 @@ import { WorkspaceBoundary } from "../core/security/path-boundary";
 import { DEFAULT_SYSTEM_PROMPT } from "../core/system-prompt";
 import { LocalToolExecutor } from "../core/tools/tool-executor";
 import { HammerCodeError } from "../core/types";
-import { redactSecrets, systemClock, toErrorMessage, uuidGenerator } from "../core/utils";
+import { isAbortError, redactSecrets, systemClock, toErrorMessage, uuidGenerator } from "../core/utils";
 import {
   BUILTIN_MODEL_REFS,
   MODEL_TIERS,
@@ -81,6 +82,7 @@ export class AppController {
   private runner: AgentRunner | null = null;
   private approvals: PendingApprovalGateway | null = null;
   private undoAbort: AbortController | null = null;
+  private contextCompactionAbort: AbortController | null = null;
   private runningSessionId: string | null = null;
   private sideChat: EphemeralSideChat | null = null;
   private readonly titleRequests = new Set<string>();
@@ -304,18 +306,48 @@ export class AppController {
     if (this.isBusy() || !["completed", "cancelled", "failed"].includes(session.status)) {
       throw new HammerCodeError("只能在当前任务结束后压缩上下文", "SESSION_BUSY", true);
     }
-    session.contextMemory = createContextMemory(session, systemClock.now().toISOString(), "explicit");
-    const activeTurn = session.turns.find((turn) => turn.id === session.activeTurnId);
-    if (activeTurn?.metrics) {
-      activeTurn.metrics.contextCompactions += 1;
-      activeTurn.metrics.currentContextTokens = estimateTokens(`${DEFAULT_SYSTEM_PROMPT}\n${session.contextMemory.summary}`);
+    const selected = this.resolveModel(session.modelTier, session.modelRef);
+    const abort = new AbortController();
+    this.contextCompactionAbort = abort;
+    try {
+      const result = await this.compactContextWithRetry(
+        this.createModelClient(selected.config, {
+          maxOutputTokens: Math.min(8_192, selected.config.maxOutputTokens),
+          requestTimeoutMs: Math.max(60_000, selected.config.requestTimeoutMs),
+        }),
+        session,
+        abort.signal,
+      );
+      if (this.currentSession?.id !== session.id) {
+        throw new HammerCodeError("压缩期间当前聊天已经变化，未写入新记忆", "CONTEXT_COMPACTION_STALE", true);
+      }
+      session.contextMemory = result.memory;
+      const activeTurn = session.turns.find((turn) => turn.id === session.activeTurnId);
+      if (activeTurn?.metrics) {
+        activeTurn.metrics.modelRequests += result.attempts;
+        activeTurn.metrics.retryCount += result.attempts - 1;
+        activeTurn.metrics.promptTokens += result.promptTokens;
+        activeTurn.metrics.completionTokens += result.completionTokens;
+        activeTurn.metrics.tokenUsageEstimated ||= result.usageEstimated;
+        activeTurn.metrics.contextCompactions += 1;
+        activeTurn.metrics.currentContextTokens = estimateTokens(
+          systemPromptWithContextMemory(DEFAULT_SYSTEM_PROMPT, result.memory),
+        );
+      }
+      session.updatedAt = result.memory.updatedAt;
+      await this.store.save(session);
+      this.upsertSummary(session);
+      this.upsertWorkspace(session);
+      this.emit({ type: "session_snapshot", session });
+      return result.memory;
+    } catch (error) {
+      if (isAbortError(error) || abort.signal.aborted) {
+        throw new HammerCodeError("上下文压缩已停止，旧记忆保持不变", "CONTEXT_COMPACTION_CANCELLED", true);
+      }
+      throw error;
+    } finally {
+      if (this.contextCompactionAbort === abort) this.contextCompactionAbort = null;
     }
-    session.updatedAt = session.contextMemory.updatedAt;
-    await this.store.save(session);
-    this.upsertSummary(session);
-    this.upsertWorkspace(session);
-    this.emit({ type: "session_snapshot", session });
-    return session.contextMemory;
   }
 
   openSideChat(): EphemeralSideChatState {
@@ -371,6 +403,7 @@ export class AppController {
     this.runner?.cancel(detail);
     this.approvals?.cancel();
     this.undoAbort?.abort(new DOMException("用户取消撤销", "AbortError"));
+    this.contextCompactionAbort?.abort(new DOMException("用户停止上下文压缩", "AbortError"));
   }
 
   resolveApproval(idInput: unknown, approved: unknown): void {
@@ -477,7 +510,7 @@ export class AppController {
   }
 
   private isBusy(): boolean {
-    return this.isRunning() || this.isUndoBusy();
+    return this.isRunning() || this.isUndoBusy() || this.contextCompactionAbort !== null;
   }
 
   shutdown(): void {
@@ -488,7 +521,7 @@ export class AppController {
   private requireSideChat(idInput: unknown): EphemeralSideChat {
     const id = sideChatIdSchema.parse(idInput);
     if (!this.sideChat || this.sideChat.snapshot.id !== id) {
-      throw new HammerCodeError("BTW 已关闭或不存在", "SIDE_CHAT_NOT_FOUND", true);
+      throw new HammerCodeError("侧边聊天已关闭或不存在", "SIDE_CHAT_NOT_FOUND", true);
     }
     return this.sideChat;
   }
@@ -514,6 +547,53 @@ export class AppController {
       maxOutputTokens: overrides.maxOutputTokens ?? modelConfig.maxOutputTokens,
       requestTimeoutMs: overrides.requestTimeoutMs ?? modelConfig.requestTimeoutMs,
     });
+  }
+
+  private async compactContextWithRetry(
+    model: OpenAICompatibleChatClient,
+    session: AgentSession,
+    signal: AbortSignal,
+  ): Promise<ModelContextCompactionResult & { attempts: number }> {
+    let attempts = 0;
+    while (true) {
+      attempts += 1;
+      try {
+        const result = await compactContextWithModel(
+          model,
+          session,
+          systemClock.now().toISOString(),
+          "explicit",
+          signal,
+        );
+        return {
+          ...result,
+          attempts,
+          promptTokens: result.promptTokens + result.estimatedPromptTokens * (attempts - 1),
+          usageEstimated: result.usageEstimated || attempts > 1,
+        };
+      } catch (error) {
+        if (signal.aborted) throw signal.reason;
+        const retryable = error instanceof HammerCodeError && [
+          "MODEL_RATE_LIMITED",
+          "MODEL_SERVER_ERROR",
+          "MODEL_RESOURCE_EXHAUSTED",
+        ].includes(error.code);
+        if (!retryable || attempts > this.config.maxModelRetries) throw error;
+        const exponential = this.config.retryBaseDelayMs * 2 ** (attempts - 1);
+        const delayMs = Math.min(this.config.retryMaxDelayMs, error.retryAfterMs ?? exponential);
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+          };
+          const timer = setTimeout(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+          }, delayMs);
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    }
   }
 
   private async generateAndPersistTitle(sessionId: string): Promise<void> {

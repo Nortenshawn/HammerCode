@@ -95,10 +95,10 @@ export class EphemeralSideChat {
   async send(contentInput: string): Promise<void> {
     const content = contentInput.trim();
     if (!content || content.length > QUESTION_LIMIT) {
-      throw new HammerCodeError("BTW 问题长度无效", "SIDE_CHAT_INVALID_INPUT", true);
+      throw new HammerCodeError("侧边聊天问题长度无效", "SIDE_CHAT_INVALID_INPUT", true);
     }
     if (this.abortController) {
-      throw new HammerCodeError("BTW 正在回答上一条问题", "SIDE_CHAT_BUSY", true);
+      throw new HammerCodeError("侧边聊天正在回答上一条问题", "SIDE_CHAT_BUSY", true);
     }
     const abort = new AbortController();
     this.abortController = abort;
@@ -140,7 +140,7 @@ export class EphemeralSideChat {
         signal: abort.signal,
       })) {
         if (chunk.toolCallDeltas?.length) {
-          throw new HammerCodeError("BTW 模型返回了工具调用，已按只读边界阻断", "SIDE_CHAT_TOOL_CALL");
+          throw new HammerCodeError("侧边聊天模型返回了工具调用，已按只读边界阻断", "SIDE_CHAT_TOOL_CALL");
         }
         if (chunk.reasoningContent) this.state.streamingReasoning += chunk.reasoningContent;
         if (chunk.content) this.state.streamingText += chunk.content;
@@ -148,16 +148,16 @@ export class EphemeralSideChat {
         this.touch();
       }
       if (finishReason === "length") {
-        throw new HammerCodeError("BTW 输出长度已耗尽，可以缩小问题后继续", "SIDE_CHAT_OUTPUT_LIMIT", true);
+        throw new HammerCodeError("侧边聊天输出长度已耗尽，可以缩小问题后继续", "SIDE_CHAT_OUTPUT_LIMIT", true);
       }
       if (finishReason === "content_filter") {
-        throw new HammerCodeError("BTW 输出被内容策略终止", "SIDE_CHAT_CONTENT_FILTER", true);
+        throw new HammerCodeError("侧边聊天输出被内容策略终止", "SIDE_CHAT_CONTENT_FILTER", true);
       }
       if (finishReason === "insufficient_system_resource") {
-        throw new HammerCodeError("BTW 服务资源暂时不足", "SIDE_CHAT_RESOURCE_EXHAUSTED", true);
+        throw new HammerCodeError("侧边聊天服务资源暂时不足", "SIDE_CHAT_RESOURCE_EXHAUSTED", true);
       }
       if (!this.state.streamingText.trim()) {
-        throw new HammerCodeError("BTW 没有返回可显示的回答", "SIDE_CHAT_EMPTY", true);
+        throw new HammerCodeError("侧边聊天没有返回可显示的回答", "SIDE_CHAT_EMPTY", true);
       }
       const completedAt = this.clock.now().toISOString();
       this.state.messages.push({
@@ -173,7 +173,7 @@ export class EphemeralSideChat {
       this.touch();
     } catch (error) {
       this.state.status = isAbortError(error) || abort.signal.aborted ? "cancelled" : "failed";
-      this.state.error = this.state.status === "cancelled" ? "BTW 已停止" : toErrorMessage(error);
+      this.state.error = this.state.status === "cancelled" ? "侧边聊天已停止" : toErrorMessage(error);
       this.touch();
     } finally {
       if (this.abortController === abort) this.abortController = null;
