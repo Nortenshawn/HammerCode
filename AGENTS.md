@@ -10,17 +10,19 @@
 
 - 独立设计并实现一个本地编程智能体。它应通过与大语言模型交互，自主读取和修改工作区文件、执行经过授权的命令，并完成真实编程任务。
 - 正式产品形态是面向 Apple Silicon macOS 本地演示的 Electron + TypeScript 桌面应用，界面语言以中文为主；代码、协议字段和工具名称可使用英文。
-- 产品优先形成可靠、透明、可解释的单工作区 agent 闭环，不以功能数量代替完成度。
+- 产品优先形成可靠、透明、可解释的 agent 闭环；应用可以管理多个项目，但每条聊天和每个 turn 仍严格绑定单一工作区，不以功能数量代替完成度。
 - 模型接入当前以 OpenAI-compatible API 为稳定边界，允许配置 endpoint、model 和凭据；后续协议与模型路由按开发计划演进。
 
 ## 当前模型接入约定
 
-- 当前默认模型为 `deepseek-v4-flash`，默认 OpenAI-compatible base URL 为 `https://api.deepseek.com`，使用 `POST /chat/completions`、SSE 流式输出和 function tool calling。模型名、endpoint、思考模式与推理强度必须保持可配置，不得散落硬编码在 agent core 中。
+- 当前提供 `fast` 与 `strong` 两个显式模型档位：`fast` 默认使用 `deepseek-v4-flash`，默认 OpenAI-compatible base URL 为 `https://api.deepseek.com`；`strong` 默认使用 `glm-5.3-flash`，默认智谱 base URL 为 `https://open.bigmodel.cn/api/paas/v4`。两者都使用 `POST /chat/completions`、Bearer 鉴权、SSE 流式输出和 function tool calling。
+- 模型档位、模型名、endpoint、思考模式、推理强度、输出预算和请求超时必须集中配置，不得散落硬编码在 agent core 中。每个 turn 必须固化实际模型档位，不允许运行中切换或在失败时静默回退到另一模型。
 - DeepSeek V4 的思考模式通过请求字段 `thinking: { type: "enabled" | "disabled" }` 控制，当前默认开启；`reasoning_effort` 只允许经过配置校验的 `low`、`high` 或 `max`。
+- GLM-5.3-Flash 的 `thinking.type` 只允许 `enabled`，默认发送 `thinking.clear_thinking: false`、`reasoning_effort: max`、`stream: true` 和 `tool_stream: true`。应用必须按厂商配置生成请求体，不得把 DeepSeek 专用字段无条件发送给智谱，反之亦然。
 - 流式解析必须兼容文本、`reasoning_content`、分片 `tool_calls`、`[DONE]` 以及 `stop`、`tool_calls`、`length`、`content_filter`、`insufficient_system_resource` 等结束原因。模型返回的 tool call 参数始终按不可信 JSON 处理。
 - 官方公布的模型上下文与输出上限只能作为能力上限，不能直接作为应用默认值。应用必须设置更保守且可配置的输入预算、单次输出上限、工具结果上限和 agent 轮次上限。
 - 新增 Responses API、厂商扩展或其他模型时，必须先更新 `docs/DEVELOPMENT_PLAN.md` 并保持本地工具安全边界；OpenAI-compatible 模型应优先复用同一模型端口，不在核心循环中散布厂商分支。
-- 本节依据 2026-08-27 查阅的 DeepSeek 官方 API 文档维护；接口升级时应先核对官方 Chat Completions、Tool Calls、Models & Pricing 和更新日志，再调整兼容层与测试。
+- 本节依据 2026-08-28 查阅的 DeepSeek 与智谱官方 API 文档维护；接口升级时应先核对各自官方模型页、Chat Completions、Tool Calls 和更新日志，再调整兼容层与测试。
 
 ## 不可违反的实现限制
 
@@ -50,12 +52,20 @@
 - 每个会话只绑定一个由用户明确选择的工作区根目录。文件工具和命令 cwd 默认都限制在该目录中。
 - 访问文件前必须规范化并校验真实路径；应覆盖 `..`、绝对路径、符号链接和不存在目标的父目录，防止读写逃逸到工作区外。
 - 工作区内的专用只读工具可以自动执行，例如列目录、读文件和文本搜索。
-- 文件创建、修改和删除必须先展示意图或 diff，并进入审批流程；未经批准不得落盘。
+- 文件创建、修改和删除必须先生成可审计的意图或 diff。`ask` 模式进入用户审批流程；`full_access` 模式可按“聊天权限模式”自动批准，但仍必须先完成安全校验并记录授权来源，未经任一合法授权不得落盘。
 - 通用命令执行默认需要审批。只有经过显式设计、参数也可安全验证的只读命令才可加入自动执行白名单，不能仅凭命令名称猜测安全性。
 - 审批界面必须显示将执行的完整工具名、关键参数、目标路径或命令及 cwd。拒绝审批应作为正常、可恢复的 agent 结果处理。
 - 越界访问、提权操作及明显破坏性命令必须直接拒绝，不能只依赖用户审批兜底。
 - 命令执行必须具备超时、输出上限和取消能力。取消任务时应终止对应子进程及其进程组，不能留下后台孤儿进程。
 - 工具参数必须在执行前进行运行时校验；工具结果必须有稳定的结构和大小限制，不能把无限输出直接塞回模型上下文。
+
+## 聊天权限模式
+
+- 每条聊天持久化 `PermissionMode = "ask" | "full_access"`，旧聊天迁移后必须默认为 `ask`。每个 turn 固化实际权限模式；修改聊天偏好只能影响下一轮，任务、审批或撤销运行中禁止切换。
+- `ask` 是默认模式：只读工具可以自动执行；文件创建、修改、删除和通用命令逐次进入审批。
+- `full_access` 只免除工作区内普通文件副作用和普通命令的逐次弹窗。工作区真实路径边界、路径穿越与符号链接逃逸阻断、命令参数校验、高风险命令禁令、超时、输出限制和取消能力不得被绕过。
+- 首次切换到 `full_access` 时，界面必须明确提示会自动修改工作区文件和运行普通命令，并说明工作区边界和高风险阻断仍然生效。
+- 工具审计必须区分无需审批、用户批准、用户拒绝、完全访问自动批准和安全策略直接阻断。完全访问下的自动执行仍必须记录工具名、参数摘要、目标、结果和耗时。
 
 ## 凭据与敏感信息
 

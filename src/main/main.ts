@@ -58,11 +58,17 @@ function registerIpc(appController: AppController): void {
 
   handle("hammercode:bootstrap", () => appController.bootstrap());
   handle("hammercode:choose-workspace", () => appController.chooseWorkspace());
+  handle("hammercode:select-workspace", (workspaceRoot: unknown) =>
+    appController.selectWorkspace(workspaceRoot),
+  );
   handle("hammercode:new-chat", () => appController.newChat());
   handle("hammercode:select-session", (sessionId: unknown) =>
     appController.selectSession(sessionId),
   );
-  handle("hammercode:start-task", (task: unknown) => appController.startTask(task));
+  handle("hammercode:update-session-settings", (settings: unknown) =>
+    appController.updateSessionSettings(settings),
+  );
+  handle("hammercode:start-task", (request: unknown) => appController.startTask(request));
   handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));
   handle("hammercode:cancel-task", () => appController.cancelTask());
   handle("hammercode:resolve-approval", (id: unknown, approved: unknown) =>

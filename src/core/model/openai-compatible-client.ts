@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { parseServerSentEvents } from "./sse";
 import type { ModelClient, ModelRequest, ModelStreamChunk } from "../types";
 import { HammerCodeError } from "../types";
 import { redactSecrets } from "../utils";
+import { parseServerSentEvents } from "./sse";
 
 const toolCallDeltaSchema = z.object({
   index: z.number().int().nonnegative(),
@@ -44,7 +44,8 @@ const streamChunkSchema = z.object({
     .optional(),
 });
 
-export interface DeepSeekClientConfig {
+export interface OpenAICompatibleClientConfig {
+  provider: "deepseek" | "zhipu";
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -54,8 +55,37 @@ export interface DeepSeekClientConfig {
   requestTimeoutMs: number;
 }
 
-export class DeepSeekChatClient implements ModelClient {
-  constructor(private readonly config: DeepSeekClientConfig) {}
+export function buildChatCompletionBody(
+  config: OpenAICompatibleClientConfig,
+  request: Pick<ModelRequest, "messages" | "tools">,
+): Record<string, unknown> {
+  const common: Record<string, unknown> = {
+    model: config.model,
+    messages: request.messages,
+    tools: request.tools,
+    tool_choice: "auto",
+    stream: true,
+    max_tokens: config.maxOutputTokens,
+    reasoning_effort: config.reasoningEffort,
+  };
+  if (config.provider === "zhipu") {
+    return {
+      ...common,
+      tool_stream: true,
+      temperature: 1,
+      top_p: 0.95,
+      thinking: { type: "enabled", clear_thinking: false },
+    };
+  }
+  return {
+    ...common,
+    stream_options: { include_usage: true },
+    thinking: { type: config.thinking },
+  };
+}
+
+export class OpenAICompatibleChatClient implements ModelClient {
+  constructor(private readonly config: OpenAICompatibleClientConfig) {}
 
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamChunk> {
     const timeoutController = new AbortController();
@@ -64,7 +94,13 @@ export class DeepSeekChatClient implements ModelClient {
       this.config.requestTimeoutMs,
     );
     const onAbort = () => timeoutController.abort(request.signal.reason);
-    request.signal.addEventListener("abort", onAbort, { once: true });
+    let listeningForAbort = false;
+    if (request.signal.aborted) {
+      onAbort();
+    } else {
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      listeningForAbort = true;
+    }
 
     try {
       const endpoint = `${this.config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
@@ -75,17 +111,7 @@ export class DeepSeekChatClient implements ModelClient {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({
-          model: this.config.model,
-          messages: request.messages,
-          tools: request.tools,
-          tool_choice: "auto",
-          stream: true,
-          stream_options: { include_usage: true },
-          max_tokens: this.config.maxOutputTokens,
-          thinking: { type: this.config.thinking },
-          reasoning_effort: this.config.reasoningEffort,
-        }),
+        body: JSON.stringify(buildChatCompletionBody(this.config, request)),
         signal: timeoutController.signal,
       });
 
@@ -107,7 +133,6 @@ export class DeepSeekChatClient implements ModelClient {
           sawDone = true;
           break;
         }
-
         let raw: unknown;
         try {
           raw = JSON.parse(data);
@@ -144,7 +169,7 @@ export class DeepSeekChatClient implements ModelClient {
       }
     } finally {
       clearTimeout(timeout);
-      request.signal.removeEventListener("abort", onAbort);
+      if (listeningForAbort) request.signal.removeEventListener("abort", onAbort);
     }
   }
 }

@@ -20,7 +20,9 @@ function sessionWithChanges(workspaceRoot: string, changes: FileChange[]): Agent
     workspaceRoot,
     status: "completed",
     task: "edit",
-    turns: [{ id: "turn_1", userMessageId: "user_1", status: "completed", terminationReason: "completed", createdAt: at, updatedAt: at, finishedAt: at }],
+    modelTier: "fast",
+    permissionMode: "ask",
+    turns: [{ id: "turn_1", userMessageId: "user_1", status: "completed", terminationReason: "completed", modelTier: "fast", permissionMode: "ask", createdAt: at, updatedAt: at, finishedAt: at }],
     activeTurnId: "turn_1",
     messages: [
       { id: "user_1", turnId: "turn_1", role: "user", content: "edit", createdAt: at },

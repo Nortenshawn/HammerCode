@@ -3,11 +3,15 @@ import path from "node:path";
 import { z } from "zod";
 import { closeUnresolvedToolCalls } from "../core/session-recovery";
 import {
+  MODEL_TIERS,
+  PERMISSION_MODES,
   SESSION_STATUSES,
   type AgentSession,
   type AgentTurn,
   type ConversationMessage,
   type SessionSummary,
+  type ToolAuthorization,
+  type WorkspaceSummary,
 } from "../shared/contracts";
 
 const toolCallSchema = z.object({ id: z.string(), name: z.string(), arguments: z.string() });
@@ -32,7 +36,13 @@ const approvalSchema = z.object({
   createdAt: z.string(),
 });
 const messageSchema = z.discriminatedUnion("role", [
-  z.object({ id: z.string(), turnId: z.string().optional(), role: z.literal("user"), content: z.string(), createdAt: z.string() }),
+  z.object({
+    id: z.string(),
+    turnId: z.string().optional(),
+    role: z.literal("user"),
+    content: z.string(),
+    createdAt: z.string(),
+  }),
   z.object({
     id: z.string(),
     turnId: z.string().optional(),
@@ -52,15 +62,27 @@ const messageSchema = z.discriminatedUnion("role", [
     createdAt: z.string(),
   }),
 ]);
+const terminationSchema = z.enum([
+  "completed",
+  "round_limit",
+  "cancelled",
+  "model_error",
+  "tool_error",
+  "invalid_model_output",
+  "context_overflow",
+  "interrupted",
+]);
 const turnSchema = z.object({
   id: z.string(),
   userMessageId: z.string(),
   status: z.enum(SESSION_STATUSES),
-  terminationReason: z.enum(["completed", "round_limit", "cancelled", "model_error", "tool_error", "invalid_model_output", "context_overflow", "interrupted"]).optional(),
+  terminationReason: terminationSchema.optional(),
   error: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   finishedAt: z.string().optional(),
+  modelTier: z.enum(MODEL_TIERS).optional(),
+  permissionMode: z.enum(PERMISSION_MODES).optional(),
 });
 const fileChangeSchema = z.object({
   id: z.string(),
@@ -84,11 +106,31 @@ const pendingUndoSchema = z.object({
   status: z.enum(["awaiting_approval", "executing"]),
   createdAt: z.string(),
 });
+const traceStatusSchema = z.enum([
+  "proposed",
+  "awaiting_approval",
+  "approved",
+  "rejected",
+  "running",
+  "succeeded",
+  "failed",
+  "blocked",
+  "cancelled",
+]);
+const authorizationSchema = z.enum([
+  "not_required",
+  "user_approved",
+  "user_rejected",
+  "full_access",
+  "safety_blocked",
+]);
 const sessionSchema = z.object({
   id: z.string(),
   workspaceRoot: z.string(),
   status: z.enum(SESSION_STATUSES),
   task: z.string(),
+  modelTier: z.enum(MODEL_TIERS).optional(),
+  permissionMode: z.enum(PERMISSION_MODES).optional(),
   turns: z.array(turnSchema).optional(),
   activeTurnId: z.string().optional(),
   messages: z.array(messageSchema),
@@ -96,7 +138,7 @@ const sessionSchema = z.object({
     z.object({
       turnId: z.string().optional(),
       call: toolCallSchema,
-      status: z.enum(["proposed", "awaiting_approval", "approved", "rejected", "running", "succeeded", "failed", "blocked", "cancelled"]),
+      status: traceStatusSchema,
       summary: z.string(),
       target: z.string().optional(),
       approval: approvalSchema.optional(),
@@ -105,6 +147,7 @@ const sessionSchema = z.object({
       finishedAt: z.string().optional(),
       durationMs: z.number().optional(),
       fileChangeId: z.string().optional(),
+      authorization: authorizationSchema.optional(),
     }),
   ),
   fileChanges: z.array(fileChangeSchema).optional(),
@@ -121,25 +164,40 @@ const sessionSchema = z.object({
   streamingReasoning: z.string(),
   pendingApproval: approvalSchema.optional(),
   pendingUndo: pendingUndoSchema.optional(),
-  terminationReason: z.enum(["completed", "round_limit", "cancelled", "model_error", "tool_error", "invalid_model_output", "context_overflow", "interrupted"]).optional(),
+  terminationReason: terminationSchema.optional(),
   error: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 
-const indexSchema = z.object({
+const indexV1Schema = z.object({
   version: z.literal(1),
   workspaceRoot: z.string().nullable(),
   activeSessionId: z.string().nullable(),
   sessionIds: z.array(z.string()),
 });
+const workspaceIndexSchema = z.object({
+  root: z.string(),
+  activeSessionId: z.string().nullable(),
+  sessionIds: z.array(z.string()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+const indexV2Schema = z.object({
+  version: z.literal(2),
+  activeWorkspaceRoot: z.string().nullable(),
+  workspaces: z.array(workspaceIndexSchema),
+});
 
 type ParsedSession = z.infer<typeof sessionSchema>;
-type SessionIndex = z.infer<typeof indexSchema>;
+type LegacyIndex = z.infer<typeof indexV1Schema>;
+type SessionIndex = z.infer<typeof indexV2Schema>;
+type WorkspaceIndex = z.infer<typeof workspaceIndexSchema>;
 
 export interface SessionStoreState {
   activeSession: AgentSession | null;
   sessions: SessionSummary[];
+  workspaces: WorkspaceSummary[];
   workspaceRoot: string | null;
 }
 
@@ -150,9 +208,25 @@ function legacyTurnId(sessionId: string, index: number): string {
   return `turn_legacy_${sessionId}_${index}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 200);
 }
 
+function inferAuthorization(trace: ParsedSession["toolTraces"][number]): ToolAuthorization {
+  if (trace.authorization) return trace.authorization;
+  if (trace.status === "blocked") return "safety_blocked";
+  if (trace.status === "rejected") return "user_rejected";
+  if (trace.approval) return "user_approved";
+  return "not_required";
+}
+
 function normalizeSessionShape(parsed: ParsedSession): AgentSession {
   const rawMessages = parsed.messages.map((message) => ({ ...message }));
-  let turns: AgentTurn[] = parsed.turns?.map((turn) => ({ ...turn })) ?? [];
+  const defaultModelTier = parsed.modelTier ?? parsed.turns?.at(-1)?.modelTier ?? "fast";
+  const defaultPermissionMode =
+    parsed.permissionMode ?? parsed.turns?.at(-1)?.permissionMode ?? "ask";
+  let turns: AgentTurn[] =
+    parsed.turns?.map((turn) => ({
+      ...turn,
+      modelTier: turn.modelTier ?? defaultModelTier,
+      permissionMode: turn.permissionMode ?? "ask",
+    })) ?? [];
 
   if (turns.length === 0) {
     const users = rawMessages.filter((message) => message.role === "user");
@@ -165,9 +239,16 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
         status: isLast ? parsed.status : "completed",
         terminationReason: isLast ? parsed.terminationReason : "completed",
         error: isLast ? parsed.error : undefined,
+        modelTier: defaultModelTier,
+        permissionMode: "ask",
         createdAt: message.createdAt,
         updatedAt: isLast ? parsed.updatedAt : users[index + 1]?.createdAt ?? parsed.updatedAt,
-        finishedAt: isLast && ACTIVE_STATUSES.has(parsed.status) ? undefined : isLast ? parsed.updatedAt : users[index + 1]?.createdAt,
+        finishedAt:
+          isLast && ACTIVE_STATUSES.has(parsed.status)
+            ? undefined
+            : isLast
+              ? parsed.updatedAt
+              : users[index + 1]?.createdAt,
       };
     });
   }
@@ -193,12 +274,15 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
     workspaceRoot: parsed.workspaceRoot,
     status: parsed.status,
     task: parsed.task,
+    modelTier: parsed.modelTier ?? turns.at(-1)?.modelTier ?? "fast",
+    permissionMode: parsed.permissionMode ?? defaultPermissionMode,
     turns,
     activeTurnId,
     messages,
     toolTraces: parsed.toolTraces.map((trace) => ({
       ...trace,
       turnId: trace.turnId ?? assistantTurnByCall.get(trace.call.id) ?? activeTurnId,
+      authorization: inferAuthorization(trace),
     })),
     fileChanges: parsed.fileChanges?.map((change) => ({ ...change })) ?? [],
     transitions: parsed.transitions.map((transition) => ({
@@ -223,13 +307,39 @@ function toSummary(session: AgentSession): SessionSummary {
     title: session.task.trim().split(/\r?\n/, 1)[0]?.slice(0, 120) || "未命名对话",
     status: session.status,
     turnCount: session.turns.length,
-    changedFileCount: new Set(session.fileChanges.filter((change) => change.status === "applied").map((change) => change.path)).size,
+    changedFileCount: new Set(
+      session.fileChanges
+        .filter((change) => change.status === "applied")
+        .map((change) => change.path),
+    ).size,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
   };
 }
 
+function workspaceName(root: string): string {
+  return path.basename(root) || root;
+}
+
+function toWorkspaceSummary(
+  workspace: WorkspaceIndex,
+  sessions: SessionSummary[],
+): WorkspaceSummary {
+  return {
+    root: workspace.root,
+    name: workspaceName(workspace.root),
+    sessionCount: sessions.length,
+    sessions,
+    activeSessionId: workspace.activeSessionId,
+    updatedAt: workspace.updatedAt,
+  };
+}
+
 function sortSummaries(items: SessionSummary[]): SessionSummary[] {
+  return items.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+function sortWorkspaces(items: WorkspaceSummary[]): WorkspaceSummary[] {
   return items.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
@@ -249,22 +359,39 @@ export class SessionStore {
 
   async loadState(): Promise<SessionStoreState> {
     const index = await this.readIndex();
-    const sessions: AgentSession[] = [];
-    const validIds: string[] = [];
-    for (const id of index.sessionIds) {
-      const session = await this.readSession(id);
-      if (!session) continue;
-      validIds.push(id);
-      sessions.push(session);
+    const workspaceSummaries: WorkspaceSummary[] = [];
+    let activeSession: AgentSession | null = null;
+    let activeSessions: SessionSummary[] = [];
+    for (const workspace of index.workspaces) {
+      const sessions: AgentSession[] = [];
+      const validIds: string[] = [];
+      for (const id of workspace.sessionIds) {
+        const session = await this.readSession(id);
+        if (!session || session.workspaceRoot !== workspace.root) continue;
+        validIds.push(id);
+        sessions.push(session);
+      }
+      workspace.sessionIds = validIds;
+      const summaries = sortSummaries(sessions.map(toSummary));
+      const selected =
+        sessions.find((session) => session.id === workspace.activeSessionId) ?? null;
+      if (!selected) workspace.activeSessionId = null;
+      workspaceSummaries.push(toWorkspaceSummary(workspace, summaries));
+      if (workspace.root === index.activeWorkspaceRoot) {
+        activeSession = selected;
+        activeSessions = summaries;
+      }
     }
-
-    const activeSession = sessions.find((session) => session.id === index.activeSessionId) ?? null;
-    if (!activeSession && index.activeSessionId) index.activeSessionId = null;
-    if (validIds.length !== index.sessionIds.length) index.sessionIds = validIds;
-    const workspaceRoot = index.workspaceRoot ?? activeSession?.workspaceRoot ?? null;
-    if (workspaceRoot !== index.workspaceRoot) index.workspaceRoot = workspaceRoot;
+    if (!index.workspaces.some((item) => item.root === index.activeWorkspaceRoot)) {
+      index.activeWorkspaceRoot = null;
+    }
     await this.writeIndex(index);
-    return { activeSession, sessions: sortSummaries(sessions.map(toSummary)), workspaceRoot };
+    return {
+      activeSession,
+      sessions: activeSessions,
+      workspaces: sortWorkspaces(workspaceSummaries),
+      workspaceRoot: index.activeWorkspaceRoot,
+    };
   }
 
   async load(): Promise<AgentSession | null> {
@@ -281,38 +408,83 @@ export class SessionStore {
     const parsed = sessionSchema.parse(session);
     const normalized = normalizeSessionShape(parsed);
     const index = await this.readIndex();
-    if (index.workspaceRoot && index.workspaceRoot !== normalized.workspaceRoot) throw new Error("会话工作区与当前单工作区不一致");
+    const now = normalized.updatedAt;
+    let workspace = index.workspaces.find((item) => item.root === normalized.workspaceRoot);
+    if (!workspace) {
+      workspace = {
+        root: normalized.workspaceRoot,
+        activeSessionId: null,
+        sessionIds: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      index.workspaces.push(workspace);
+    }
     await this.writeSession(normalized);
-    index.workspaceRoot = normalized.workspaceRoot;
-    index.activeSessionId = normalized.id;
-    index.sessionIds = [normalized.id, ...index.sessionIds.filter((id) => id !== normalized.id)];
+    workspace.activeSessionId = normalized.id;
+    workspace.sessionIds = [
+      normalized.id,
+      ...workspace.sessionIds.filter((id) => id !== normalized.id),
+    ];
+    workspace.updatedAt = now;
+    index.activeWorkspaceRoot = workspace.root;
     await this.writeIndex(index);
   }
 
   async setWorkspaceRoot(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
-    if (index.workspaceRoot && index.workspaceRoot !== workspaceRoot && index.sessionIds.length > 0) throw new Error("已有聊天时不能切换到其他工作区");
-    index.workspaceRoot = workspaceRoot;
+    let workspace = index.workspaces.find((item) => item.root === workspaceRoot);
+    if (!workspace) {
+      const now = new Date().toISOString();
+      workspace = {
+        root: workspaceRoot,
+        activeSessionId: null,
+        sessionIds: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      index.workspaces.push(workspace);
+    }
+    index.activeWorkspaceRoot = workspace.root;
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async selectWorkspace(workspaceRoot: string): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot);
+    if (!workspace) throw new Error("找不到指定工作区");
+    index.activeWorkspaceRoot = workspace.root;
+    workspace.updatedAt = new Date().toISOString();
     await this.writeIndex(index);
   }
 
   async setActive(sessionId: string | null): Promise<void> {
     const index = await this.readIndex();
+    const workspace = index.workspaces.find(
+      (item) => item.root === index.activeWorkspaceRoot,
+    );
+    if (!workspace) throw new Error("当前没有工作区");
     if (sessionId !== null) {
       this.assertSafeSessionId(sessionId);
-      if (!index.sessionIds.includes(sessionId)) throw new Error("找不到指定聊天");
+      if (!workspace.sessionIds.includes(sessionId)) throw new Error("找不到指定聊天");
     }
-    index.activeSessionId = sessionId;
+    workspace.activeSessionId = sessionId;
+    workspace.updatedAt = new Date().toISOString();
     await this.writeIndex(index);
   }
 
   async clear(): Promise<void> {
     const index = await this.readIndex();
-    const activeSessionId = index.activeSessionId;
-    if (!activeSessionId) return;
+    const workspace = index.workspaces.find(
+      (item) => item.root === index.activeWorkspaceRoot,
+    );
+    const activeSessionId = workspace?.activeSessionId;
+    if (!workspace || !activeSessionId) return;
     await rm(this.sessionPath(activeSessionId), { force: true });
-    index.sessionIds = index.sessionIds.filter((id) => id !== activeSessionId);
-    index.activeSessionId = null;
+    workspace.sessionIds = workspace.sessionIds.filter((id) => id !== activeSessionId);
+    workspace.activeSessionId = null;
+    workspace.updatedAt = new Date().toISOString();
     await this.writeIndex(index);
   }
 
@@ -320,17 +492,58 @@ export class SessionStore {
     const raw = await this.readText(this.indexPath);
     if (raw !== null) {
       try {
-        const parsed = indexSchema.safeParse(JSON.parse(raw) as unknown);
-        if (parsed.success) return parsed.data;
+        const value = JSON.parse(raw) as unknown;
+        const current = indexV2Schema.safeParse(value);
+        if (current.success) return current.data;
+        const legacy = indexV1Schema.safeParse(value);
+        if (legacy.success) return this.migrateV1Index(legacy.data);
       } catch {
         // Invalid index data is ignored; chat files remain untouched for manual recovery.
       }
       return this.emptyIndex();
     }
-    return this.migrateLegacy();
+    return this.migrateLegacySession();
   }
 
-  private async migrateLegacy(): Promise<SessionIndex> {
+  private async migrateV1Index(legacy: LegacyIndex): Promise<SessionIndex> {
+    const groups = new Map<string, AgentSession[]>();
+    for (const id of legacy.sessionIds) {
+      const session = await this.readSession(id);
+      if (!session) continue;
+      const group = groups.get(session.workspaceRoot) ?? [];
+      group.push(session);
+      groups.set(session.workspaceRoot, group);
+    }
+    if (groups.size === 0 && legacy.workspaceRoot) groups.set(legacy.workspaceRoot, []);
+    const workspaces: WorkspaceIndex[] = [...groups.entries()].map(([root, sessions]) => {
+      const createdAt =
+        sessions.map((session) => session.createdAt).sort()[0] ?? new Date().toISOString();
+      const updatedAt =
+        sessions.map((session) => session.updatedAt).sort().at(-1) ?? createdAt;
+      return {
+        root,
+        activeSessionId: sessions.some((session) => session.id === legacy.activeSessionId)
+          ? legacy.activeSessionId
+          : null,
+        sessionIds: sessions
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+          .map((session) => session.id),
+        createdAt,
+        updatedAt,
+      };
+    });
+    const activeSession = workspaces.find((workspace) => workspace.activeSessionId);
+    const activeWorkspaceRoot =
+      activeSession?.root ??
+      workspaces.find((workspace) => workspace.root === legacy.workspaceRoot)?.root ??
+      workspaces[0]?.root ??
+      null;
+    const index: SessionIndex = { version: 2, activeWorkspaceRoot, workspaces };
+    await this.writeIndex(index);
+    return index;
+  }
+
+  private async migrateLegacySession(): Promise<SessionIndex> {
     const raw = await this.readText(this.legacyPath);
     if (raw === null) return this.emptyIndex();
     try {
@@ -339,7 +552,19 @@ export class SessionStore {
       const session = this.normalizeInterrupted(normalizeSessionShape(parsed.data));
       this.assertSafeSessionId(session.id);
       await this.writeSession(session);
-      const index: SessionIndex = { version: 1, workspaceRoot: session.workspaceRoot, activeSessionId: session.id, sessionIds: [session.id] };
+      const index: SessionIndex = {
+        version: 2,
+        activeWorkspaceRoot: session.workspaceRoot,
+        workspaces: [
+          {
+            root: session.workspaceRoot,
+            activeSessionId: session.id,
+            sessionIds: [session.id],
+            createdAt: session.createdAt,
+            updatedAt: session.updatedAt,
+          },
+        ],
+      };
       await this.writeIndex(index);
       await rm(this.legacyPath, { force: true });
       return index;
@@ -371,8 +596,15 @@ export class SessionStore {
     if (!ACTIVE_STATUSES.has(session.status)) return session;
     const now = new Date().toISOString();
     closeUnresolvedToolCalls(session, now);
-    const turn = session.turns.find((item) => item.id === session.activeTurnId) ?? session.turns.at(-1)!;
-    session.transitions.push({ turnId: turn.id, from: session.status, to: "failed", reason: "应用退出导致运行中任务中断；未确认的副作用不会自动重放。", at: now });
+    const turn =
+      session.turns.find((item) => item.id === session.activeTurnId) ?? session.turns.at(-1)!;
+    session.transitions.push({
+      turnId: turn.id,
+      from: session.status,
+      to: "failed",
+      reason: "应用退出导致运行中任务中断；未确认的副作用不会自动重放。",
+      at: now,
+    });
     session.status = "failed";
     turn.status = "failed";
     turn.terminationReason = "interrupted";
@@ -424,6 +656,6 @@ export class SessionStore {
   }
 
   private emptyIndex(): SessionIndex {
-    return { version: 1, workspaceRoot: null, activeSessionId: null, sessionIds: [] };
+    return { version: 2, activeWorkspaceRoot: null, workspaces: [] };
   }
 }

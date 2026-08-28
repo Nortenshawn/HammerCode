@@ -4,7 +4,7 @@
 
 ## 当前结论
 
-HammerCode 已从可完成单次任务的 MVP，演进为可在单工作区中维护多条独立聊天、并在每条聊天内连续追问的本地 coding agent。核心闭环、审批安全、恢复语义、文件变更审查与安全撤销均由项目自行实现，不依赖 agent 框架或服务端托管工具。
+HammerCode 已完成双模型兼容层、聊天权限模式和多工作区导航的功能实现。Fast 真实在线闭环、完全访问安全边界和多工作区重启恢复已经通过；Strong 的真实 GLM 在线验收因本机尚未安全配置对应环境变量而待补测。核心闭环、审批安全、恢复语义、文件变更审查与安全撤销均由项目自行实现，不依赖 agent 框架或服务端托管工具。
 
 ## 版本演进
 
@@ -35,13 +35,23 @@ HammerCode 已从可完成单次任务的 MVP，演进为可在单工作区中�
 ## 当前质量状态
 
 - TypeScript 主进程、渲染进程和测试配置均采用严格类型检查。
-- 自动测试覆盖状态转换、流式工具组装、路径边界、审批策略、命令生命周期、上下文预算、连续 turn、中断恢复、重复副作用阻断、累计 diff 和安全撤销。
-- 发布前固定执行：`npm run typecheck`、`npm test`、`npm run build`、`npm run package:mac`。
+- 12 个测试文件共 55 项自动测试通过，覆盖状态转换、双 provider 请求体与流式工具组装、路径边界、审批策略、命令生命周期、上下文预算、连续 turn、中断恢复、重复副作用阻断、累计 diff、安全撤销、多工作区迁移和跨项目删除隔离。
+- 本阶段 `npm run typecheck`、`npm test`、`npm run build`、`npm run package:mac` 均通过；macOS 目录包未签名，符合当前本地演示阶段预期。
 
 ### 阶段三：真实在线闭环与可靠性
 
 - 状态：已完成（2026-08-28）。
 - 已指定 `/Users/norten/Developer/HammerTest` 作为真实 DeepSeek API 与本地副作用的固定验收沙箱。
 - 已验证空目录开发、审批、命令、连续追问、重启恢复、累计 diff、安全撤销、审批拒绝和路径越界阻断；证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
+
+### 阶段四：双模型、权限模式与多工作区
+
+- 状态：功能实现完成、在线验收部分完成（2026-08-28）。
+- 已加入 `fast = deepseek-v4-flash`、`strong = glm-5.3-flash` 的显式双模型选择，共享 OpenAI-compatible SSE/tool call 兼容层，不做隐式路由或故障回退。
+- 已按聊天持久化 `ask/full_access`，并在每个 turn 固化实际权限；工具审计能区分用户批准、用户拒绝、完全访问自动批准和安全策略阻断。
+- 已将会话索引迁移为多工作区 v2，侧栏按项目展示独立聊天；旧索引与旧聊天默认迁移到 `fast + ask`。
+- 真实 DeepSeek 已完成两种权限模式的桌面在线闭环，三个工作区和两条聊天经重启恢复且没有副作用重放。
+- Strong 真实在线验收待本机配置 `GLM_API_KEY` 后补跑；离线请求协议、SSE 和工具调用兼容测试已通过，未以模拟结果冒充在线通过。
+- 设计、风险、迁移和退出标准见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。
 
 后续范围、实现顺序和退出标准不再写入本状态记录，统一见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。

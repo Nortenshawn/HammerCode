@@ -3,6 +3,8 @@ import type {
   AgentTurn,
   AssistantMessage,
   FileChange,
+  ModelTier,
+  PermissionMode,
   TerminationReason,
   ToolMessage,
   ToolResult,
@@ -18,6 +20,16 @@ import { cloneValue, isAbortError, toErrorMessage } from "./utils";
 
 const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed"]);
 
+export interface TurnExecutionSettings {
+  modelTier: ModelTier;
+  permissionMode: PermissionMode;
+}
+
+const DEFAULT_TURN_SETTINGS: TurnExecutionSettings = {
+  modelTier: "fast",
+  permissionMode: "ask",
+};
+
 export class AgentRunner {
   private session: AgentSession | null = null;
   private runAbort: AbortController | null = null;
@@ -32,7 +44,11 @@ export class AgentRunner {
     return this.session ? cloneValue(this.session) : null;
   }
 
-  async start(task: string, workspaceRoot: string): Promise<AgentSession> {
+  async start(
+    task: string,
+    workspaceRoot: string,
+    settings: TurnExecutionSettings = DEFAULT_TURN_SETTINGS,
+  ): Promise<AgentSession> {
     this.assertCanRun(task);
     const now = this.dependencies.clock.now().toISOString();
     const turnId = this.dependencies.ids.next("turn");
@@ -41,6 +57,8 @@ export class AgentRunner {
       id: turnId,
       userMessageId,
       status: "idle",
+      modelTier: settings.modelTier,
+      permissionMode: settings.permissionMode,
       createdAt: now,
       updatedAt: now,
     };
@@ -49,6 +67,8 @@ export class AgentRunner {
       workspaceRoot,
       status: "idle",
       task: task.trim(),
+      modelTier: settings.modelTier,
+      permissionMode: settings.permissionMode,
       turns: [turn],
       activeTurnId: turnId,
       messages: [
@@ -71,7 +91,11 @@ export class AgentRunner {
     return this.runPreparedTurn("用户提交任务");
   }
 
-  async resume(previous: AgentSession, input: string): Promise<AgentSession> {
+  async resume(
+    previous: AgentSession,
+    input: string,
+    settings: TurnExecutionSettings = DEFAULT_TURN_SETTINGS,
+  ): Promise<AgentSession> {
     this.assertCanRun(input);
     if (!TERMINAL_STATUSES.has(previous.status)) {
       throw new HammerCodeError("只有已结束的聊天才能继续", "SESSION_NOT_TERMINAL", true);
@@ -93,10 +117,14 @@ export class AgentRunner {
       id: turnId,
       userMessageId,
       status: "idle",
+      modelTier: settings.modelTier,
+      permissionMode: settings.permissionMode,
       createdAt: now,
       updatedAt: now,
     });
     this.session.activeTurnId = turnId;
+    this.session.modelTier = settings.modelTier;
+    this.session.permissionMode = settings.permissionMode;
     this.session.messages.push({
       id: userMessageId,
       turnId,
@@ -271,6 +299,7 @@ export class AgentRunner {
         ["HIGH_RISK_COMMAND_BLOCKED", "PATH_TRAVERSAL_BLOCKED", "ABSOLUTE_PATH_BLOCKED", "SYMLINK_ESCAPE_BLOCKED"].includes(error.code)
           ? "blocked"
           : "failed";
+      if (trace.status === "blocked") trace.authorization = "safety_blocked";
       trace.result = result;
       trace.finishedAt = this.dependencies.clock.now().toISOString();
       this.appendToolMessage(call, result);
@@ -278,7 +307,13 @@ export class AgentRunner {
       return;
     }
 
-    if (prepared.requiresApproval) {
+    if (!prepared.requiresApproval) {
+      trace.authorization = "not_required";
+    } else if (this.currentTurn().permissionMode === "full_access") {
+      trace.status = "approved";
+      trace.authorization = "full_access";
+      await this.publish();
+    } else {
       if (!prepared.approvalRequest) {
         throw new HammerCodeError("工具缺少审批信息", "INVALID_APPROVAL_REQUEST");
       }
@@ -295,6 +330,7 @@ export class AgentRunner {
           errorCode: "APPROVAL_REJECTED",
         };
         trace.status = "rejected";
+        trace.authorization = "user_rejected";
         trace.result = result;
         trace.finishedAt = this.dependencies.clock.now().toISOString();
         this.appendToolMessage(call, result);
@@ -302,6 +338,7 @@ export class AgentRunner {
         return;
       }
       trace.status = "approved";
+      trace.authorization = "user_approved";
       await this.publish();
     }
 

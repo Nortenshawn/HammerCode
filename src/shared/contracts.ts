@@ -10,6 +10,19 @@ export const SESSION_STATUSES = [
 
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 
+export const MODEL_TIERS = ["fast", "strong"] as const;
+export type ModelTier = (typeof MODEL_TIERS)[number];
+
+export const PERMISSION_MODES = ["ask", "full_access"] as const;
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+
+export type ToolAuthorization =
+  | "not_required"
+  | "user_approved"
+  | "user_rejected"
+  | "full_access"
+  | "safety_blocked";
+
 export type ToolTraceStatus =
   | "proposed"
   | "awaiting_approval"
@@ -61,6 +74,7 @@ export interface ToolTrace {
   finishedAt?: string;
   durationMs?: number;
   fileChangeId?: string;
+  authorization?: ToolAuthorization;
 }
 
 export interface UserMessage {
@@ -120,6 +134,8 @@ export interface AgentTurn {
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
+  modelTier: ModelTier;
+  permissionMode: PermissionMode;
 }
 
 export type FileChangeKind = "create" | "modify" | "delete";
@@ -154,6 +170,8 @@ export interface AgentSession {
   workspaceRoot: string;
   status: SessionStatus;
   task: string;
+  modelTier: ModelTier;
+  permissionMode: PermissionMode;
   turns: AgentTurn[];
   activeTurnId: string;
   messages: ConversationMessage[];
@@ -181,36 +199,71 @@ export interface SessionSummary {
   updatedAt: string;
 }
 
-export interface PublicRuntimeConfig {
+export interface WorkspaceSummary {
+  root: string;
+  name: string;
+  sessionCount: number;
+  sessions: SessionSummary[];
+  activeSessionId: string | null;
+  updatedAt: string;
+}
+
+export interface PublicModelConfig {
+  tier: ModelTier;
+  label: string;
+  provider: "deepseek" | "zhipu";
   model: string;
   apiBaseUrl: string;
   thinking: "enabled" | "disabled";
   reasoningEffort: "low" | "high" | "max";
   maxOutputTokens: number;
+  hasApiKey: boolean;
+}
+
+export interface PublicRuntimeConfig {
+  models: Record<ModelTier, PublicModelConfig>;
   contextTokenBudget: number;
   maxAgentRounds: number;
-  hasApiKey: boolean;
 }
 
 export interface AppBootstrap {
   session: AgentSession | null;
   sessions: SessionSummary[];
+  workspaces: WorkspaceSummary[];
   workspaceRoot: string | null;
   config: PublicRuntimeConfig;
+}
+
+export interface SessionSettings {
+  modelTier: ModelTier;
+  permissionMode: PermissionMode;
+}
+
+export interface StartTaskInput extends SessionSettings {
+  task: string;
 }
 
 export type RendererEvent =
   | { type: "session_snapshot"; session: AgentSession }
   | { type: "session_cleared" }
   | { type: "sessions_changed"; sessions: SessionSummary[] }
+  | {
+      type: "workspace_changed";
+      workspaceRoot: string | null;
+      workspaces: WorkspaceSummary[];
+      sessions: SessionSummary[];
+      session: AgentSession | null;
+    }
   | { type: "notification"; level: "info" | "error"; message: string };
 
 export interface HammerCodeApi {
   bootstrap(): Promise<AppBootstrap>;
   chooseWorkspace(): Promise<string | null>;
+  selectWorkspace(workspaceRoot: string): Promise<void>;
   newChat(): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
-  startTask(task: string): Promise<{ sessionId: string }>;
+  updateSessionSettings(settings: SessionSettings): Promise<void>;
+  startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;
   cancelTask(): Promise<void>;
   resolveApproval(approvalId: string, approved: boolean): Promise<void>;

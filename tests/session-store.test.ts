@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SessionStore } from "../src/main/session-store";
@@ -10,15 +10,22 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((item) => rm(item, { recursive: true, force: true })));
 });
 
-function createSession(id: string, task: string, updatedAt: string): AgentSession {
+function createSession(
+  id: string,
+  task: string,
+  updatedAt: string,
+  workspaceRoot = "/tmp/workspace",
+): AgentSession {
   const turnId = `${id}_turn`;
   const userMessageId = `${id}_user`;
   return {
     id,
-    workspaceRoot: "/tmp/workspace",
+    workspaceRoot,
     status: "completed",
     task,
-    turns: [{ id: turnId, userMessageId, status: "completed", terminationReason: "completed", createdAt: updatedAt, updatedAt, finishedAt: updatedAt }],
+    modelTier: "fast",
+    permissionMode: "ask",
+    turns: [{ id: turnId, userMessageId, status: "completed", terminationReason: "completed", modelTier: "fast", permissionMode: "ask", createdAt: updatedAt, updatedAt, finishedAt: updatedAt }],
     activeTurnId: turnId,
     messages: [
       { id: userMessageId, turnId, role: "user", content: task, createdAt: updatedAt },
@@ -65,7 +72,9 @@ describe("session persistence", () => {
       workspaceRoot: "/tmp/workspace",
       status: "awaiting_approval",
       task: "edit",
-      turns: [{ id: "turn_1", userMessageId: "m1", status: "awaiting_approval", createdAt: at, updatedAt: at }],
+      modelTier: "fast",
+      permissionMode: "ask",
+      turns: [{ id: "turn_1", userMessageId: "m1", status: "awaiting_approval", modelTier: "fast", permissionMode: "ask", createdAt: at, updatedAt: at }],
       activeTurnId: "turn_1",
       messages: [
         { id: "m1", turnId: "turn_1", role: "user", content: "edit", createdAt: at },
@@ -118,6 +127,102 @@ describe("session persistence", () => {
     state = await store.loadState();
     expect(state.activeSession?.task).toBe("检查项目结构");
     expect(state.sessions).toHaveLength(2);
+  });
+
+  it("keeps independent chat collections and active chats for multiple workspaces", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const rootA = "/tmp/project-a";
+    const rootB = "/tmp/project-b";
+    const firstA = createSession("session_a1", "A first", "2026-08-27T01:00:00.000Z", rootA);
+    const secondA = createSession("session_a2", "A second", "2026-08-27T02:00:00.000Z", rootA);
+    const onlyB = createSession("session_b1", "B only", "2026-08-27T03:00:00.000Z", rootB);
+
+    await store.save(firstA);
+    await store.save(secondA);
+    await store.save(onlyB);
+    let state = await store.loadState();
+    expect(state.workspaceRoot).toBe(rootB);
+    expect(state.activeSession?.id).toBe("session_b1");
+    expect(state.workspaces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ root: rootA, sessionCount: 2, activeSessionId: "session_a2" }),
+      expect.objectContaining({ root: rootB, sessionCount: 1, activeSessionId: "session_b1" }),
+    ]));
+    expect(state.workspaces.find((workspace) => workspace.root === rootA)?.sessions.map((item) => item.id)).toEqual(["session_a2", "session_a1"]);
+
+    await store.selectWorkspace(rootA);
+    state = await store.loadState();
+    expect(state.workspaceRoot).toBe(rootA);
+    expect(state.activeSession?.id).toBe("session_a2");
+    expect(state.sessions.map((item) => item.id)).toEqual(["session_a2", "session_a1"]);
+
+    await store.setActive("session_a1");
+    await store.selectWorkspace(rootB);
+    await store.selectWorkspace(rootA);
+    state = await store.loadState();
+    expect(state.activeSession?.id).toBe("session_a1");
+  });
+
+  it("clears only the active chat in the selected workspace", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const rootA = "/tmp/project-clear-a";
+    const rootB = "/tmp/project-clear-b";
+    await store.save(createSession("session_clear_a", "A chat", "2026-08-27T01:00:00.000Z", rootA));
+    await store.save(createSession("session_clear_b", "B chat", "2026-08-27T02:00:00.000Z", rootB));
+
+    await store.selectWorkspace(rootA);
+    await store.clear();
+    let state = await store.loadState();
+    expect(state.workspaceRoot).toBe(rootA);
+    expect(state.activeSession).toBeNull();
+    expect(state.sessions).toEqual([]);
+    expect(state.workspaces.find((workspace) => workspace.root === rootB)).toMatchObject({
+      sessionCount: 1,
+      activeSessionId: "session_clear_b",
+    });
+
+    await store.selectWorkspace(rootB);
+    state = await store.loadState();
+    expect(state.activeSession?.id).toBe("session_clear_b");
+  });
+
+  it("migrates a v1 workspace index and old chat settings to safe defaults", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const legacy = createSession("session_v1", "升级旧聊天", "2026-08-27T04:00:00.000Z");
+    const raw = JSON.parse(JSON.stringify(legacy)) as {
+      modelTier?: unknown;
+      permissionMode?: unknown;
+      turns: Array<{ modelTier?: unknown; permissionMode?: unknown }>;
+    };
+    delete raw.modelTier;
+    delete raw.permissionMode;
+    raw.turns.forEach((turn) => {
+      delete turn.modelTier;
+      delete turn.permissionMode;
+    });
+    await mkdir(path.join(directory, "chats"), { recursive: true });
+    await writeFile(path.join(directory, "chats", "session_v1.json"), JSON.stringify(raw), "utf8");
+    await writeFile(path.join(directory, "session-index.json"), JSON.stringify({
+      version: 1,
+      workspaceRoot: "/tmp/workspace",
+      activeSessionId: "session_v1",
+      sessionIds: ["session_v1"],
+    }), "utf8");
+
+    const state = await new SessionStore(directory).loadState();
+    expect(state.activeSession).toMatchObject({
+      id: "session_v1",
+      modelTier: "fast",
+      permissionMode: "ask",
+      turns: [expect.objectContaining({ modelTier: "fast", permissionMode: "ask" })],
+    });
+    const migratedIndex = JSON.parse(await readFile(path.join(directory, "session-index.json"), "utf8")) as { version: number; workspaces: unknown[] };
+    expect(migratedIndex.version).toBe(2);
+    expect(migratedIndex.workspaces).toHaveLength(1);
   });
 
   it("migrates the legacy active-session file without losing the chat", async () => {

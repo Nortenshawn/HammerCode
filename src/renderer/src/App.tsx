@@ -7,11 +7,15 @@ import type {
   AgentTurn,
   AppBootstrap,
   AssistantMessage,
+  ModelTier,
+  PermissionMode,
   RendererEvent,
   SessionStatus,
   SessionSummary,
+  ToolAuthorization,
   ToolCall,
   ToolTrace,
+  WorkspaceSummary,
 } from "../../shared/contracts";
 import { buildFileReviews } from "../../shared/file-reviews";
 
@@ -24,11 +28,20 @@ const STATUS_LABELS: Record<SessionStatus, string> = {
   cancelled: "已取消",
   failed: "未完成",
 };
-
 const ACTIVE_STATUSES: SessionStatus[] = ["requesting", "awaiting_approval", "executing_tool"];
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "cancelled", "failed"];
 
-type IconName = "arrow-up" | "check" | "chevron" | "file" | "folder" | "plus" | "square" | "stop" | "terminal" | "undo";
+type IconName =
+  | "arrow-up"
+  | "check"
+  | "chevron"
+  | "file"
+  | "folder"
+  | "plus"
+  | "square"
+  | "stop"
+  | "terminal"
+  | "undo";
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
@@ -98,6 +111,20 @@ function upsertSessionSummary(items: SessionSummary[], session: AgentSession): S
   return [summary, ...items.filter((item) => item.id !== summary.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
+function upsertWorkspaceSession(items: WorkspaceSummary[], session: AgentSession): WorkspaceSummary[] {
+  return items.map((workspace) => {
+    if (workspace.root !== session.workspaceRoot) return workspace;
+    const sessions = upsertSessionSummary(workspace.sessions, session);
+    return {
+      ...workspace,
+      sessions,
+      sessionCount: sessions.length,
+      activeSessionId: session.id,
+      updatedAt: session.updatedAt,
+    };
+  });
+}
+
 function Markdown({ children }: { children: string }) {
   return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>;
 }
@@ -112,6 +139,13 @@ const TOOL_STATUS_LABELS: Record<ToolTrace["status"], string> = {
   failed: "失败",
   blocked: "已阻断",
   cancelled: "已取消",
+};
+const AUTHORIZATION_LABELS: Record<ToolAuthorization, string> = {
+  not_required: "只读工具，无需批准",
+  user_approved: "用户批准",
+  user_rejected: "用户拒绝",
+  full_access: "完全访问自动批准",
+  safety_blocked: "安全策略直接阻断",
 };
 
 function argumentPreview(call: ToolCall): string {
@@ -133,6 +167,7 @@ function ToolIntent({ call, trace }: { call: ToolCall; trace?: ToolTrace }) {
         <span className="process-status">{TOOL_STATUS_LABELS[status]}</span>
       </summary>
       <div className="process-tool-detail">
+        {trace?.authorization && <div><span>授权</span><code className={`authorization authorization-${trace.authorization}`}>{AUTHORIZATION_LABELS[trace.authorization]}</code></div>}
         {trace?.target && <div><span>目标</span><code>{trace.target}</code></div>}
         <div><span>参数</span><code>{argumentPreview(call) || "（无）"}</code></div>
         {trace?.durationMs !== undefined && <div><span>耗时</span><code>{trace.durationMs} ms</code></div>}
@@ -148,7 +183,8 @@ function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession;
   const traces = useMemo(() => new Map(tracesForTurn.map((trace) => [trace.call.id, trace])), [tracesForTurn]);
   const processMessages = session.messages.filter((message) => message.turnId === turn.id && message.role !== "user" && message.id !== finalMessageId);
   const isActiveTurn = session.activeTurnId === turn.id && !terminal;
-  const hasContent = processMessages.length > 0 || (isActiveTurn && (session.streamingReasoning || session.streamingText));
+  const hasContent = processMessages.length > 0 || Boolean(isActiveTurn && (session.streamingReasoning || session.streamingText));
+  const turnLabel = `${turn.modelTier === "fast" ? "Fast" : "Strong"} · ${turn.permissionMode === "ask" ? "请求批准" : "完全访问"}`;
 
   return (
     <details className="work-process" key={`${turn.id}-${terminal ? "terminal" : "active"}`} open={!terminal}>
@@ -156,7 +192,7 @@ function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession;
         <span className={`activity-orb ${terminal ? "done" : "live"}`}>{terminal ? <Icon name="check" size={13}/> : <span/>}</span>
         <span className="work-process-title">
           <strong>{terminal ? "过程与工具调用" : STATUS_LABELS[turn.status]}</strong>
-          <small>{terminal ? `${tracesForTurn.length} 次工具调用` : "实时展示模型思考与执行链"}</small>
+          <small>{terminal ? `${tracesForTurn.length} 次工具调用 · ${turnLabel}` : `实时展示模型思考与执行链 · ${turnLabel}`}</small>
         </span>
         <Icon name="chevron" size={15}/>
       </summary>
@@ -202,7 +238,7 @@ function TurnView({ session, turn, index }: { session: AgentSession; turn: Agent
       {finalAssistant && (
         <article className="final-answer">
           <Markdown>{finalAssistant.content}</Markdown>
-          <footer><span className={`final-state final-state-${turn.status}`}><Icon name={turn.status === "completed" ? "check" : "square"} size={14}/>{STATUS_LABELS[turn.status]}</span><time>{formatClock(finalAssistant.createdAt)}</time></footer>
+          <footer><span className={`final-state final-state-${turn.status}`}><Icon name={turn.status === "completed" ? "check" : "square"} size={14}/>{STATUS_LABELS[turn.status]}</span><span>{turn.modelTier === "fast" ? "Fast" : "Strong"} · {turn.permissionMode === "ask" ? "请求批准" : "完全访问"}</span><time>{formatClock(finalAssistant.createdAt)}</time></footer>
         </article>
       )}
       {turn.error && <div className="error-panel"><strong>这一轮未完成</strong><p>{turn.error}</p><small>可以直接在下方继续说明或纠正；未完成的工具调用不会重放。</small></div>}
@@ -215,9 +251,7 @@ function ChangeReviewPanel({ session, busy, onUndo }: { session: AgentSession; b
   if (reviews.length === 0) return null;
   return (
     <section className="change-review" aria-label="文件修改审阅">
-      <header className="change-review-heading">
-        <div><span className="review-icon"><Icon name="file" size={15}/></span><span><strong>文件修改</strong><small>{reviews.length} 个文件 · 本聊天累计 diff</small></span></div>
-      </header>
+      <header className="change-review-heading"><div><span className="review-icon"><Icon name="file" size={15}/></span><span><strong>文件修改</strong><small>{reviews.length} 个文件 · 本聊天累计 diff</small></span></div></header>
       <div className="review-files">
         {reviews.map((review) => {
           const undoing = session.pendingUndo?.changeId === review.latestChangeId;
@@ -227,10 +261,7 @@ function ChangeReviewPanel({ session, busy, onUndo }: { session: AgentSession; b
                 <div><code>{review.path}</code><span className={`change-kind kind-${review.kind}`}>{review.kind === "create" ? "新增" : review.kind === "delete" ? "删除" : "修改"}</span></div>
                 <button disabled={busy} onClick={() => onUndo(review.latestChangeId)}><Icon name="undo" size={14}/>{undoing ? (session.pendingUndo?.status === "executing" ? "正在撤销" : "等待确认") : "撤销最近修改"}</button>
               </header>
-              <details>
-                <summary>查看累计 diff <span>{review.appliedChangeCount} 次生效修改{review.revertedChangeCount ? ` · ${review.revertedChangeCount} 次已撤销` : ""}</span></summary>
-                <pre className="diff-view">{review.diff}{review.truncated ? "\n…（diff 已截断）" : ""}</pre>
-              </details>
+              <details><summary>查看累计 diff <span>{review.appliedChangeCount} 次生效修改{review.revertedChangeCount ? ` · ${review.revertedChangeCount} 次已撤销` : ""}</span></summary><pre className="diff-view">{review.diff}{review.truncated ? "\n…（diff 已截断）" : ""}</pre></details>
             </article>
           );
         })}
@@ -240,7 +271,7 @@ function ChangeReviewPanel({ session, busy, onUndo }: { session: AgentSession; b
 }
 
 function ChatList({ sessions, activeId, disabled, onSelect }: { sessions: SessionSummary[]; activeId?: string; disabled: boolean; onSelect: (id: string) => void }) {
-  if (sessions.length === 0) return <p className="empty-chat-list">这个工作区还没有聊天</p>;
+  if (sessions.length === 0) return <p className="empty-chat-list">还没有聊天</p>;
   return <div className="chat-list">{sessions.map((item) => (
     <button className={`chat-item ${item.id === activeId ? "active" : ""}`} disabled={disabled} key={item.id} onClick={() => onSelect(item.id)}>
       <span className="chat-title">{item.title}</span>
@@ -253,9 +284,14 @@ export function App() {
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [session, setSession] = useState<AgentSession | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
+  const [modelTier, setModelTier] = useState<ModelTier>("fast");
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("ask");
   const [task, setTask] = useState("");
   const [busy, setBusy] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [showFullAccessWarning, setShowFullAccessWarning] = useState(false);
   const [notice, setNotice] = useState<{ level: "info" | "error"; text: string } | null>(null);
   const conversationRef = useRef<HTMLElement>(null);
 
@@ -266,15 +302,33 @@ export function App() {
       setBootstrap(value);
       setSession(value.session);
       setSessions(value.sessions);
+      setWorkspaces(value.workspaces);
       setWorkspaceRoot(value.workspaceRoot);
+      setModelTier(value.session?.modelTier ?? "fast");
+      setPermissionMode(value.session?.permissionMode ?? "ask");
     }).catch((error: unknown) => setNotice({ level: "error", text: String(error) }));
     const unsubscribe = window.hammerCode.onEvent((event: RendererEvent) => {
       if (event.type === "session_snapshot") {
         setSession(event.session);
         setSessions((items) => upsertSessionSummary(items, event.session));
+        setWorkspaces((items) => upsertWorkspaceSession(items, event.session));
+        setModelTier(event.session.modelTier);
+        setPermissionMode(event.session.permissionMode);
       }
-      if (event.type === "session_cleared") setSession(null);
+      if (event.type === "session_cleared") {
+        setSession(null);
+        setModelTier("fast");
+        setPermissionMode("ask");
+      }
       if (event.type === "sessions_changed") setSessions(event.sessions);
+      if (event.type === "workspace_changed") {
+        setWorkspaceRoot(event.workspaceRoot);
+        setWorkspaces(event.workspaces);
+        setSessions(event.sessions);
+        setSession(event.session);
+        setModelTier(event.session?.modelTier ?? "fast");
+        setPermissionMode(event.session?.permissionMode ?? "ask");
+      }
       if (event.type === "notification") setNotice({ level: event.level, text: event.message });
     });
     return () => { mounted = false; unsubscribe(); };
@@ -282,6 +336,7 @@ export function App() {
 
   const isRunning = Boolean(session && ACTIVE_STATUSES.includes(session.status));
   const isBusy = isRunning || Boolean(session?.pendingUndo);
+  const selectedModel = bootstrap?.config.models[modelTier];
 
   useEffect(() => {
     const conversation = conversationRef.current;
@@ -291,35 +346,92 @@ export function App() {
 
   const chooseWorkspace = async () => {
     setBusy(true);
-    try {
-      const selected = await window.hammerCode.chooseWorkspace();
-      if (selected) setWorkspaceRoot(selected);
-    } catch (error) { setNotice({ level: "error", text: String(error) }); }
+    try { await window.hammerCode.chooseWorkspace(); setNotice(null); }
+    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    finally { setBusy(false); }
+  };
+
+  const selectWorkspace = async (root: string) => {
+    if (isBusy || root === workspaceRoot) return;
+    setBusy(true);
+    try { await window.hammerCode.selectWorkspace(root); setNotice(null); }
+    catch (error) { setNotice({ level: "error", text: String(error) }); }
     finally { setBusy(false); }
   };
 
   const newChat = async () => {
     if (isBusy) return;
-    try {
-      await window.hammerCode.newChat();
-      setSession(null);
-      setTask("");
-      setNotice(null);
-    } catch (error) { setNotice({ level: "error", text: String(error) }); }
+    try { await window.hammerCode.newChat(); setTask(""); setNotice(null); }
+    catch (error) { setNotice({ level: "error", text: String(error) }); }
   };
 
   const selectSession = async (id: string) => {
     if (isBusy || id === session?.id) return;
+    setBusy(true);
     try { await window.hammerCode.selectSession(id); setNotice(null); }
     catch (error) { setNotice({ level: "error", text: String(error) }); }
+    finally { setBusy(false); }
+  };
+
+  const persistSettings = async (nextModel: ModelTier, nextPermission: PermissionMode) => {
+    if (isBusy || settingsBusy) return;
+    const selectsUnavailableModel = !bootstrap?.config.models[nextModel].hasApiKey
+      && (!session || nextModel !== session.modelTier);
+    if (selectsUnavailableModel) {
+      setNotice({
+        level: "error",
+        text: `${nextModel === "fast" ? "Fast" : "Strong"} 模型尚未配置本地 API key。`,
+      });
+      return;
+    }
+    const previousModel = modelTier;
+    const previousPermission = permissionMode;
+    setModelTier(nextModel);
+    setPermissionMode(nextPermission);
+    if (!session) return;
+    setSettingsBusy(true);
+    try {
+      await window.hammerCode.updateSessionSettings({ modelTier: nextModel, permissionMode: nextPermission });
+      setNotice(null);
+    } catch (error) {
+      setModelTier(previousModel);
+      setPermissionMode(previousPermission);
+      setNotice({ level: "error", text: String(error) });
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const choosePermission = (nextPermission: PermissionMode) => {
+    if (nextPermission !== "full_access") {
+      void persistSettings(modelTier, nextPermission);
+      return;
+    }
+    let confirmed = false;
+    try { confirmed = window.localStorage.getItem("hammercode.full-access-warning") === "acknowledged"; }
+    catch { confirmed = false; }
+    if (!confirmed) {
+      setShowFullAccessWarning(true);
+      return;
+    }
+    void persistSettings(modelTier, nextPermission);
+  };
+
+  const confirmFullAccess = () => {
+    try { window.localStorage.setItem("hammercode.full-access-warning", "acknowledged"); }
+    catch { /* The warning is still acknowledged for this selection. */ }
+    setShowFullAccessWarning(false);
+    void persistSettings(modelTier, "full_access");
   };
 
   const submit = async () => {
-    if (!task.trim() || !workspaceRoot || isBusy) return;
+    if (!task.trim() || !workspaceRoot || isBusy || !selectedModel?.hasApiKey) return;
     setBusy(true);
     setNotice(null);
-    try { await window.hammerCode.startTask(task); setTask(""); }
-    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    try {
+      await window.hammerCode.startTask({ task, modelTier, permissionMode });
+      setTask("");
+    } catch (error) { setNotice({ level: "error", text: String(error) }); }
     finally { setBusy(false); }
   };
 
@@ -341,15 +453,23 @@ export function App() {
       <aside className="sidebar">
         <div className="sidebar-drag"/>
         <header className="brand-row"><button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button></header>
-        <nav className="primary-nav" aria-label="主要导航"><button className="new-chat-button" onClick={newChat} disabled={isBusy}><Icon name="plus" size={17}/><span>新对话</span></button></nav>
+        <nav className="primary-nav" aria-label="主要导航"><button className="new-chat-button" onClick={newChat} disabled={isBusy || !workspaceRoot}><Icon name="plus" size={17}/><span>新对话</span></button></nav>
         <section className="projects-section">
-          <div className="section-heading">项目</div>
-          <button className="project-row" onClick={chooseWorkspace} disabled={busy || isBusy} title={workspaceRoot ?? "选择本地工作区"}><Icon name="folder" size={17}/><span>{folderName(workspaceRoot)}</span><Icon name="chevron" size={14}/></button>
-          {workspaceRoot && (
-            <ChatList sessions={sessions} activeId={session?.id} disabled={isBusy} onSelect={selectSession}/>
-          )}
+          <div className="section-heading"><span>项目</span><button onClick={chooseWorkspace} disabled={busy || isBusy} aria-label="添加工作区"><Icon name="plus" size={14}/></button></div>
+          <div className="project-list">
+            {workspaces.map((workspace) => (
+              <section className={`project-group ${workspace.root === workspaceRoot ? "active" : ""}`} key={workspace.root}>
+                <button className="project-row" onClick={() => void selectWorkspace(workspace.root)} disabled={busy || isBusy} title={workspace.root}><Icon name="folder" size={17}/><span>{workspace.name}</span><small>{workspace.sessionCount || ""}</small></button>
+                <ChatList sessions={workspace.sessions} activeId={session?.id} disabled={isBusy || busy} onSelect={(id) => void selectSession(id)}/>
+              </section>
+            ))}
+            {workspaces.length === 0 && <button className="empty-projects" onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}
+          </div>
         </section>
-        <footer className="sidebar-footer"><div className="runtime-line"><span className={`connection-dot ${bootstrap.config.hasApiKey ? "ready" : "missing"}`}/><strong>{bootstrap.config.model}</strong></div><span>{bootstrap.config.hasApiKey ? "本地工具已就绪" : "缺少 API 配置"}</span></footer>
+        <footer className="sidebar-footer">
+          {(["fast", "strong"] as ModelTier[]).map((tier) => <div className="runtime-line" key={tier}><span className={`connection-dot ${bootstrap.config.models[tier].hasApiKey ? "ready" : "missing"}`}/><strong>{tier === "fast" ? "Fast" : "Strong"} · {bootstrap.config.models[tier].model}</strong></div>)}
+          <span>本地工具受工作区安全边界保护</span>
+        </footer>
       </aside>
 
       <main className="workspace">
@@ -360,13 +480,11 @@ export function App() {
 
         <section className="conversation" ref={conversationRef}>
           {!session ? (
-            <div className="welcome"><img className="welcome-mark" src={logoUrl} alt="HammerCode"/><h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1><p>{workspaceRoot ? "描述你想完成的开发任务。文件修改和命令执行仍会先向你确认。" : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>{!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}{!bootstrap.config.hasApiKey && <div className="config-warning">未检测到 <code>DEEPSEEK_API_KEY</code>，请完成本地配置后重启。</div>}</div>
+            <div className="welcome"><img className="welcome-mark" src={logoUrl} alt="HammerCode"/><h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1><p>{workspaceRoot ? (permissionMode === "ask" ? "描述你想完成的开发任务。文件修改和命令执行会逐次向你确认。" : "完全访问已选中：普通工作区操作会自动执行，安全边界仍然生效。") : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>{!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}{workspaceRoot && !selectedModel?.hasApiKey && <div className="config-warning">{modelTier === "fast" ? "Fast" : "Strong"} 模型尚未配置本地 API key，请切换可用模型或完成配置。</div>}</div>
           ) : (
             <div className="message-stack">
               {session.turns.map((turn, index) => <TurnView key={turn.id} session={session} turn={turn} index={index}/>)}
-              {TERMINAL_STATUSES.includes(session.status) && (
-                <ChangeReviewPanel session={session} busy={isBusy} onUndo={(id) => void requestUndo(id)}/>
-              )}
+              {TERMINAL_STATUSES.includes(session.status) && <ChangeReviewPanel session={session} busy={isBusy} onUndo={(id) => void requestUndo(id)}/>}
             </div>
           )}
         </section>
@@ -375,10 +493,26 @@ export function App() {
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${isBusy ? "disabled" : ""}`}>
             <textarea value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} placeholder={workspaceRoot ? (session ? "继续追问、补充要求或纠正上一轮" : "交给 HammerCode 一个开发任务") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || busy} rows={3}/>
-            <div className="composer-footer"><span>{isRunning ? STATUS_LABELS[session?.status ?? "requesting"] : session?.pendingUndo ? "文件撤销处理中" : `${folderName(workspaceRoot)} · Enter 发送`}</span>{isRunning ? <button className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button> : <button className="send-button" onClick={submit} disabled={!task.trim() || !workspaceRoot || isBusy || busy} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}</div>
+            <div className="composer-footer">
+              <div className="composer-controls">
+                <label><span>模型</span><select value={modelTier} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelTier, permissionMode)}><option value="fast">Fast · {bootstrap.config.models.fast.model}</option><option value="strong" disabled={!bootstrap.config.models.strong.hasApiKey}>Strong · {bootstrap.config.models.strong.model}{bootstrap.config.models.strong.hasApiKey ? "" : "（未配置）"}</option></select></label>
+                <label><span>权限</span><select value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select></label>
+              </div>
+              {isRunning ? <button className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label="停止任务"><Icon name="stop" size={15}/></button> : <button className="send-button" onClick={submit} disabled={!task.trim() || !workspaceRoot || isBusy || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
+            </div>
           </div>
         </section>
       </main>
+
+      {showFullAccessWarning && (
+        <div className="approval-backdrop"><section className="approval-panel permission-warning" role="dialog" aria-modal="true" aria-labelledby="full-access-title">
+          <div className="approval-heading"><span className="approval-icon">!</span><div><small>仅对受信任的工作区使用</small><h2 id="full-access-title">启用完全访问？</h2></div></div>
+          <p>启用后，HammerCode 将在下一轮开始：</p>
+          <ul><li>自动创建、修改和删除当前工作区内的文件；</li><li>自动运行通过安全检查的普通命令；</li><li>继续阻断路径逃逸、<code>sudo</code>、磁盘擦除和系统关机等高风险操作。</li></ul>
+          <div className="approval-actions"><button className="reject" onClick={() => setShowFullAccessWarning(false)}>保持请求批准</button><button className="approve" onClick={confirmFullAccess}>确认启用</button></div>
+          <span className="approval-note">本设置按聊天保存，当前正在运行的轮次不会改变。</span>
+        </section></div>
+      )}
 
       {session?.pendingApproval && (
         <div className="approval-backdrop"><section className="approval-panel" role="dialog" aria-modal="true" aria-labelledby="approval-title">

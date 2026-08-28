@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { AgentRunner } from "../src/core/agent-runner";
@@ -81,7 +81,7 @@ describe("agent runner", () => {
     const result = await runner.start("检查 README", workspace);
     expect(result.status).toBe("completed");
     expect(result.terminationReason).toBe("completed");
-    expect(result.toolTraces[0]).toMatchObject({ status: "succeeded" });
+    expect(result.toolTraces[0]).toMatchObject({ status: "succeeded", authorization: "not_required" });
     expect(result.messages.some((message) => message.role === "tool" && message.content.includes("hello agent"))).toBe(true);
     expect(model.requests).toHaveLength(2);
     expect(snapshots).toContain("executing_tool");
@@ -116,6 +116,7 @@ describe("agent runner", () => {
     const result = await runner.start("尝试写文件", workspace);
     expect(result.status).toBe("completed");
     expect(result.toolTraces[0].status).toBe("rejected");
+    expect(result.toolTraces[0].authorization).toBe("user_rejected");
     expect(result.messages.some((message) => message.role === "tool" && message.content.includes("APPROVAL_REJECTED"))).toBe(true);
   });
 
@@ -319,5 +320,96 @@ describe("agent runner", () => {
       status: "applied",
     });
     expect(result.toolTraces[0].fileChangeId).toBe(result.fileChanges[0].id);
+    expect(result.toolTraces[0].authorization).toBe("user_approved");
+  });
+
+  it("auto-approves ordinary workspace writes in full access mode", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "hammercode-full-access-"));
+    workspaces.push(workspace);
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const { ids, clock } = fixtures();
+    let approvalRequests = 0;
+    const model = new ScriptedModel([
+      [{ toolCallDeltas: [{ index: 0, id: "call_auto", name: "write_file", arguments: JSON.stringify({ path: "auto.txt", content: "approved by mode\n" }) }], finishReason: "tool_calls" }],
+      [{ content: "自动写入完成。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: new LocalToolExecutor(boundary, ids),
+        approvals: { request: async () => { approvalRequests += 1; return false; } },
+        ids,
+        clock,
+      },
+      { maxRounds: 3, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+
+    const result = await runner.start(
+      "创建 auto.txt",
+      workspace,
+      { modelTier: "fast", permissionMode: "full_access" },
+    );
+    expect(approvalRequests).toBe(0);
+    expect(result.toolTraces[0]).toMatchObject({
+      status: "succeeded",
+      authorization: "full_access",
+    });
+    expect(await readFile(path.join(workspace, "auto.txt"), "utf8")).toBe("approved by mode\n");
+  });
+
+  it("keeps hard path blocking active in full access mode", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "hammercode-full-block-"));
+    workspaces.push(workspace);
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const { ids, clock } = fixtures();
+    const model = new ScriptedModel([
+      [{ toolCallDeltas: [{ index: 0, id: "call_escape", name: "read_file", arguments: '{"path":"../outside.txt"}' }], finishReason: "tool_calls" }],
+      [{ content: "越界访问已被阻断。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: new LocalToolExecutor(boundary, ids),
+        approvals: { request: async () => { throw new Error("blocked calls must not request approval"); } },
+        ids,
+        clock,
+      },
+      { maxRounds: 3, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+
+    const result = await runner.start(
+      "尝试越界",
+      workspace,
+      { modelTier: "strong", permissionMode: "full_access" },
+    );
+    expect(result.toolTraces[0]).toMatchObject({
+      status: "blocked",
+      authorization: "safety_blocked",
+      result: { errorCode: "PATH_TRAVERSAL_BLOCKED" },
+    });
+  });
+
+  it("freezes model and permission settings on each turn", async () => {
+    const { ids, clock } = fixtures();
+    const runner = new AgentRunner(
+      {
+        model: new ScriptedModel([
+          [{ content: "fast", finishReason: "stop" }],
+          [{ content: "strong", finishReason: "stop" }],
+        ]),
+        tools: { definitions: [], prepare: async () => { throw new Error("unused"); } },
+        approvals: approve,
+        ids,
+        clock,
+      },
+      { maxRounds: 2, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+    const first = await runner.start("第一轮", "/tmp", { modelTier: "fast", permissionMode: "ask" });
+    const second = await runner.resume(first, "第二轮", { modelTier: "strong", permissionMode: "full_access" });
+    expect(second.turns).toEqual([
+      expect.objectContaining({ modelTier: "fast", permissionMode: "ask" }),
+      expect.objectContaining({ modelTier: "strong", permissionMode: "full_access" }),
+    ]);
+    expect(second).toMatchObject({ modelTier: "strong", permissionMode: "full_access" });
   });
 });

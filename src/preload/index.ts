@@ -4,9 +4,13 @@ import type { HammerCodeApi, RendererEvent } from "../shared/contracts";
 const api: HammerCodeApi = {
   bootstrap: () => ipcRenderer.invoke("hammercode:bootstrap"),
   chooseWorkspace: () => ipcRenderer.invoke("hammercode:choose-workspace"),
+  selectWorkspace: (workspaceRoot) =>
+    ipcRenderer.invoke("hammercode:select-workspace", workspaceRoot),
   newChat: () => ipcRenderer.invoke("hammercode:new-chat"),
   selectSession: (sessionId) => ipcRenderer.invoke("hammercode:select-session", sessionId),
-  startTask: (task) => ipcRenderer.invoke("hammercode:start-task", task),
+  updateSessionSettings: (settings) =>
+    ipcRenderer.invoke("hammercode:update-session-settings", settings),
+  startTask: (request) => ipcRenderer.invoke("hammercode:start-task", request),
   requestUndo: (changeId) => ipcRenderer.invoke("hammercode:request-undo", changeId),
   cancelTask: () => ipcRenderer.invoke("hammercode:cancel-task"),
   resolveApproval: (approvalId, approved) =>

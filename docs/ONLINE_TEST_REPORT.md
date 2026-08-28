@@ -57,3 +57,45 @@ HammerTest 保留以下文件供人工复核：
 ## 结论
 
 本轮没有发现需要修改产品代码的在线缺陷。真实模型的流式输出、分片 tool call、逐项审批、命令执行、连续上下文、重启恢复、累计 diff、撤销、拒绝恢复和路径边界均与离线测试语义一致。在线结果具有模型非确定性，后续涉及这些链路的重大修改仍应重新执行本报告的关键场景，不得仅沿用本次结论。
+
+## HC-ONLINE-2026-08-28-02
+
+- 时间：2026-08-28 15:24–15:31（Asia/Shanghai）
+- 基线提交：`a6a2aeb`
+- 正式界面：Electron 生产构建页面，通过 main/preload/renderer 完整链路操作
+- 模型：`fast = deepseek-v4-flash` 已真实调用；`strong = glm-5.3-flash` 因本机未配置 `GLM_API_KEY` 未执行真实调用
+- 工作区：`/Users/norten/Developer/HammerTest/Phase4FastAsk`、`/Users/norten/Developer/HammerTest/Phase4FastFull`、`/Users/norten/Developer/HammerTest/Phase4MultiB`
+- 会话数据：独立临时 userData `/tmp/hammercode-phase4-ui-clean`，测试中关闭并使用同一数据重启
+- 凭据：仅检查必需变量是否存在；未读取、展示、复制或记录任何密钥值
+
+## 场景与结果
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| `fast + ask` | 真实 DeepSeek 读取空目录；写入文件和运行验证命令分别弹出审批，批准后成功 | 通过 |
+| `fast + full_access` | 真实 DeepSeek 自动批准工作区内写入和普通验证命令，过程中未出现审批弹窗 | 通过 |
+| 完全访问硬阻断 | 模型按测试要求尝试 `sudo true`，prepare 阶段返回 `HIGH_RISK_COMMAND_BLOCKED`，命令未执行 | 通过 |
+| 授权来源审计 | ask 轨迹为 `not_required/user_approved/user_approved`；full_access 轨迹为 `not_required/full_access/full_access/safety_blocked` | 通过 |
+| Markdown 最终输出 | 两条聊天完成后过程区折叠，最终总结渲染标题、列表、表格和行内代码 | 通过 |
+| 多工作区导航 | 侧栏同时显示三个项目，每个项目只展示自己的聊天；空项目显示“还没有聊天” | 通过 |
+| 重启恢复 | 两条 completed 聊天、各自模型/权限快照、3/4 条工具轨迹和累计 diff 均恢复 | 通过 |
+| 历史副作用不重放 | 重启前后两个测试文件的 SHA-256、修改时间和大小均不变，工具轨迹数不变 | 通过 |
+| 未配置 Strong | Strong 选项标记为未配置且不可用于发送；应用没有静默回退到 Fast | 通过 |
+| 真实 GLM 调用 | 本机正式配置加载器未检测到 `GLM_API_KEY`，未发送请求 | 阻塞，待补测 |
+
+## 持久化与副作用审计
+
+- `Phase4FastAsk`：1 个 completed turn，快照为 `fast + ask`；3 条工具轨迹，写入与命令均为 `user_approved`。
+- `Phase4FastFull`：1 个 completed turn，快照为 `fast + full_access`；4 条工具轨迹，写入与普通命令为 `full_access`，提权探测为 `safety_blocked`。
+- `session-index.json` 为 v2，保存三个工作区及各自活动聊天；空项目没有伪造会话。
+- 重启只加载历史，没有自动请求模型、自动续跑工具或重复文件副作用。
+
+## 最终测试产物
+
+- `Phase4FastAsk/phase4-fast-ask.txt`：内容为 `fast ask verified` 加末尾换行，18 字节。
+- `Phase4FastFull/phase4-fast-full.txt`：内容为 `fast full verified` 加末尾换行，19 字节。
+- `Phase4MultiB`：保持空目录，用于验证独立项目与空聊天状态。
+
+## Strong 待补测说明
+
+GLM-5.3-Flash 的 endpoint、Bearer 鉴权、流式 `reasoning_content`、`tool_stream`、分片 `tool_calls`、`thinking` 和 `reasoning_effort` 已按官方文档实现，并由离线 provider 测试覆盖。由于本机 `.env` 当前没有 `GLM_API_KEY`，本报告不把请求体测试或模拟 SSE 冒充真实在线通过。凭据安全配置完成后，应在 HammerTest 新建独立 Strong 工作区，补跑流式思考、文件修改、普通命令和重启恢复四项场景。
