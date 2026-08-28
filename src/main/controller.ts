@@ -2,6 +2,7 @@ import path from "node:path";
 import { dialog, type BrowserWindow } from "electron";
 import { z } from "zod";
 import { AgentRunner } from "../core/agent-runner";
+import { createContextMemory, estimateTokens } from "../core/context";
 import { reconcilePendingUndo } from "../core/file-state";
 import { prepareFileUndo } from "../core/file-undo";
 import { OpenAICompatibleChatClient } from "../core/model/openai-compatible-client";
@@ -11,27 +12,30 @@ import { LocalToolExecutor } from "../core/tools/tool-executor";
 import { HammerCodeError } from "../core/types";
 import { redactSecrets, systemClock, toErrorMessage, uuidGenerator } from "../core/utils";
 import {
+  BUILTIN_MODEL_REFS,
   MODEL_TIERS,
   PERMISSION_MODES,
-  type ApiConnectionInput,
   type AgentSession,
   type AppBootstrap,
+  type ModelConnectionInput,
+  type ModelRef,
   type RendererEvent,
   type SessionSettings,
   type SessionSummary,
   type WorkspaceSummary,
 } from "../shared/contracts";
-import { ApiConnectionStore } from "./api-connection-store";
 import { PendingApprovalGateway } from "./approval-gateway";
 import type { RuntimeConfig } from "./config";
 import { toPublicConfig } from "./config";
+import { ModelCredentialStore } from "./model-credential-store";
 import { SessionStore } from "./session-store";
+import { searchWorkspace } from "./workspace-search";
 
 const startTaskSchema = z
   .object({
     task: z.string().trim().min(1).max(100_000),
     modelTier: z.enum(MODEL_TIERS),
-    modelRef: z.string().min(1).max(1_000).optional(),
+    modelRef: z.enum(BUILTIN_MODEL_REFS).optional(),
     permissionMode: z.enum(PERMISSION_MODES),
   })
   .strict();
@@ -40,6 +44,12 @@ const approvalIdSchema = z.string().min(1).max(200);
 const sessionIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const changeIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const workspaceRootSchema = z.string().min(1).max(4096);
+const workspaceQuerySchema = z.string().max(240);
+const modelConnectionSchema = z.object({
+  tier: z.enum(MODEL_TIERS),
+  apiBaseUrl: z.string().trim().min(1).max(2_048),
+  apiKey: z.string().trim().min(1).max(16_384).optional(),
+}).strict();
 
 function toSummary(session: AgentSession): SessionSummary {
   return {
@@ -73,11 +83,11 @@ export class AppController {
     private readonly window: BrowserWindow,
     private readonly config: RuntimeConfig,
     private readonly store: SessionStore,
-    private readonly apiConnections: ApiConnectionStore,
+    private readonly modelCredentials: ModelCredentialStore,
   ) {}
 
   async initialize(): Promise<void> {
-    await this.apiConnections.load();
+    await this.modelCredentials.load(this.config.models);
     await this.refreshNavigation();
     await this.reconcileInterruptedUndo();
   }
@@ -89,7 +99,6 @@ export class AppController {
       workspaces: this.workspaces,
       workspaceRoot: this.workspaceRoot,
       config: this.publicConfig(),
-      apiConnections: this.apiConnections.listPublic(),
     };
   }
 
@@ -222,6 +231,7 @@ export class AppController {
         retryBaseDelayMs: this.config.retryBaseDelayMs,
         retryMaxDelayMs: this.config.retryMaxDelayMs,
         maxOutputTokens: modelConfig.maxOutputTokens,
+        autoCompactRatio: this.config.autoCompactRatio,
         contextTokenBudget: this.config.contextTokenBudget,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
       },
@@ -255,18 +265,46 @@ export class AppController {
     return { sessionId: snapshot.id };
   }
 
-  async testApiConnection(input: unknown) {
-    return this.apiConnections.test(input as ApiConnectionInput);
+  async testModelConnection(input: unknown) {
+    const parsed: ModelConnectionInput = modelConnectionSchema.parse(input);
+    return this.modelCredentials.test(parsed, this.config.models[parsed.tier]);
   }
 
-  async saveApiConnection(input: unknown) {
-    const connection = await this.apiConnections.save(input as ApiConnectionInput);
+  async saveModelConnection(input: unknown) {
+    const parsed: ModelConnectionInput = modelConnectionSchema.parse(input);
+    const result = await this.modelCredentials.save(parsed, this.config.models[parsed.tier]);
     this.emit({
       type: "config_updated",
       config: this.publicConfig(),
-      apiConnections: this.apiConnections.listPublic(),
     });
-    return connection;
+    return result;
+  }
+
+  async compressContext() {
+    const session = this.currentSession;
+    if (!session) throw new HammerCodeError("当前没有可压缩的聊天", "NO_SESSION", true);
+    if (this.isBusy() || !["completed", "cancelled", "failed"].includes(session.status)) {
+      throw new HammerCodeError("只能在当前任务结束后压缩上下文", "SESSION_BUSY", true);
+    }
+    session.contextMemory = createContextMemory(session, systemClock.now().toISOString(), "explicit");
+    const activeTurn = session.turns.find((turn) => turn.id === session.activeTurnId);
+    if (activeTurn?.metrics) {
+      activeTurn.metrics.contextCompactions += 1;
+      activeTurn.metrics.currentContextTokens = estimateTokens(`${DEFAULT_SYSTEM_PROMPT}\n${session.contextMemory.summary}`);
+    }
+    session.updatedAt = session.contextMemory.updatedAt;
+    await this.store.save(session);
+    this.upsertSummary(session);
+    this.upsertWorkspace(session);
+    this.emit({ type: "session_snapshot", session });
+    return session.contextMemory;
+  }
+
+  async searchWorkspaceEntries(input: unknown) {
+    const query = workspaceQuerySchema.parse(input);
+    if (!this.workspaceRoot) return [];
+    const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
+    return searchWorkspace(boundary, query);
   }
 
   cancelTask(detail = "任务已由用户取消"): void {
@@ -487,29 +525,49 @@ export class AppController {
   }
 
   private publicConfig() {
-    return toPublicConfig(this.config, this.apiConnections.listModelOptions());
+    const resolved = this.resolvedRuntimeConfig();
+    return toPublicConfig(resolved, Object.fromEntries(MODEL_TIERS.map((tier) => {
+      const credential = this.modelCredentials.resolve(tier, this.config.models[tier]);
+      return [tier, {
+        status: credential.status,
+        message: credential.error,
+        lastCheckedAt: credential.lastCheckedAt,
+      }];
+    })));
+  }
+
+  private resolvedRuntimeConfig(): RuntimeConfig {
+    return {
+      ...this.config,
+      models: Object.fromEntries(MODEL_TIERS.map((tier) => {
+        const credential = this.modelCredentials.resolve(tier, this.config.models[tier]);
+        return [tier, {
+          ...this.config.models[tier],
+          apiKey: credential.apiKey,
+          apiBaseUrl: credential.apiBaseUrl,
+        }];
+      })) as RuntimeConfig["models"],
+    };
   }
 
   private resolveModel(modelTier: SessionSettings["modelTier"], requestedRef?: string): {
-    modelRef: string;
-    config: RuntimeConfig["models"]["fast"] | {
-      provider: "custom";
-      apiKey: string;
-      apiBaseUrl: string;
-      model: string;
-      thinking: "disabled";
-      reasoningEffort: "low";
-      maxOutputTokens: number;
-      requestTimeoutMs: number;
-    };
+    modelRef: ModelRef;
+    config: RuntimeConfig["models"]["fast"];
   } {
-    const modelRef = requestedRef ?? `builtin:${modelTier}`;
+    if (requestedRef && requestedRef !== "builtin:fast" && requestedRef !== "builtin:strong") {
+      throw new HammerCodeError("模型只允许选择 Fast 或 Strong", "INVALID_MODEL_REF", true);
+    }
+    const modelRef: ModelRef = requestedRef === "builtin:strong"
+      ? "builtin:strong"
+      : requestedRef === "builtin:fast"
+        ? "builtin:fast"
+        : modelTier === "strong" ? "builtin:strong" : "builtin:fast";
     if (modelRef === "builtin:fast" || modelRef === "builtin:strong") {
       const selectedTier = modelRef === "builtin:fast" ? "fast" : "strong";
       if (selectedTier !== modelTier) {
         throw new HammerCodeError("模型引用与 Fast/Strong 档位不一致", "INVALID_MODEL_REF", true);
       }
-      const config = this.config.models[selectedTier];
+      const config = this.resolvedRuntimeConfig().models[selectedTier];
       if (!config.apiKey) {
         const variable = selectedTier === "fast" ? "DEEPSEEK_API_KEY" : "GLM_API_KEY";
         throw new HammerCodeError(
@@ -520,21 +578,7 @@ export class AppController {
       }
       return { modelRef, config };
     }
-    const custom = this.apiConnections.resolve(modelRef);
-    if (!custom) throw new HammerCodeError("找不到选中的自定义模型", "INVALID_MODEL_REF", true);
-    return {
-      modelRef,
-      config: {
-        provider: "custom",
-        apiKey: custom.apiKey,
-        apiBaseUrl: custom.apiBaseUrl,
-        model: custom.model,
-        thinking: "disabled",
-        reasoningEffort: "low",
-        maxOutputTokens: 32_768,
-        requestTimeoutMs: this.config.models.fast.requestTimeoutMs,
-      },
-    };
+    throw new HammerCodeError("模型只允许选择 Fast 或 Strong", "INVALID_MODEL_REF", true);
   }
 }
 

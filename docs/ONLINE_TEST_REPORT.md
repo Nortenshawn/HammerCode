@@ -198,3 +198,54 @@ GLM-5.3-Flash 的 endpoint、Bearer 鉴权、流式 `reasoning_content`、`tool_
 - `Phase6ProtocolFixture/server.mjs`：本地受控协议端点，只使用无效测试凭据，不包含真实 key。
 
 Phase 6 的设置、自定义模型选择、可恢复 Plan、预算展示、本地命令自动执行、重试上限、错误分类和失败后继续均通过正式桌面链路。远端状态修改与直接阻断只使用自动测试验证，未为了验收实际 push、部署、提权或执行破坏性命令。
+
+## HC-ONLINE-2026-08-29-01
+
+- 时间：2026-08-28 23:52–2026-08-29 00:02（Asia/Shanghai）
+- 基线提交：`1ba180c`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer 完整链路操作
+- 模型：真实 `fast = deepseek-v4-flash`；真实 `strong = glm-5.3-flash` 执行官方 `/models` 连通检测
+- 工作区：`/Users/norten/Developer/HammerTest`
+- 凭据：只由正式配置加载器和加密凭据存储使用；未展示、打印、复制或记录密钥值
+
+### 固定双模型与迁移
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 产品模型收敛 | 设置页、输入框和 `/模型（API）` 只出现 Fast/Strong | 通过 |
+| Fast 连通 | DeepSeek 官方 `/models` 返回固定 `deepseek-v4-flash`，343ms | 通过 |
+| Strong 连通 | 智谱官方 `/models` 返回固定 `glm-5.3-flash`，129ms | 通过 |
+| 启动状态 | 两档均以绿色“已配置”启动，不再统一显示红色未连接 | 通过 |
+| 旧连接清理 | `api-connections.json` 已删除；`model-credentials.json` 模式 `0600`，仅固定双槽密文 | 通过 |
+
+### 交互与代码审查
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| `/` 命令 | 行首输入 `/` 显示侧边聊天、模型、压缩三个入口；子菜单均可打开 | 通过 |
+| `@` 引用 | 输入 `@Phase6` 返回当前 HammerTest 内匹配文件和目录，路径保持相对工作区 | 通过 |
+| 并排审查 | 审查栏按约 38.2% 初始宽度与聊天并排，代码按可用宽度换行 | 通过 |
+| Diff 清洗 | 新文件审查只呈现代码行、行号和增删色，不出现 hunk/header 源文 | 通过 |
+| 圆环提示 | 圆环不可点击；辅助文本为“已用 1% · 记忆窗口 1.3k/120k …” | 通过 |
+
+### PDF、Python、压缩与恢复
+
+真实 Fast 接收只读验收任务：使用 `read_pdf` 读取 `Phase7Tools/fixture.pdf`，再使用 `run_python` 运行 `Phase7Tools/inspect.py phase7-online`。第一次 Python 调用因复杂任务尚无 Plan 被 `PLAN_REQUIRED` 在执行前拦截；模型建立 3 步计划后重试，界面显示完整 cwd、脚本、参数和超时，批准后执行。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| PDF 读取 | `pdftotext` 36ms 完成，提取验证码 `HC-PDF-2026` | 通过 |
+| Python 权限 | `ask` 模式弹出逐次审批；批准后无 Shell 执行，39ms、exitCode 0 | 通过 |
+| Python 参数 | JSON 输出为 `{"tool": "run_python", "argument": "phase7-online"}` | 通过 |
+| 工具审计 | 首轮 5 次工具调用，包含 Plan 拦截、计划检查点、PDF 和 Python 真实结果 | 通过 |
+| 显式压缩 | `/压缩上下文` 后圆环由 2.7k 降至 1.3k、次数增至 1；没有全宽通知 | 通过 |
+| 同聊天记忆 | 第二轮仅询问上轮事实，0 次工具调用，准确回答验证码和 Python 参数 | 通过 |
+| 重启恢复 | 关闭并重启应用后，两轮消息、0 次重放、1 次压缩和 1.3k 窗口快照恢复 | 通过 |
+
+### 最终测试产物与结论
+
+- `Phase7Tools/fixture.pdf` 与 `pdf-source.txt`：保留供 PDF 人工复核。
+- `Phase7Tools/inspect.py`：保留供 Python 参数与输出复核。
+- 本轮没有创建模型生成的工作区副作用；唯一受审批执行的是已有 Python 测试脚本。
+
+Phase 7 的固定双模型、持久化聊天记忆、静默压缩圆环、快捷命令、工作区引用、PDF/Python 工具、并排 Diff 和重启恢复均通过正式桌面链路。自动阈值触发由离线 AgentRunner 测试覆盖；未人为填充 78% 的真实模型上下文以避免无价值的大额请求。

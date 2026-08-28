@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildContextFacts, buildModelContext, estimateMessageTokens } from "../src/core/context";
+import {
+  buildContextFacts,
+  buildModelContext,
+  createContextMemory,
+  estimateMessageTokens,
+  historyAfterContextMemory,
+  systemPromptWithContextMemory,
+} from "../src/core/context";
 import type { AgentSession, ConversationMessage } from "../src/shared/contracts";
 
 const at = "2026-08-27T00:00:00.000Z";
@@ -128,5 +135,27 @@ describe("context management", () => {
     expect(facts.currentPlan).toContain("[in_progress] 完成回归验证");
     expect(facts.verificationResults.join("\n")).toContain("103 tests passed");
     expect(facts.unresolvedErrors.join("\n")).toContain("临时服务端失败");
+  });
+
+  it("creates persistent single-chat memory without deleting audit history", () => {
+    const messages: ConversationMessage[] = [
+      { id: "u1", turnId: "turn_1", role: "user", content: "实现功能", createdAt: at },
+      { id: "a1", turnId: "turn_1", role: "assistant", content: "已完成第一阶段", createdAt: at },
+    ];
+    const session = {
+      task: "实现功能",
+      activeTurnId: "turn_1",
+      turns: [{ id: "turn_1" }],
+      messages,
+      fileChanges: [],
+    } as unknown as AgentSession;
+    const memory = createContextMemory(session, at, "explicit");
+    session.contextMemory = memory;
+    expect(session.messages).toHaveLength(2);
+    expect(historyAfterContextMemory(session)).toEqual([]);
+    session.messages.push({ id: "u2", turnId: "turn_2", role: "user", content: "继续", createdAt: at });
+    expect(historyAfterContextMemory(session).map((message) => message.id)).toEqual(["u2"]);
+    expect(systemPromptWithContextMemory("system", memory)).toContain("已完成第一阶段");
+    expect(memory).toMatchObject({ mode: "explicit", compactionCount: 1, sourceMessageCount: 2 });
   });
 });

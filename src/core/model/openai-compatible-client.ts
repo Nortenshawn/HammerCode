@@ -45,7 +45,7 @@ const streamChunkSchema = z.object({
 });
 
 export interface OpenAICompatibleClientConfig {
-  provider: "deepseek" | "zhipu" | "custom";
+  provider: "deepseek" | "zhipu";
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -75,12 +75,6 @@ export function buildChatCompletionBody(
       top_p: 0.95,
       thinking: { type: "enabled", clear_thinking: false },
       reasoning_effort: config.reasoningEffort,
-    };
-  }
-  if (config.provider === "custom") {
-    return {
-      ...common,
-      tool_choice: "auto",
     };
   }
   return {

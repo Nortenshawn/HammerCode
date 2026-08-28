@@ -123,6 +123,7 @@ export interface AgentRunOptions {
   retryBaseDelayMs?: number;
   retryMaxDelayMs?: number;
   maxOutputTokens?: number;
+  autoCompactRatio?: number;
   contextTokenBudget: number;
   systemPrompt: string;
 }

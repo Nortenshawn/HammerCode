@@ -1,4 +1,4 @@
-import type { AgentSession, ConversationMessage, ToolMessage } from "../shared/contracts";
+import type { AgentSession, ChatContextMemory, ConversationMessage, ToolMessage } from "../shared/contracts";
 import type { ModelMessage } from "./types";
 import { HammerCodeError } from "./types";
 
@@ -121,6 +121,49 @@ function renderFacts(facts: ContextFacts | undefined): string {
   for (const item of facts.unresolvedErrors) lines.push(`- 历史失败：${item}`);
   for (const item of facts.currentPlan) lines.push(`- 当前计划：${item}`);
   return lines.join("\n").slice(0, FACTS_LIMIT);
+}
+
+export function createContextMemory(
+  session: AgentSession,
+  now: string,
+  mode: ChatContextMemory["mode"],
+): ChatContextMemory {
+  const lastMessage = session.messages.at(-1);
+  if (!lastMessage) {
+    throw new HammerCodeError("当前聊天没有可压缩的消息", "CONTEXT_MEMORY_EMPTY", true);
+  }
+  const conclusions = session.messages
+    .filter((message) => message.role === "assistant" && Boolean(message.content) && !message.toolCalls?.length)
+    .slice(-4)
+    .map((message) => `- 已有结论：${message.content.slice(0, 1_200)}`);
+  const summary = [
+    "以下是 HammerCode 为当前聊天生成的持久化本地记忆，不属于其他聊天，也不代表新增事实：",
+    renderFacts(buildContextFacts(session)),
+    ...conclusions,
+  ].filter(Boolean).join("\n").slice(0, SUMMARY_LIMIT);
+  return {
+    version: 1,
+    summary,
+    throughMessageId: lastMessage.id,
+    throughCreatedAt: lastMessage.createdAt,
+    sourceMessageCount: session.messages.length,
+    mode,
+    compactionCount: (session.contextMemory?.compactionCount ?? 0) + 1,
+    createdAt: session.contextMemory?.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
+export function historyAfterContextMemory(session: AgentSession): ConversationMessage[] {
+  const memory = session.contextMemory;
+  if (!memory) return session.messages;
+  const boundary = session.messages.findIndex((message) => message.id === memory.throughMessageId);
+  return boundary >= 0 ? session.messages.slice(boundary + 1) : session.messages;
+}
+
+export function systemPromptWithContextMemory(systemPrompt: string, memory?: ChatContextMemory): string {
+  if (!memory) return systemPrompt;
+  return `${systemPrompt}\n\n${memory.summary}`;
 }
 
 function groupProtocolMessages(messages: ConversationMessage[]): ConversationMessage[][] {

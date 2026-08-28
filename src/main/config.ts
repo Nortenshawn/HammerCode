@@ -24,10 +24,17 @@ const configSchema = z.object({
   maxModelRetries: z.number().int().min(0).max(8),
   retryBaseDelayMs: z.number().int().min(100).max(60_000),
   retryMaxDelayMs: z.number().int().min(100).max(300_000),
+  autoCompactRatio: z.number().min(0.5).max(0.95),
 });
 
 export type RuntimeModelConfig = z.infer<typeof modelConfigSchema>;
 export type RuntimeConfig = z.infer<typeof configSchema>;
+
+export interface PublicModelConnectionState {
+  status: PublicModelConfig["connectionStatus"];
+  message?: string;
+  lastCheckedAt?: string;
+}
 
 function readInteger(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === "") return fallback;
@@ -124,6 +131,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     maxModelRetries: readInteger(process.env.HAMMERCODE_MAX_MODEL_RETRIES, 2),
     retryBaseDelayMs: readInteger(process.env.HAMMERCODE_RETRY_BASE_DELAY_MS, 1_000),
     retryMaxDelayMs: readInteger(process.env.HAMMERCODE_RETRY_MAX_DELAY_MS, 8_000),
+    autoCompactRatio: readInteger(process.env.HAMMERCODE_AUTO_COMPACT_PERCENT, 78) / 100,
   });
   if (!parsed.success) {
     const safeIssues = parsed.error.issues.map((issue) => issue.path.join(".")).join("、");
@@ -151,6 +159,7 @@ function publicModel(
   tier: ModelTier,
   label: string,
   config: RuntimeModelConfig,
+  state?: PublicModelConnectionState,
 ): PublicModelConfig {
   let displayBaseUrl: string;
   try {
@@ -169,15 +178,18 @@ function publicModel(
     reasoningEffort: config.reasoningEffort,
     maxOutputTokens: config.maxOutputTokens,
     hasApiKey: Boolean(config.apiKey),
+    connectionStatus: state?.status ?? (config.apiKey ? "configured" : "missing"),
+    connectionMessage: state?.message,
+    lastCheckedAt: state?.lastCheckedAt,
   };
 }
 
 export function toPublicConfig(
   config: RuntimeConfig,
-  customModels: PublicRuntimeConfig["availableModels"] = [],
+  states: Partial<Record<ModelTier, PublicModelConnectionState>> = {},
 ): PublicRuntimeConfig {
-  const fast = publicModel("fast", "Fast", config.models.fast);
-  const strong = publicModel("strong", "Strong", config.models.strong);
+  const fast = publicModel("fast", "Fast", config.models.fast, states.fast);
+  const strong = publicModel("strong", "Strong", config.models.strong, states.strong);
   return {
     models: { fast, strong },
     availableModels: [
@@ -188,6 +200,7 @@ export function toPublicConfig(
         model: fast.model,
         apiBaseUrl: fast.apiBaseUrl,
         hasApiKey: fast.hasApiKey,
+        connectionStatus: fast.connectionStatus,
         builtinTier: "fast",
       },
       {
@@ -197,14 +210,15 @@ export function toPublicConfig(
         model: strong.model,
         apiBaseUrl: strong.apiBaseUrl,
         hasApiKey: strong.hasApiKey,
+        connectionStatus: strong.connectionStatus,
         builtinTier: "strong",
       },
-      ...customModels,
     ],
     contextTokenBudget: config.contextTokenBudget,
     maxAgentRounds: config.maxAgentRounds,
     maxToolCalls: config.maxToolCalls,
     maxRunTimeMs: config.maxRunTimeMs,
     maxModelRetries: config.maxModelRetries,
+    autoCompactRatio: config.autoCompactRatio,
   };
 }

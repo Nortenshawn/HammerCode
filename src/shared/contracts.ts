@@ -15,7 +15,7 @@ export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export const BUILTIN_MODEL_REFS = ["builtin:fast", "builtin:strong"] as const;
 export type BuiltinModelRef = (typeof BUILTIN_MODEL_REFS)[number];
-export type ModelRef = string;
+export type ModelRef = BuiltinModelRef;
 
 export const PERMISSION_MODES = ["ask", "full_access"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
@@ -175,6 +175,7 @@ export interface TurnRunMetrics {
   tokenUsageEstimated: boolean;
   maxOutputTokensPerRequest: number;
   contextTokenBudget: number;
+  currentContextTokens: number;
   contextCompactions: number;
   maxRunTimeMs: number;
 }
@@ -251,8 +252,21 @@ export interface AgentSession {
   streamingReasoning: string;
   pendingApproval?: ApprovalRequest;
   pendingUndo?: PendingUndo;
+  contextMemory?: ChatContextMemory;
   terminationReason?: TerminationReason;
   error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatContextMemory {
+  version: 1;
+  summary: string;
+  throughMessageId: string;
+  throughCreatedAt: string;
+  sourceMessageCount: number;
+  mode: "automatic" | "explicit";
+  compactionCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -287,38 +301,40 @@ export interface PublicModelConfig {
   reasoningEffort: "low" | "high" | "max";
   maxOutputTokens: number;
   hasApiKey: boolean;
+  connectionStatus: "missing" | "configured" | "connected" | "error";
+  connectionMessage?: string;
+  lastCheckedAt?: string;
 }
 
 export interface PublicModelOption {
   ref: ModelRef;
   label: string;
-  provider: "deepseek" | "zhipu" | "custom";
+  provider: "deepseek" | "zhipu";
   model: string;
   apiBaseUrl: string;
   hasApiKey: boolean;
-  builtinTier?: ModelTier;
-  connectionId?: string;
+  connectionStatus: PublicModelConfig["connectionStatus"];
+  builtinTier: ModelTier;
 }
 
-export interface PublicApiConnection {
-  id: string;
-  name: string;
+export interface ModelConnectionInput {
+  tier: ModelTier;
   apiBaseUrl: string;
-  models: string[];
-  status: "connected" | "error";
-  lastCheckedAt: string;
-  error?: string;
+  apiKey?: string;
 }
 
-export interface ApiConnectionInput {
+export interface ModelConnectionTestResult {
+  tier: ModelTier;
   apiBaseUrl: string;
-  apiKey: string;
-}
-
-export interface ApiConnectionTestResult {
-  apiBaseUrl: string;
-  models: string[];
+  model: string;
   latencyMs: number;
+  status: "connected";
+}
+
+export interface WorkspaceEntry {
+  path: string;
+  name: string;
+  kind: "file" | "directory";
 }
 
 export interface PublicRuntimeConfig {
@@ -329,6 +345,7 @@ export interface PublicRuntimeConfig {
   maxToolCalls: number;
   maxRunTimeMs: number;
   maxModelRetries: number;
+  autoCompactRatio: number;
 }
 
 export interface AppBootstrap {
@@ -337,7 +354,6 @@ export interface AppBootstrap {
   workspaces: WorkspaceSummary[];
   workspaceRoot: string | null;
   config: PublicRuntimeConfig;
-  apiConnections: PublicApiConnection[];
 }
 
 export interface SessionSettings {
@@ -358,7 +374,6 @@ export type RendererEvent =
   | {
       type: "config_updated";
       config: PublicRuntimeConfig;
-      apiConnections: PublicApiConnection[];
     }
   | {
       type: "workspace_changed";
@@ -376,8 +391,10 @@ export interface HammerCodeApi {
   newChat(): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   updateSessionSettings(settings: SessionSettings): Promise<void>;
-  testApiConnection(input: ApiConnectionInput): Promise<ApiConnectionTestResult>;
-  saveApiConnection(input: ApiConnectionInput): Promise<PublicApiConnection>;
+  testModelConnection(input: ModelConnectionInput): Promise<ModelConnectionTestResult>;
+  saveModelConnection(input: ModelConnectionInput): Promise<ModelConnectionTestResult>;
+  compressContext(): Promise<ChatContextMemory>;
+  searchWorkspaceEntries(query: string): Promise<WorkspaceEntry[]>;
   startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;
   cancelTask(): Promise<void>;

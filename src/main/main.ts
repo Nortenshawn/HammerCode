@@ -1,8 +1,8 @@
 import path from "node:path";
 import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
-import { ApiConnectionStore } from "./api-connection-store";
 import { AppController, safeIpcError } from "./controller";
 import { loadRuntimeConfig } from "./config";
+import { ModelCredentialStore } from "./model-credential-store";
 import { SessionStore } from "./session-store";
 
 let mainWindow: BrowserWindow | null = null;
@@ -35,7 +35,7 @@ async function createWindow(): Promise<void> {
 
   const config = loadRuntimeConfig();
   const store = new SessionStore(path.join(app.getPath("userData"), "sessions"));
-  const apiConnections = new ApiConnectionStore(
+  const modelCredentials = new ModelCredentialStore(
     path.join(app.getPath("userData"), "settings"),
     {
       isAvailable: () => safeStorage.isEncryptionAvailable(),
@@ -43,7 +43,7 @@ async function createWindow(): Promise<void> {
       decrypt: (value) => safeStorage.decryptString(value),
     },
   );
-  controller = new AppController(mainWindow, config, store, apiConnections);
+  controller = new AppController(mainWindow, config, store, modelCredentials);
   await controller.initialize();
   registerIpc(controller);
 
@@ -78,11 +78,15 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:update-session-settings", (settings: unknown) =>
     appController.updateSessionSettings(settings),
   );
-  handle("hammercode:test-api-connection", (input: unknown) =>
-    appController.testApiConnection(input),
+  handle("hammercode:test-model-connection", (input: unknown) =>
+    appController.testModelConnection(input),
   );
-  handle("hammercode:save-api-connection", (input: unknown) =>
-    appController.saveApiConnection(input),
+  handle("hammercode:save-model-connection", (input: unknown) =>
+    appController.saveModelConnection(input),
+  );
+  handle("hammercode:compress-context", () => appController.compressContext());
+  handle("hammercode:search-workspace-entries", (query: unknown) =>
+    appController.searchWorkspaceEntries(query),
   );
   handle("hammercode:start-task", (request: unknown) => appController.startTask(request));
   handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));

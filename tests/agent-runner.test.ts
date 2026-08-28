@@ -690,4 +690,46 @@ describe("agent runner", () => {
     expect(executions).toBe(1);
     expect(resumed.messages.filter((message) => message.role === "tool" && message.toolCallId === "call_once")).toHaveLength(1);
   });
+
+  it("automatically creates chat-local memory before a new turn crosses the context threshold", async () => {
+    const { ids, clock } = fixtures();
+    const oldConclusion = `第一轮长结论：${"x".repeat(7_000)}`;
+    const model = new ScriptedModel([
+      [{ content: oldConclusion, finishReason: "stop" }],
+      [{ content: "已依据压缩记忆继续。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: { definitions: [], prepare: async () => { throw new Error("unused"); } },
+        approvals: approve,
+        ids,
+        clock,
+      },
+      {
+        maxRounds: 2,
+        contextTokenBudget: 3_000,
+        autoCompactRatio: 0.5,
+        systemPrompt: "system",
+      },
+    );
+
+    const first = await runner.start("必须保留原始目标", "/tmp");
+    const resumed = await runner.resume(first, "继续下一阶段");
+    expect(resumed.contextMemory).toMatchObject({
+      mode: "automatic",
+      compactionCount: 1,
+      throughMessageId: first.messages.at(-1)?.id,
+    });
+    expect(resumed.messages).toHaveLength(first.messages.length + 2);
+    expect(resumed.turns.at(-1)?.metrics?.contextCompactions).toBe(1);
+    expect(model.requests[1].messages[0]).toMatchObject({ role: "system" });
+    expect(JSON.stringify(model.requests[1].messages[0])).toContain("必须保留原始目标");
+    expect(model.requests[1].messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: "继续下一阶段" }),
+    ]));
+    expect(model.requests[1].messages).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "assistant", content: oldConclusion }),
+    ]));
+  });
 });

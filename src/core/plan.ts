@@ -111,5 +111,5 @@ export function applyPlanUpdate(
 }
 
 export function requiresPlanBeforeTool(toolName: string): boolean {
-  return ["write_file", "edit_file", "delete_file", "run_command"].includes(toolName);
+  return ["write_file", "edit_file", "delete_file", "run_command", "run_python"].includes(toolName);
 }

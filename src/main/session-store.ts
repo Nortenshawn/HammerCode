@@ -8,6 +8,7 @@ import {
   SESSION_STATUSES,
   type AgentSession,
   type AgentTurn,
+  type ModelRef,
   type ConversationMessage,
   type SessionSummary,
   type ToolAuthorization,
@@ -119,8 +120,20 @@ const metricsSchema = z.object({
   tokenUsageEstimated: z.boolean(),
   maxOutputTokensPerRequest: z.number().int().positive(),
   contextTokenBudget: z.number().int().positive(),
+  currentContextTokens: z.number().int().nonnegative().optional(),
   contextCompactions: z.number().int().nonnegative(),
   maxRunTimeMs: z.number().int().positive(),
+});
+const contextMemorySchema = z.object({
+  version: z.literal(1),
+  summary: z.string(),
+  throughMessageId: z.string(),
+  throughCreatedAt: z.string(),
+  sourceMessageCount: z.number().int().nonnegative(),
+  mode: z.enum(["automatic", "explicit"]).optional(),
+  compactionCount: z.number().int().positive().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
 });
 const turnSchema = z.object({
   id: z.string(),
@@ -222,6 +235,7 @@ const sessionSchema = z.object({
   streamingReasoning: z.string(),
   pendingApproval: approvalSchema.optional(),
   pendingUndo: pendingUndoSchema.optional(),
+  contextMemory: contextMemorySchema.optional(),
   terminationReason: terminationSchema.optional(),
   error: z.string().optional(),
   createdAt: z.string(),
@@ -266,6 +280,10 @@ function legacyTurnId(sessionId: string, index: number): string {
   return `turn_legacy_${sessionId}_${index}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 200);
 }
 
+function builtinModelRef(tier: "fast" | "strong"): ModelRef {
+  return tier === "fast" ? "builtin:fast" : "builtin:strong";
+}
+
 function inferAuthorization(trace: ParsedSession["toolTraces"][number]): ToolAuthorization {
   if (trace.authorization) return trace.authorization;
   if (trace.status === "blocked") return "safety_blocked";
@@ -277,17 +295,21 @@ function inferAuthorization(trace: ParsedSession["toolTraces"][number]): ToolAut
 function normalizeSessionShape(parsed: ParsedSession): AgentSession {
   const rawMessages = parsed.messages.map((message) => ({ ...message }));
   const defaultModelTier = parsed.modelTier ?? parsed.turns?.at(-1)?.modelTier ?? "fast";
-  const defaultModelRef = parsed.modelRef ?? parsed.turns?.at(-1)?.modelRef ?? `builtin:${defaultModelTier}`;
+  const defaultModelRef = builtinModelRef(defaultModelTier);
   const defaultPermissionMode =
     parsed.permissionMode ?? parsed.turns?.at(-1)?.permissionMode ?? "ask";
   let turns: AgentTurn[] =
     parsed.turns?.map((turn) => ({
       ...turn,
       modelTier: turn.modelTier ?? defaultModelTier,
-      modelRef: turn.modelRef ?? `builtin:${turn.modelTier ?? defaultModelTier}`,
+      modelRef: builtinModelRef(turn.modelTier ?? defaultModelTier),
       permissionMode: turn.permissionMode ?? "ask",
       planCheckpoints: turn.planCheckpoints ?? [],
       retryEvents: turn.retryEvents ?? [],
+      metrics: turn.metrics ? {
+        ...turn.metrics,
+        currentContextTokens: turn.metrics.currentContextTokens ?? 0,
+      } : undefined,
     })) ?? [];
 
   if (turns.length === 0) {
@@ -338,7 +360,7 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
     status: parsed.status,
     task: parsed.task,
     modelTier: parsed.modelTier ?? turns.at(-1)?.modelTier ?? "fast",
-    modelRef: parsed.modelRef ?? turns.at(-1)?.modelRef ?? defaultModelRef,
+    modelRef: builtinModelRef(parsed.modelTier ?? turns.at(-1)?.modelTier ?? defaultModelTier),
     permissionMode: parsed.permissionMode ?? defaultPermissionMode,
     turns,
     activeTurnId,
@@ -357,6 +379,11 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
     streamingReasoning: parsed.streamingReasoning,
     pendingApproval: parsed.pendingApproval,
     pendingUndo: parsed.pendingUndo,
+    contextMemory: parsed.contextMemory ? {
+      ...parsed.contextMemory,
+      mode: parsed.contextMemory.mode ?? "explicit",
+      compactionCount: parsed.contextMemory.compactionCount ?? 1,
+    } : undefined,
     terminationReason: parsed.terminationReason,
     error: parsed.error,
     createdAt: parsed.createdAt,

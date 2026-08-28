@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import logoUrl from "../../../logos/logo.png";
@@ -6,9 +6,9 @@ import type {
   AgentSession,
   AgentTurn,
   AppBootstrap,
-  ApiConnectionTestResult,
   AssistantMessage,
   ModelRef,
+  ModelConnectionTestResult,
   ModelTier,
   PermissionMode,
   RendererEvent,
@@ -19,8 +19,11 @@ import type {
   ToolCall,
   ToolTrace,
   WorkspaceSummary,
+  WorkspaceEntry,
 } from "../../shared/contracts";
 import { buildFileReviews, type FileReview } from "../../shared/file-reviews";
+import { renderDiffLines } from "./diff-renderer";
+import { detectComposerToken, formatWorkspaceMention, replaceComposerToken } from "./composer-tokens";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -90,6 +93,12 @@ function formatCompactNumber(value: number): string {
   return new Intl.NumberFormat("zh-CN", { notation: value >= 10_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
 }
 
+function formatMemoryTokens(value: number): string {
+  if (value < 1_000) return String(Math.max(0, Math.round(value)));
+  const thousands = value / 1_000;
+  return `${thousands >= 100 ? Math.round(thousands) : thousands.toFixed(1).replace(/\.0$/, "")}k`;
+}
+
 function formatDurationLimit(milliseconds: number): string {
   const minutes = Math.round(milliseconds / 60_000);
   return minutes >= 60 ? `${(minutes / 60).toFixed(minutes % 60 === 0 ? 0 : 1)} 小时` : `${minutes} 分钟`;
@@ -102,14 +111,6 @@ function userFacingError(error: unknown): string {
 }
 
 function turnModelLabel(turn: AgentTurn): string {
-  const customModel = /^custom:[0-9a-f-]{36}:(.+)$/i.exec(turn.modelRef ?? "")?.[1];
-  if (customModel) {
-    try {
-      return `${decodeURIComponent(customModel)} · 自定义`;
-    } catch {
-      return "自定义模型";
-    }
-  }
   return turn.modelTier === "fast" ? "Fast" : "Strong";
 }
 
@@ -200,60 +201,6 @@ function Markdown({ children }: { children: string }) {
   return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>;
 }
 
-interface RenderedDiffLine {
-  kind: "addition" | "deletion" | "context" | "hunk" | "meta";
-  text: string;
-  oldLine?: number;
-  newLine?: number;
-}
-
-function renderDiffLines(diff: string): RenderedDiffLine[] {
-  const rendered: RenderedDiffLine[] = [];
-  let oldLine = 0;
-  let newLine = 0;
-  let inHunk = false;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("@@")) {
-      inHunk = true;
-      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      if (match) {
-        oldLine = Number(match[1]);
-        newLine = Number(match[2]);
-      }
-      rendered.push({ kind: "hunk", text: line });
-      continue;
-    }
-    if (!inHunk && (line.startsWith("---") || line.startsWith("+++"))) continue;
-    if (line.startsWith("Index:") || line.startsWith("====") || line.startsWith("diff ")) {
-      rendered.push({ kind: "meta", text: line });
-      continue;
-    }
-    if (line.startsWith("+")) {
-      rendered.push({ kind: "addition", text: line.slice(1), newLine });
-      newLine += 1;
-      continue;
-    }
-    if (line.startsWith("-")) {
-      rendered.push({ kind: "deletion", text: line.slice(1), oldLine });
-      oldLine += 1;
-      continue;
-    }
-    if (line.startsWith("\\")) {
-      rendered.push({ kind: "meta", text: line });
-      continue;
-    }
-    if (!inHunk) {
-      rendered.push({ kind: "meta", text: line });
-      continue;
-    }
-    if (!line && rendered.length > 0) continue;
-    rendered.push({ kind: "context", text: line.startsWith(" ") ? line.slice(1) : line, oldLine, newLine });
-    oldLine += 1;
-    newLine += 1;
-  }
-  return rendered;
-}
-
 const TOOL_STATUS_LABELS: Record<ToolTrace["status"], string> = {
   proposed: "准备中",
   awaiting_approval: "待审批",
@@ -331,7 +278,8 @@ function TurnMetrics({ turn }: { turn: AgentTurn }) {
       <span>请求 <b>{metrics.modelRequests}</b>{metrics.retryCount > 0 && ` · 重试 ${metrics.retryCount}/${metrics.maxRetries}`}</span>
       <span>工具 <b>{metrics.toolCalls}/{metrics.maxToolCalls}</b></span>
       <span>输出 <b>{formatCompactNumber(metrics.completionTokens)}</b> / 单次 {formatCompactNumber(metrics.maxOutputTokensPerRequest)}</span>
-      <span>上下文 <b>{formatCompactNumber(metrics.promptTokens)}</b>{metrics.tokenUsageEstimated ? " 约" : ""} · 压缩 {metrics.contextCompactions}</span>
+      <span>上下文 <b>{formatCompactNumber(metrics.currentContextTokens)}/{formatCompactNumber(metrics.contextTokenBudget)}</b> · 压缩 {metrics.contextCompactions}</span>
+      <span>累计输入 <b>{formatCompactNumber(metrics.promptTokens)}</b>{metrics.tokenUsageEstimated ? " 约" : ""}</span>
       <span>时限 <b>{formatDurationLimit(metrics.maxRunTimeMs)}</b></span>
     </div>
   );
@@ -427,10 +375,11 @@ function ChangeReviewPanel({ reviews, onOpen }: { reviews: FileReview[]; onOpen:
   );
 }
 
-function DiffDrawer({ review, busy, undoing, onClose, onUndo }: { review: FileReview; busy: boolean; undoing: boolean; onClose: () => void; onUndo: () => void }) {
+function DiffDrawer({ review, busy, undoing, onClose, onUndo, onResizeStart }: { review: FileReview; busy: boolean; undoing: boolean; onClose: () => void; onUndo: () => void; onResizeStart: (clientX: number) => void }) {
   const lines = useMemo(() => renderDiffLines(review.diff), [review.diff]);
   return (
     <aside className="diff-drawer" aria-label={`${review.path} 变更详情`}>
+      <div className="diff-resize-handle" onPointerDown={(event) => { event.preventDefault(); onResizeStart(event.clientX); }} aria-hidden="true"/>
       <header className="diff-drawer-header">
         <div><small>文件变更</small><strong>{review.path}</strong></div>
         <button className="diff-close" onClick={onClose} aria-label="关闭变更详情">×</button>
@@ -469,54 +418,82 @@ function SettingsView({
   bootstrap: AppBootstrap;
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
 }) {
-  const [apiBaseUrl, setApiBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [checking, setChecking] = useState<"test" | "save" | null>(null);
-  const [lastResult, setLastResult] = useState<ApiConnectionTestResult | null>(null);
+  const [urls, setUrls] = useState<Record<ModelTier, string>>(() => ({
+    fast: bootstrap.config.models.fast.apiBaseUrl,
+    strong: bootstrap.config.models.strong.apiBaseUrl,
+  }));
+  const [keys, setKeys] = useState<Record<ModelTier, string>>({ fast: "", strong: "" });
+  const [checking, setChecking] = useState<{ tier: ModelTier; mode: "test" | "save" } | null>(null);
+  const [lastResults, setLastResults] = useState<Partial<Record<ModelTier, ModelConnectionTestResult>>>({});
 
-  const submitConnection = async (mode: "test" | "save") => {
-    if (!apiBaseUrl.trim() || !apiKey.trim() || checking) return;
-    setChecking(mode);
-    setLastResult(null);
+  useEffect(() => {
+    setUrls({
+      fast: bootstrap.config.models.fast.apiBaseUrl,
+      strong: bootstrap.config.models.strong.apiBaseUrl,
+    });
+  }, [bootstrap.config.models.fast.apiBaseUrl, bootstrap.config.models.strong.apiBaseUrl]);
+
+  const submitConnection = async (tier: ModelTier, mode: "test" | "save") => {
+    if (!urls[tier].trim() || checking) return;
+    setChecking({ tier, mode });
+    setLastResults((items) => ({ ...items, [tier]: undefined }));
     try {
-      if (mode === "test") {
-        const result = await window.hammerCode.testApiConnection({ apiBaseUrl, apiKey });
-        setApiBaseUrl(result.apiBaseUrl);
-        setLastResult(result);
-        onNotice({ level: "info", text: `连接成功：发现 ${result.models.length} 个模型，耗时 ${result.latencyMs} ms。` });
-      } else {
-        const connection = await window.hammerCode.saveApiConnection({ apiBaseUrl, apiKey });
-        setApiBaseUrl("");
-        onNotice({ level: "info", text: `已安全保存 ${connection.name}，可在聊天输入框中选择发现的模型。` });
-      }
+      const input = { tier, apiBaseUrl: urls[tier], apiKey: keys[tier].trim() || undefined };
+      const result = mode === "test"
+        ? await window.hammerCode.testModelConnection(input)
+        : await window.hammerCode.saveModelConnection(input);
+      setUrls((items) => ({ ...items, [tier]: result.apiBaseUrl }));
+      setLastResults((items) => ({ ...items, [tier]: result }));
+      onNotice({ level: "info", text: `${tier === "fast" ? "Fast" : "Strong"} 连接成功：${result.model}，耗时 ${result.latencyMs} ms。` });
     } catch (error) {
       onNotice({ level: "error", text: userFacingError(error) });
     } finally {
-      setApiKey("");
+      setKeys((items) => ({ ...items, [tier]: "" }));
       setChecking(null);
     }
   };
 
   return (
     <section className="settings-view">
-      <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>添加一个 OpenAI-compatible API。HammerCode 会通过标准 <code>/models</code> 接口验证地址、密钥和模型发现能力。</p></header>
-      <section className="settings-card">
-        <div className="settings-card-title"><div><h2>自提供接口</h2><p>只需要 API URL 和 API Key；模型会在连接成功后自动发现。</p></div><span>{bootstrap.apiConnections.length} 个连接</span></div>
-        <div className="api-form">
-          <label><span>API URL</span><input type="url" value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} placeholder="https://example.com/v1" autoComplete="off" spellCheck={false}/></label>
-          <label><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="输入后不会再次显示" autoComplete="new-password" spellCheck={false}/></label>
-          <div className="api-form-actions"><button className="secondary-action" disabled={!apiBaseUrl.trim() || !apiKey.trim() || Boolean(checking)} onClick={() => void submitConnection("test")}>{checking === "test" ? "正在检测…" : "仅检测"}</button><button className="primary-action" disabled={!apiBaseUrl.trim() || !apiKey.trim() || Boolean(checking)} onClick={() => void submitConnection("save")}>{checking === "save" ? "正在检测并保存…" : "检测并保存"}</button></div>
-        </div>
-        {lastResult && <div className="api-test-result"><span className="connection-dot ready"/><div><strong>连接可用</strong><p>{lastResult.apiBaseUrl} · {lastResult.models.slice(0, 6).join("、")}{lastResult.models.length > 6 ? ` 等 ${lastResult.models.length} 个模型` : ""}</p></div></div>}
-      </section>
-      <section className="settings-card saved-connections">
-        <div className="settings-card-title"><div><h2>已保存连接</h2><p>密钥由 macOS 安全存储加密，界面和聊天不会收到密钥值。</p></div></div>
-        {bootstrap.apiConnections.length === 0 ? <div className="settings-empty">尚未保存自定义连接。</div> : bootstrap.apiConnections.map((connection) => (
-          <article className="connection-card" key={connection.id}><span className={`connection-dot ${connection.status === "connected" ? "ready" : "missing"}`}/><div><strong>{connection.name}</strong><p>{connection.apiBaseUrl}</p><small>{connection.models.length} 个模型 · 最近检测 {new Date(connection.lastCheckedAt).toLocaleString("zh-CN")}</small></div></article>
-        ))}
-      </section>
+      <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>HammerCode 只保留 Fast 与 Strong 两个固定模型。API Key 由 macOS 安全存储加密，重启后仍可使用，但不会回显到界面。</p></header>
+      {(["fast", "strong"] as ModelTier[]).map((tier) => {
+        const model = bootstrap.config.models[tier];
+        const activeCheck = checking?.tier === tier ? checking.mode : null;
+        const statusLabel = model.connectionStatus === "connected" ? "已连接" : model.connectionStatus === "configured" ? "已配置" : model.connectionStatus === "error" ? "检测失败" : "未配置";
+        const canUseExistingKey = model.hasApiKey;
+        return <section className="settings-card model-settings-card" key={tier}>
+          <div className="settings-card-title"><div><h2>{tier === "fast" ? "Fast" : "Strong"} · {model.model}</h2><p>{tier === "fast" ? "日常快速任务，DeepSeek OpenAI-compatible 接口。" : "复杂任务，智谱 OpenAI-compatible 接口。"}</p></div><span className={`model-status status-${model.connectionStatus}`}><i className={`connection-dot ${model.connectionStatus === "missing" ? "missing" : model.connectionStatus === "error" ? "error" : "ready"}`}/>{statusLabel}</span></div>
+          <div className="api-form">
+            <label><span>API URL</span><input type="url" value={urls[tier]} onChange={(event) => setUrls((items) => ({ ...items, [tier]: event.target.value }))} autoComplete="off" spellCheck={false}/></label>
+            <label><span>API Key</span><input type="password" value={keys[tier]} onChange={(event) => setKeys((items) => ({ ...items, [tier]: event.target.value }))} placeholder={canUseExistingKey ? "已安全保存；留空则继续使用" : "请输入 API Key"} autoComplete="new-password" spellCheck={false}/></label>
+            <div className="api-form-actions"><button className="secondary-action" disabled={!urls[tier].trim() || (!keys[tier].trim() && !canUseExistingKey) || Boolean(checking)} onClick={() => void submitConnection(tier, "test")}>{activeCheck === "test" ? "正在检测…" : "检测连接"}</button><button className="primary-action" disabled={!urls[tier].trim() || (!keys[tier].trim() && !canUseExistingKey) || Boolean(checking)} onClick={() => void submitConnection(tier, "save")}>{activeCheck === "save" ? "正在保存…" : "保存并检测"}</button></div>
+          </div>
+          {(lastResults[tier] || model.connectionMessage || model.lastCheckedAt) && <div className={`api-test-result ${model.connectionStatus === "error" ? "failed" : ""}`}><span className={`connection-dot ${model.connectionStatus === "error" ? "error" : "ready"}`}/><div><strong>{lastResults[tier] ? "连接可用" : statusLabel}</strong><p>{lastResults[tier]?.apiBaseUrl ?? model.apiBaseUrl}{model.connectionMessage ? ` · ${model.connectionMessage}` : ""}</p>{model.lastCheckedAt && <small>最近检测 {new Date(model.lastCheckedAt).toLocaleString("zh-CN")}</small>}</div></div>}
+        </section>;
+      })}
     </section>
   );
+}
+
+function ContextRing({
+  session,
+  budget,
+  autoCompactRatio,
+}: {
+  session: AgentSession | null;
+  budget: number;
+  autoCompactRatio: number;
+}) {
+  const turn = session?.turns.find((item) => item.id === session.activeTurnId) ?? session?.turns.at(-1);
+  const used = turn?.metrics?.currentContextTokens ?? 0;
+  const ratio = Math.max(0, Math.min(1, budget > 0 ? used / budget : 0));
+  const radius = 8;
+  const circumference = 2 * Math.PI * radius;
+  const compactions = session?.contextMemory?.compactionCount ?? turn?.metrics?.contextCompactions ?? 0;
+  const tooltip = `已用 ${Math.round(ratio * 100)}% · 记忆窗口 ${formatMemoryTokens(used)}/${formatMemoryTokens(budget)} · 自动压缩 ${Math.round(autoCompactRatio * 100)}% · 已压缩 ${compactions} 次`;
+  return <span className={`context-ring ${session ? "" : "empty"}`} title={tooltip} role="img" aria-label={tooltip}>
+    <svg viewBox="0 0 22 22" aria-hidden="true"><circle className="context-ring-track" cx="11" cy="11" r={radius}/><circle className="context-ring-value" cx="11" cy="11" r={radius} strokeDasharray={circumference} strokeDashoffset={circumference * (1 - ratio)}/></svg>
+  </span>;
 }
 
 export function App() {
@@ -535,9 +512,15 @@ export function App() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [showFullAccessWarning, setShowFullAccessWarning] = useState(false);
   const [selectedReviewPath, setSelectedReviewPath] = useState<string | null>(null);
+  const [reviewWidth, setReviewWidth] = useState<number | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [composerCursor, setComposerCursor] = useState(0);
+  const [paletteMode, setPaletteMode] = useState<"chats" | "models" | null>(null);
+  const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
+  const [paletteIndex, setPaletteIndex] = useState(0);
   const [notice, setNotice] = useState<{ level: "info" | "error"; text: string } | null>(null);
   const conversationRef = useRef<HTMLElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoScrollRef = useRef(true);
 
   useEffect(() => {
@@ -592,7 +575,6 @@ export function App() {
         setBootstrap((current) => current ? {
           ...current,
           config: event.config,
-          apiConnections: event.apiConnections,
         } : current);
       }
       if (event.type === "notification") setNotice({ level: event.level, text: event.message });
@@ -613,6 +595,28 @@ export function App() {
   );
   const selectedReview = fileReviews.find((review) => review.path === selectedReviewPath);
   const activeTurn = session?.turns.find((turn) => turn.id === session.activeTurnId);
+  const composerToken = useMemo(() => detectComposerToken(task, composerCursor), [task, composerCursor]);
+
+  useEffect(() => {
+    if (composerToken?.kind !== "mention" || !workspaceRoot) {
+      setMentionEntries([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      window.hammerCode.searchWorkspaceEntries(composerToken.query).then((entries) => {
+        if (!cancelled) setMentionEntries(entries);
+      }).catch((error) => {
+        if (!cancelled) setNotice({ level: "error", text: userFacingError(error) });
+      });
+    }, 100);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [composerToken?.kind, composerToken?.query, workspaceRoot]);
+
+  useEffect(() => setPaletteIndex(0), [composerToken?.kind, composerToken?.query, paletteMode]);
 
   useEffect(() => {
     setSelectedReviewPath(null);
@@ -696,6 +700,68 @@ export function App() {
     finally { setBusy(false); }
   };
 
+  const focusComposerAt = (position: number) => {
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(position, position);
+      setComposerCursor(position);
+    });
+  };
+
+  const replaceActiveToken = (replacement: string) => {
+    if (!composerToken) return;
+    const next = replaceComposerToken(task, composerToken, replacement);
+    const position = composerToken.start + replacement.length;
+    setTask(next);
+    focusComposerAt(position);
+  };
+
+  const compressContext = async () => {
+    if (!session || isBusy || busy) return;
+    setBusy(true);
+    try {
+      await window.hammerCode.compressContext();
+      setNotice(null);
+    } catch (error) {
+      setNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selectSlashCommand = (id: "chats" | "models" | "compress") => {
+    replaceActiveToken("");
+    if (id === "compress") {
+      setPaletteMode(null);
+      void compressContext();
+      return;
+    }
+    setPaletteMode(id);
+  };
+
+  const selectMention = (entry: WorkspaceEntry) => {
+    replaceActiveToken(`${formatWorkspaceMention(entry.path)} `);
+    setMentionEntries([]);
+    setPaletteMode(null);
+  };
+
+  const startReviewResize = (clientX: number) => {
+    const sidebarWidth = window.innerWidth <= 1080 ? 260 : 340;
+    const initial = reviewWidth ?? Math.round((window.innerWidth - sidebarWidth) * 0.382);
+    const onMove = (event: PointerEvent) => {
+      const maximum = Math.max(320, Math.min(720, window.innerWidth - sidebarWidth - 360));
+      setReviewWidth(Math.max(280, Math.min(maximum, initial + clientX - event.clientX)));
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp, { once: true });
+  };
+
   const persistSettings = async (nextModelRef: ModelRef, nextPermission: PermissionMode) => {
     if (isBusy || settingsBusy) return;
     const option = bootstrap?.config.availableModels.find((item) => item.ref === nextModelRef);
@@ -776,8 +842,71 @@ export function App() {
 
   if (!bootstrap) return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
 
+  const slashCommands = [
+    { id: "chats" as const, label: "/侧边聊天", description: "切换当前项目中的聊天", disabled: sessions.length === 0 },
+    { id: "models" as const, label: "/模型（API）", description: "选择 Fast 或 Strong", disabled: false },
+    { id: "compress" as const, label: "/压缩上下文", description: "立即生成当前聊天的持久化记忆", disabled: !session || isBusy },
+  ].filter((item) => !composerToken?.query || `${item.label}${item.description}`.toLocaleLowerCase().includes(composerToken.query.toLocaleLowerCase()));
+  const paletteCount = paletteMode === "chats"
+    ? sessions.length
+    : paletteMode === "models"
+      ? bootstrap.config.availableModels.length
+      : composerToken?.kind === "mention"
+        ? mentionEntries.length
+        : composerToken?.kind === "slash"
+          ? slashCommands.length
+          : 0;
+  const paletteOpen = paletteCount > 0 || Boolean(paletteMode) || Boolean(composerToken);
+
+  const selectPaletteItem = (index: number) => {
+    if (paletteMode === "chats") {
+      const target = sessions[index];
+      if (target) { setPaletteMode(null); void selectSession(target.id); }
+      return;
+    }
+    if (paletteMode === "models") {
+      const option = bootstrap.config.availableModels[index];
+      if (option?.hasApiKey) { setPaletteMode(null); void persistSettings(option.ref, permissionMode); }
+      return;
+    }
+    if (composerToken?.kind === "mention") {
+      const entry = mentionEntries[index];
+      if (entry) selectMention(entry);
+      return;
+    }
+    if (composerToken?.kind === "slash") {
+      const command = slashCommands[index];
+      if (command && !command.disabled) selectSlashCommand(command.id);
+    }
+  };
+
+  const handleComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (paletteOpen && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      setPaletteIndex((value) => paletteCount > 0 ? (value + direction + paletteCount) % paletteCount : 0);
+      return;
+    }
+    if (paletteOpen && event.key === "Escape") {
+      event.preventDefault();
+      setPaletteMode(null);
+      setComposerCursor(-1);
+      return;
+    }
+    if (paletteOpen && event.key === "Enter" && !event.shiftKey && paletteCount > 0) {
+      event.preventDefault();
+      selectPaletteItem(Math.min(paletteIndex, paletteCount - 1));
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.blur();
+      void submit();
+    }
+  };
+
   return (
-    <div className={`app-shell ${selectedReview ? "review-open" : ""}`}>
+    <div className={`app-shell ${selectedReview ? "review-open" : ""}`} style={reviewWidth ? { "--review-column": `${reviewWidth}px` } as CSSProperties : undefined}>
       <aside className="sidebar">
         <div className="sidebar-drag"/>
         <header className="brand-row"><button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button></header>
@@ -800,7 +929,10 @@ export function App() {
         </section>
         <footer className="sidebar-footer">
           <button className={`settings-nav ${view === "settings" ? "active" : ""}`} onClick={() => setView(view === "settings" ? "chat" : "settings")}><Icon name="gear" size={17}/><span>设置</span></button>
-          {(["fast", "strong"] as ModelTier[]).map((tier) => <div className="runtime-line" key={tier}><span className={`connection-dot ${bootstrap.config.models[tier].hasApiKey ? "ready" : "missing"}`}/><strong>{tier === "fast" ? "Fast" : "Strong"} · {bootstrap.config.models[tier].model}</strong></div>)}
+          {(["fast", "strong"] as ModelTier[]).map((tier) => {
+            const state = bootstrap.config.models[tier].connectionStatus;
+            return <div className="runtime-line" key={tier}><span className={`connection-dot ${state === "missing" ? "missing" : state === "error" ? "error" : "ready"}`}/><strong>{tier === "fast" ? "Fast" : "Strong"} · {bootstrap.config.models[tier].model}</strong></div>;
+          })}
           <span>本地工具受工作区安全边界保护</span>
         </footer>
       </aside>
@@ -832,10 +964,20 @@ export function App() {
         {view === "chat" && <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${isBusy ? "disabled" : ""}`}>
-            <textarea value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); void submit(); } }} placeholder={workspaceRoot ? (anotherSessionIsRunning ? "另一条聊天正在运行，结束后即可发送" : session ? "继续追问、补充要求或纠正上一轮" : "交给 HammerCode 一个开发任务") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || anotherSessionIsRunning || busy} rows={3}/>
+            {paletteOpen && !isBusy && <div className="composer-palette" role="listbox" aria-label={paletteMode === "chats" ? "侧边聊天" : paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : "命令"} onMouseDown={(event) => event.preventDefault()}>
+              <header><strong>{paletteMode === "chats" ? "侧边聊天" : paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : "命令"}</strong><span>↑↓ 选择 · Enter 确认 · Esc 关闭</span></header>
+              <div className="palette-list">
+                {paletteMode === "chats" ? sessions.map((item, index) => <button key={item.id} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name="file" size={15}/><span><strong>{item.title}</strong><small>{STATUS_LABELS[item.status]} · {item.turnCount} 轮</small></span></button>)
+                  : paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
+                    : composerToken?.kind === "mention" ? (mentionEntries.length > 0 ? mentionEntries.map((entry, index) => <button key={entry.path} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={entry.kind === "directory" ? "folder" : "file"} size={15}/><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>) : <p>没有匹配的工作区条目</p>)
+                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "chats" ? "file" : command.id === "models" ? "gear" : "chevron"} size={15}/><span><strong>{command.label}</strong><small>{command.description}</small></span></button>)}
+              </div>
+            </div>}
+            <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={workspaceRoot ? (anotherSessionIsRunning ? "另一条聊天正在运行，结束后即可发送" : session ? "继续追问；输入 / 使用命令，输入 @ 引用文件" : "交给 HammerCode 一个开发任务；输入 / 或 @") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || anotherSessionIsRunning || busy} rows={3}/>
             <div className="composer-footer">
               <div className="composer-controls">
-                <label><span>模型</span><select value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select></label>
+                <ContextRing session={session} budget={bootstrap.config.contextTokenBudget} autoCompactRatio={bootstrap.config.autoCompactRatio}/>
+                <label><span>模型</span><select value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelRef, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select></label>
                 <label><span>权限</span><select value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select></label>
               </div>
               {isRunning
@@ -853,6 +995,7 @@ export function App() {
           undoing={session.pendingUndo?.changeId === selectedReview.latestChangeId}
           onClose={() => setSelectedReviewPath(null)}
           onUndo={() => void requestUndo(selectedReview.latestChangeId)}
+          onResizeStart={startReviewResize}
         />
       )}
 

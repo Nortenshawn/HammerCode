@@ -253,13 +253,13 @@ describe("session persistence", () => {
     expect(migratedIndex.workspaces).toHaveLength(1);
   });
 
-  it("persists Phase 6 plan checkpoints, retry history, metrics and model references", async () => {
+  it("persists plans, metrics and context memory while migrating custom model references", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
     directories.push(directory);
     const session = createSession("session_phase6", "phase 6", "2026-08-28T04:00:00.000Z");
-    session.modelRef = "custom:00000000-0000-4000-8000-000000000000:model-x";
+    (session as unknown as { modelRef: string }).modelRef = "custom:00000000-0000-4000-8000-000000000000:model-x";
     const turn = session.turns[0];
-    turn.modelRef = session.modelRef;
+    (turn as unknown as { modelRef: string }).modelRef = "custom:00000000-0000-4000-8000-000000000000:model-x";
     turn.planRequired = true;
     turn.plan = {
       revision: 1,
@@ -291,18 +291,31 @@ describe("session persistence", () => {
       tokenUsageEstimated: true,
       maxOutputTokensPerRequest: 32768,
       contextTokenBudget: 120000,
+      currentContextTokens: 2400,
       contextCompactions: 1,
       maxRunTimeMs: 1800000,
+    };
+    session.contextMemory = {
+      version: 1,
+      summary: "当前聊天的压缩记忆",
+      throughMessageId: session.messages.at(-1)!.id,
+      throughCreatedAt: session.messages.at(-1)!.createdAt,
+      sourceMessageCount: session.messages.length,
+      mode: "explicit",
+      compactionCount: 1,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
     };
     const store = new SessionStore(directory);
     await store.save(session);
     const restored = await store.load();
-    expect(restored?.modelRef).toBe(session.modelRef);
+    expect(restored?.modelRef).toBe("builtin:fast");
     expect(restored?.turns[0]).toMatchObject({
-      modelRef: session.modelRef,
+      modelRef: "builtin:fast",
       plan: { revision: 1 },
-      metrics: { retryCount: 1, contextCompactions: 1 },
+      metrics: { retryCount: 1, currentContextTokens: 2400, contextCompactions: 1 },
     });
+    expect(restored?.contextMemory).toMatchObject({ summary: "当前聊天的压缩记忆", mode: "explicit", compactionCount: 1 });
     expect(restored?.turns[0].planCheckpoints?.[0]).toMatchObject({ id: "checkpoint_1" });
     expect(restored?.turns[0].retryEvents?.[0]).toMatchObject({ reason: "server_error" });
   });

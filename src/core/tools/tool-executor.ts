@@ -18,7 +18,7 @@ import { hashText, MAX_REVERSIBLE_FILE_BYTES, readWorkspaceTextState } from "../
 import { parsePlanUpdate, planUpdateSchema } from "../plan";
 import { WorkspaceBoundary } from "../security/path-boundary";
 import { classifyCommand } from "../security/command-policy";
-import { runCommand } from "./command-runner";
+import { runCommand, runProcess } from "./command-runner";
 import { TOOL_DEFINITIONS } from "./tool-definitions";
 
 const MAX_ARGUMENT_BYTES = 2_000_000;
@@ -42,6 +42,11 @@ const schemas = {
       limit: z.number().int().min(1).max(MAX_READ_BYTES).default(MAX_READ_BYTES),
     })
     .strict(),
+  read_pdf: z.object({
+    path: z.string(),
+    start_page: z.number().int().min(1).max(10_000).default(1),
+    end_page: z.number().int().min(1).max(10_000).optional(),
+  }).strict(),
   search_text: z
     .object({
       query: z.string().min(1).max(10_000),
@@ -80,6 +85,12 @@ const schemas = {
     })
     .strict(),
   delete_file: z.object({ path: z.string() }).strict(),
+  run_python: z.object({
+    path: z.string(),
+    args: z.array(z.string().max(4_096).refine((value) => !value.includes("\0"), "参数包含无效字符")).max(50).default([]),
+    cwd: z.string().default("."),
+    timeout_ms: z.number().int().min(1000).max(120_000).default(60_000),
+  }).strict(),
   run_command: z
     .object({
       command: z.string(),
@@ -157,6 +168,8 @@ export class LocalToolExecutor implements ToolExecutorPort {
         return this.prepareList(call);
       case "read_file":
         return this.prepareRead(call);
+      case "read_pdf":
+        return this.prepareReadPdf(call);
       case "search_text":
         return this.prepareSearch(call);
       case "git_status":
@@ -169,6 +182,8 @@ export class LocalToolExecutor implements ToolExecutorPort {
         return this.prepareEdit(call, now);
       case "delete_file":
         return this.prepareDelete(call, now);
+      case "run_python":
+        return this.preparePython(call, now);
       case "run_command":
         return this.prepareCommand(call, now);
     }
@@ -251,6 +266,56 @@ export class LocalToolExecutor implements ToolExecutorPort {
         } finally {
           await file.close();
         }
+      },
+    };
+  }
+
+  private async prepareReadPdf(call: ToolCall): Promise<PreparedToolCall> {
+    const args = parseArguments("read_pdf", call.arguments);
+    const target = await this.boundary.resolveExisting(args.path);
+    const info = await stat(target);
+    if (!info.isFile() || path.extname(target).toLowerCase() !== ".pdf") {
+      throw new HammerCodeError("read_pdf 目标必须是工作区内的 PDF 文件", "NOT_A_PDF", true);
+    }
+    const endPage = args.end_page ?? args.start_page + 99;
+    if (endPage < args.start_page || endPage - args.start_page + 1 > 200) {
+      throw new HammerCodeError("单次 PDF 读取页数必须在 1–200 页之间", "PDF_PAGE_LIMIT", true);
+    }
+    return {
+      call,
+      summary: `读取 PDF ${args.path}（第 ${args.start_page}–${endPage} 页）`,
+      target: args.path,
+      requiresApproval: false,
+      execute: async (context) => {
+        const candidates = [
+          process.env.HAMMERCODE_PDFTOTEXT_PATH,
+          "/opt/homebrew/bin/pdftotext",
+          "/usr/local/bin/pdftotext",
+          "pdftotext",
+        ].filter((value): value is string => Boolean(value));
+        for (const executable of candidates) {
+          const result = await runProcess({
+            executable,
+            args: ["-f", String(args.start_page), "-l", String(endPage), "-layout", target, "-"],
+            cwd: this.boundary.root,
+            timeoutMs: 60_000,
+            maxOutputBytes: this.config.maxCommandOutputBytes,
+            signal: context.signal,
+          });
+          if (result.errorCode === "COMMAND_SPAWN_FAILED") continue;
+          return {
+            ...result,
+            summary: result.ok ? `已提取 ${args.path} 的 PDF 文本` : `PDF 解析失败：${result.summary}`,
+            errorCode: result.ok ? undefined : result.errorCode === "COMMAND_NON_ZERO_EXIT" ? "PDF_PARSE_FAILED" : result.errorCode,
+            metadata: { ...result.metadata, path: args.path, startPage: args.start_page, endPage },
+          };
+        }
+        return {
+          ok: false,
+          summary: "本机未安装 pdftotext",
+          output: "请安装 Poppler，或通过 HAMMERCODE_PDFTOTEXT_PATH 指定可信的 pdftotext 可执行文件。",
+          errorCode: "PDF_PARSER_UNAVAILABLE",
+        };
       },
     };
   }
@@ -629,6 +694,68 @@ export class LocalToolExecutor implements ToolExecutorPort {
           maxOutputBytes: this.config.maxCommandOutputBytes,
           signal: context.signal,
         }),
+    };
+  }
+
+  private async preparePython(call: ToolCall, now: Date): Promise<PreparedToolCall> {
+    const args = parseArguments("run_python", call.arguments);
+    if (args.args.some((value) => path.isAbsolute(value) || /(^|[\\/])\.\.([\\/]|$)|^~|\$\{?HOME\}?/i.test(value))) {
+      throw new HammerCodeError("Python 参数不得引用工作区外路径", "PYTHON_ARGUMENT_PATH_BLOCKED", true);
+    }
+    const target = await this.boundary.resolveExisting(args.path);
+    const info = await stat(target);
+    if (!info.isFile() || path.extname(target).toLowerCase() !== ".py") {
+      throw new HammerCodeError("run_python 目标必须是工作区内的 .py 文件", "NOT_A_PYTHON_SCRIPT", true);
+    }
+    const cwd = await this.resolveCommandDirectory(args.cwd);
+    const relativeCwd = this.boundary.relative(cwd);
+    const request = approval(
+      this.ids,
+      call,
+      "运行 Python 脚本",
+      `在 ${relativeCwd} 运行 ${args.path}`,
+      `cwd: ${cwd}\nscript: ${target}\nargs: ${JSON.stringify(args.args)}\ntimeout: ${args.timeout_ms}ms`,
+      "command",
+      now,
+    );
+    return {
+      call,
+      summary: request.description,
+      target: args.path,
+      requiresApproval: true,
+      approvalPolicy: "permission_mode",
+      approvalRequest: request,
+      execute: async (context) => {
+        const candidates = [
+          process.env.HAMMERCODE_PYTHON_PATH,
+          "/opt/homebrew/bin/python3",
+          "/usr/local/bin/python3",
+          "/usr/bin/python3",
+          "python3",
+        ].filter((value): value is string => Boolean(value));
+        for (const executable of candidates) {
+          const result = await runProcess({
+            executable,
+            args: [target, ...args.args],
+            cwd,
+            timeoutMs: args.timeout_ms,
+            maxOutputBytes: this.config.maxCommandOutputBytes,
+            signal: context.signal,
+          });
+          if (result.errorCode === "COMMAND_SPAWN_FAILED") continue;
+          return {
+            ...result,
+            summary: result.ok ? `Python 脚本执行成功：${args.path}` : result.summary,
+            metadata: { ...result.metadata, script: args.path },
+          };
+        }
+        return {
+          ok: false,
+          summary: "本机未找到 python3",
+          output: "请安装 Python 3，或通过 HAMMERCODE_PYTHON_PATH 指定可信的解释器。",
+          errorCode: "PYTHON_UNAVAILABLE",
+        };
+      },
     };
   }
 }

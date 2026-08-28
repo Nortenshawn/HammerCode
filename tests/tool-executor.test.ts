@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { WorkspaceBoundary } from "../src/core/security/path-boundary";
@@ -31,6 +31,75 @@ describe("local tool executor", () => {
       now: () => new Date(),
     });
     expect(result.output).toBe("before\n");
+  });
+
+  it("runs a workspace Python file without shell interpolation after permission approval", async () => {
+    await writeFile(
+      path.join(workspace, "inspect.py"),
+      "import sys\nprint('arg=' + sys.argv[1])\n",
+    );
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+    const prepared = await executor.prepare(
+      {
+        id: "python_1",
+        name: "run_python",
+        arguments: JSON.stringify({ path: "inspect.py", args: ["value;touch not-created"] }),
+      },
+      new Date(),
+    );
+
+    expect(prepared).toMatchObject({ requiresApproval: true, approvalPolicy: "permission_mode" });
+    const result = await prepared.execute({
+      signal: new AbortController().signal,
+      approvals: { request: async () => true },
+      now: () => new Date(),
+    });
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("arg=value;touch not-created");
+    await expect(readFile(path.join(workspace, "not-created"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects PDF misuse and path-like Python arguments before execution", async () => {
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+    await expect(executor.prepare(
+      { id: "pdf_wrong", name: "read_pdf", arguments: '{"path":"a.txt"}' },
+      new Date(),
+    )).rejects.toMatchObject({ code: "NOT_A_PDF" });
+    await writeFile(path.join(workspace, "inspect.py"), "print('safe')\n");
+    await expect(executor.prepare(
+      { id: "python_escape", name: "run_python", arguments: '{"path":"inspect.py","args":["../outside"]}' },
+      new Date(),
+    )).rejects.toMatchObject({ code: "PYTHON_ARGUMENT_PATH_BLOCKED" });
+  });
+
+  it("extracts PDF text through the bounded local parser process", async () => {
+    const fakeParser = path.join(workspace, "fake-pdftotext");
+    await writeFile(fakeParser, "#!/bin/sh\nprintf '第一页内容\\n第二页内容\\n'\n");
+    await chmod(fakeParser, 0o700);
+    await writeFile(path.join(workspace, "brief.pdf"), "%PDF-1.4\n% test fixture\n");
+    const previousParser = process.env.HAMMERCODE_PDFTOTEXT_PATH;
+    process.env.HAMMERCODE_PDFTOTEXT_PATH = fakeParser;
+    try {
+      const boundary = await WorkspaceBoundary.create(workspace);
+      const executor = new LocalToolExecutor(boundary, ids);
+      const prepared = await executor.prepare(
+        { id: "pdf_1", name: "read_pdf", arguments: '{"path":"brief.pdf","start_page":1,"end_page":2}' },
+        new Date(),
+      );
+      expect(prepared.requiresApproval).toBe(false);
+      const result = await prepared.execute({
+        signal: new AbortController().signal,
+        approvals: { request: async () => true },
+        now: () => new Date(),
+      });
+      expect(result).toMatchObject({ ok: true, metadata: { path: "brief.pdf", startPage: 1, endPage: 2 } });
+      expect(result.output).toContain("第一页内容");
+    } finally {
+      if (previousParser === undefined) delete process.env.HAMMERCODE_PDFTOTEXT_PATH;
+      else process.env.HAMMERCODE_PDFTOTEXT_PATH = previousParser;
+    }
   });
 
   it("provides dedicated approval-free Git status and diff tools", async () => {

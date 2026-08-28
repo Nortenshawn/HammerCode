@@ -11,7 +11,14 @@ import type {
   ToolResult,
   ToolTrace,
 } from "../shared/contracts";
-import { buildContextFacts, buildModelContext, estimateTokens } from "./context";
+import {
+  buildContextFacts,
+  buildModelContext,
+  createContextMemory,
+  estimateTokens,
+  historyAfterContextMemory,
+  systemPromptWithContextMemory,
+} from "./context";
 import { StreamAssembler } from "./model/stream-assembler";
 import { closeUnresolvedToolCalls } from "./session-recovery";
 import { applyPlanUpdate, isComplexTask, parsePlanUpdate, requiresPlanBeforeTool } from "./plan";
@@ -68,7 +75,7 @@ export class AgentRunner {
       planRequired: isComplexTask(task),
       planCheckpoints: [],
       retryEvents: [],
-      metrics: this.initialMetrics(),
+      metrics: this.initialMetrics(false),
       createdAt: now,
       updatedAt: now,
     };
@@ -122,6 +129,10 @@ export class AgentRunner {
       now,
       () => this.dependencies.ids.next("message"),
     );
+    const autoCompacted = this.shouldAutoCompact(this.session);
+    if (autoCompacted) {
+      this.session.contextMemory = createContextMemory(this.session, now, "automatic");
+    }
     const turnId = this.dependencies.ids.next("turn");
     const userMessageId = this.dependencies.ids.next("message");
     this.session.turns.push({
@@ -134,7 +145,7 @@ export class AgentRunner {
       planRequired: isComplexTask(input),
       planCheckpoints: [],
       retryEvents: [],
-      metrics: this.initialMetrics(),
+      metrics: this.initialMetrics(autoCompacted),
       createdAt: now,
       updatedAt: now,
     });
@@ -212,14 +223,16 @@ export class AgentRunner {
     for (let round = 1; round <= this.options.maxRounds; round += 1) {
       if (signal.aborted) throw signal.reason;
       await this.prepareRequest(round);
+      const session = this.requireSession();
       const context = buildModelContext(
-        this.options.systemPrompt,
-        this.requireSession().messages,
+        systemPromptWithContextMemory(this.options.systemPrompt, session.contextMemory),
+        historyAfterContextMemory(session),
         this.options.contextTokenBudget,
-        buildContextFacts(this.requireSession()),
+        buildContextFacts(session),
       );
       const metrics = this.currentTurn().metrics!;
       metrics.roundsUsed = round;
+      metrics.currentContextTokens = context.estimatedTokens;
       if (context.compacted) metrics.contextCompactions += 1;
       const response = await this.requestModelWithRetry(context.messages, context.estimatedTokens, signal);
       this.recordUsage(response, context.estimatedTokens);
@@ -597,7 +610,7 @@ export class AgentRunner {
     return this.session;
   }
 
-  private initialMetrics() {
+  private initialMetrics(autoCompacted: boolean) {
     return {
       roundsUsed: 0,
       maxRounds: this.options.maxRounds,
@@ -611,9 +624,18 @@ export class AgentRunner {
       tokenUsageEstimated: false,
       maxOutputTokensPerRequest: this.options.maxOutputTokens ?? 32_768,
       contextTokenBudget: this.options.contextTokenBudget,
-      contextCompactions: 0,
+      currentContextTokens: 0,
+      contextCompactions: autoCompacted ? 1 : 0,
       maxRunTimeMs: this.maxRunTimeMs(),
     };
+  }
+
+  private shouldAutoCompact(session: AgentSession): boolean {
+    const ratio = this.options.autoCompactRatio ?? 0.78;
+    const estimated = estimateTokens(
+      `${systemPromptWithContextMemory(this.options.systemPrompt, session.contextMemory)}\n${JSON.stringify(historyAfterContextMemory(session))}`,
+    );
+    return session.messages.length > 0 && estimated >= this.options.contextTokenBudget * ratio;
   }
 
   private maxRunTimeMs(): number {

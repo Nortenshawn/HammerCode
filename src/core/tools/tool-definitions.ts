@@ -67,6 +67,23 @@ export const TOOL_DEFINITIONS: ModelToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "read_pdf",
+      description: "提取工作区内 PDF 的文本。只读、无需审批；默认最多读取前 100 页，并受超时与输出上限保护。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "相对工作区的 .pdf 文件" },
+          start_page: { type: "integer", minimum: 1, maximum: 10000 },
+          end_page: { type: "integer", minimum: 1, maximum: 10000, description: "最多跨 200 页，默认 100" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_text",
       description: "在工作区文本文件中搜索固定字符串。只读，可自动执行。",
       parameters: {
@@ -152,6 +169,24 @@ export const TOOL_DEFINITIONS: ModelToolDefinition[] = [
       parameters: {
         type: "object",
         properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_python",
+      description: "使用本机 python3 运行工作区内的 .py 文件，不经过 Shell 拼接。执行受当前权限模式控制，并具备超时、输出上限和取消能力。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "相对工作区的 Python 脚本" },
+          args: { type: "array", maxItems: 50, items: { type: "string", maxLength: 4096 } },
+          cwd: { type: "string", description: "相对工作区目录，默认 ." },
+          timeout_ms: { type: "integer", minimum: 1000, maximum: 120000 },
+        },
         required: ["path"],
         additionalProperties: false,
       },

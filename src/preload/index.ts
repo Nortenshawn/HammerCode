@@ -10,10 +10,13 @@ const api: HammerCodeApi = {
   selectSession: (sessionId) => ipcRenderer.invoke("hammercode:select-session", sessionId),
   updateSessionSettings: (settings) =>
     ipcRenderer.invoke("hammercode:update-session-settings", settings),
-  testApiConnection: (input) =>
-    ipcRenderer.invoke("hammercode:test-api-connection", input),
-  saveApiConnection: (input) =>
-    ipcRenderer.invoke("hammercode:save-api-connection", input),
+  testModelConnection: (input) =>
+    ipcRenderer.invoke("hammercode:test-model-connection", input),
+  saveModelConnection: (input) =>
+    ipcRenderer.invoke("hammercode:save-model-connection", input),
+  compressContext: () => ipcRenderer.invoke("hammercode:compress-context"),
+  searchWorkspaceEntries: (query) =>
+    ipcRenderer.invoke("hammercode:search-workspace-entries", query),
   startTask: (request) => ipcRenderer.invoke("hammercode:start-task", request),
   requestUndo: (changeId) => ipcRenderer.invoke("hammercode:request-undo", changeId),
   cancelTask: () => ipcRenderer.invoke("hammercode:cancel-task"),

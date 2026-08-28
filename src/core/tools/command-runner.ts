@@ -9,6 +9,11 @@ export interface CommandRunOptions {
   signal: AbortSignal;
 }
 
+export interface ProcessRunOptions extends Omit<CommandRunOptions, "command"> {
+  executable: string;
+  args: string[];
+}
+
 function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
   if (!pid) return;
   try {
@@ -19,6 +24,17 @@ function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void
 }
 
 export function runCommand(options: CommandRunOptions): Promise<ToolResult> {
+  return runProcess({
+    executable: "/bin/zsh",
+    args: ["-lc", options.command],
+    cwd: options.cwd,
+    timeoutMs: options.timeoutMs,
+    maxOutputBytes: options.maxOutputBytes,
+    signal: options.signal,
+  });
+}
+
+export function runProcess(options: ProcessRunOptions): Promise<ToolResult> {
   if (options.signal.aborted) {
     return Promise.resolve({
       ok: false,
@@ -30,7 +46,7 @@ export function runCommand(options: CommandRunOptions): Promise<ToolResult> {
   }
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn("/bin/zsh", ["-lc", options.command], {
+    const child = spawn(options.executable, options.args, {
       cwd: options.cwd,
       detached: true,
       env: process.env,
