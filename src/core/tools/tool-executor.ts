@@ -15,8 +15,9 @@ import type { ApprovalRequest, ToolCall, ToolResult } from "../../shared/contrac
 import type { IdGenerator, PreparedToolCall, ToolExecutorPort } from "../types";
 import { HammerCodeError } from "../types";
 import { hashText, MAX_REVERSIBLE_FILE_BYTES, readWorkspaceTextState } from "../file-state";
+import { parsePlanUpdate, planUpdateSchema } from "../plan";
 import { WorkspaceBoundary } from "../security/path-boundary";
-import { assertCommandAllowed } from "../security/command-policy";
+import { classifyCommand } from "../security/command-policy";
 import { runCommand } from "./command-runner";
 import { TOOL_DEFINITIONS } from "./tool-definitions";
 
@@ -26,6 +27,7 @@ const MAX_READ_BYTES = 200_000;
 const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "release", "coverage"]);
 
 const schemas = {
+  update_plan: planUpdateSchema,
   list_files: z
     .object({
       path: z.string().default("."),
@@ -47,6 +49,8 @@ const schemas = {
       max_results: z.number().int().min(1).max(500).default(100),
     })
     .strict(),
+  git_status: z.object({ cwd: z.string().default(".") }).strict(),
+  git_diff: z.object({ cwd: z.string().default("."), staged: z.boolean().default(false) }).strict(),
   write_file: z
     .object({
       path: z.string(),
@@ -147,12 +151,18 @@ export class LocalToolExecutor implements ToolExecutorPort {
       throw new HammerCodeError(`未知工具：${call.name}`, "UNKNOWN_TOOL", true);
     }
     switch (call.name as ToolName) {
+      case "update_plan":
+        return this.preparePlan(call);
       case "list_files":
         return this.prepareList(call);
       case "read_file":
         return this.prepareRead(call);
       case "search_text":
         return this.prepareSearch(call);
+      case "git_status":
+        return this.prepareGitStatus(call);
+      case "git_diff":
+        return this.prepareGitDiff(call);
       case "write_file":
         return this.prepareWrite(call, now);
       case "edit_file":
@@ -162,6 +172,21 @@ export class LocalToolExecutor implements ToolExecutorPort {
       case "run_command":
         return this.prepareCommand(call, now);
     }
+  }
+
+  private preparePlan(call: ToolCall): PreparedToolCall {
+    const args = parsePlanUpdate(call.arguments);
+    return {
+      call,
+      summary: `更新计划（${args.steps.length} 个步骤）`,
+      requiresApproval: false,
+      execute: async () => ({
+        ok: true,
+        summary: `已记录计划检查点（${args.steps.length} 个步骤）`,
+        output: JSON.stringify(args),
+        metadata: { steps: args.steps.length },
+      }),
+    };
   }
 
   private async prepareList(call: ToolCall): Promise<PreparedToolCall> {
@@ -274,6 +299,51 @@ export class LocalToolExecutor implements ToolExecutorPort {
         };
       },
     };
+  }
+
+  private async prepareGitStatus(call: ToolCall): Promise<PreparedToolCall> {
+    const args = parseArguments("git_status", call.arguments);
+    const cwd = await this.resolveCommandDirectory(args.cwd);
+    return {
+      call,
+      summary: `读取 Git 状态（${this.boundary.relative(cwd)}）`,
+      target: this.boundary.relative(cwd),
+      requiresApproval: false,
+      execute: async (context) =>
+        runCommand({
+          command: "git --no-pager -c color.ui=false status --short --branch",
+          cwd,
+          timeoutMs: 30_000,
+          maxOutputBytes: this.config.maxCommandOutputBytes,
+          signal: context.signal,
+        }),
+    };
+  }
+
+  private async prepareGitDiff(call: ToolCall): Promise<PreparedToolCall> {
+    const args = parseArguments("git_diff", call.arguments);
+    const cwd = await this.resolveCommandDirectory(args.cwd);
+    return {
+      call,
+      summary: `读取${args.staged ? "已暂存" : "未暂存"} Git diff（${this.boundary.relative(cwd)}）`,
+      target: this.boundary.relative(cwd),
+      requiresApproval: false,
+      execute: async (context) =>
+        runCommand({
+          command: `git --no-pager -c color.ui=false diff --no-ext-diff --unified=3${args.staged ? " --cached" : ""}`,
+          cwd,
+          timeoutMs: 30_000,
+          maxOutputBytes: this.config.maxCommandOutputBytes,
+          signal: context.signal,
+        }),
+    };
+  }
+
+  private async resolveCommandDirectory(relativePath: string): Promise<string> {
+    const cwd = await this.boundary.resolveExisting(relativePath);
+    const info = await stat(cwd);
+    if (!info.isDirectory()) throw new HammerCodeError("命令 cwd 不是目录", "NOT_A_DIRECTORY", true);
+    return cwd;
   }
 
   private async prepareWrite(call: ToolCall, now: Date): Promise<PreparedToolCall> {
@@ -516,17 +586,31 @@ export class LocalToolExecutor implements ToolExecutorPort {
 
   private async prepareCommand(call: ToolCall, now: Date): Promise<PreparedToolCall> {
     const args = parseArguments("run_command", call.arguments);
-    assertCommandAllowed(args.command);
-    const cwd = await this.boundary.resolveExisting(args.cwd);
-    const info = await stat(cwd);
-    if (!info.isDirectory()) throw new HammerCodeError("命令 cwd 不是目录", "NOT_A_DIRECTORY", true);
+    const classification = classifyCommand(args.command);
+    const cwd = await this.resolveCommandDirectory(args.cwd);
     const relativeCwd = this.boundary.relative(cwd);
+    if (classification.policy === "auto") {
+      return {
+        call,
+        summary: `自动执行本地验证：${args.command.slice(0, 120)}`,
+        target: relativeCwd,
+        requiresApproval: false,
+        execute: async (context) =>
+          runCommand({
+            command: args.command,
+            cwd,
+            timeoutMs: args.timeout_ms,
+            maxOutputBytes: this.config.maxCommandOutputBytes,
+            signal: context.signal,
+          }),
+      };
+    }
     const request = approval(
       this.ids,
       call,
       "运行命令",
       `在 ${relativeCwd} 执行命令`,
-      `cwd: ${cwd}\ncommand: ${args.command}\ntimeout: ${args.timeout_ms}ms`,
+      `cwd: ${cwd}\ncommand: ${args.command}\ntimeout: ${args.timeout_ms}ms\npolicy: ${classification.reason}`,
       "command",
       now,
     );
@@ -535,6 +619,7 @@ export class LocalToolExecutor implements ToolExecutorPort {
       summary: request.description,
       target: relativeCwd,
       requiresApproval: true,
+      approvalPolicy: classification.policy === "always" ? "always" : "permission_mode",
       approvalRequest: request,
       execute: async (context) =>
         runCommand({

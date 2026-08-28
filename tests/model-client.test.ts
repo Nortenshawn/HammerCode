@@ -69,6 +69,20 @@ describe("OpenAI-compatible provider requests", () => {
     expect(body).not.toHaveProperty("stream_options");
   });
 
+  it("builds a conservative standard request for a custom OpenAI-compatible endpoint", () => {
+    const body = buildChatCompletionBody({ ...config("deepseek"), provider: "custom" }, request);
+    expect(body).toMatchObject({
+      model: "deepseek-v4-flash",
+      stream: true,
+      tool_choice: "auto",
+      max_tokens: 4096,
+    });
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body).not.toHaveProperty("stream_options");
+    expect(body).not.toHaveProperty("tool_stream");
+  });
+
   it("parses shared reasoning, content, fragmented tool calls, usage and DONE events", async () => {
     const payload = [
       { choices: [{ delta: { reasoning_content: "先检查" }, finish_reason: null }] },
@@ -140,9 +154,26 @@ describe("OpenAI-compatible provider requests", () => {
     };
 
     await expect(collect()).rejects.toMatchObject({
-      code: "MODEL_HTTP_ERROR",
+      code: "MODEL_RATE_LIMITED",
       recoverable: true,
     });
     await expect(collect()).rejects.not.toThrow(/provider-test-secret/);
+  });
+
+
+  it.each([
+    [408, "MODEL_REQUEST_TIMEOUT"],
+    [500, "MODEL_SERVER_ERROR"],
+    [503, "MODEL_SERVER_ERROR"],
+    [400, "MODEL_HTTP_ERROR"],
+  ])("classifies HTTP %s as %s", async (status, code) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status })));
+    const client = new OpenAICompatibleChatClient(config("deepseek"));
+    const collect = async () => {
+      for await (const _chunk of client.stream({ ...request, signal: new AbortController().signal })) {
+        // No stream is expected for HTTP failures.
+      }
+    };
+    await expect(collect()).rejects.toMatchObject({ code });
   });
 });

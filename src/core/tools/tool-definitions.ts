@@ -4,6 +4,36 @@ export const TOOL_DEFINITIONS: ModelToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "update_plan",
+      description: "为当前复杂任务创建或更新显式计划。首次文件修改或命令执行前先调用；完成一个阶段后再次调用并更新步骤状态。只更新当前 turn 的持久化计划，不访问工作区。",
+      parameters: {
+        type: "object",
+        properties: {
+          explanation: { type: "string", description: "本次计划或检查点的简短说明" },
+          steps: {
+            type: "array",
+            minItems: 1,
+            maxItems: 12,
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", description: "稳定步骤 ID，例如 inspect、implement、verify" },
+                title: { type: "string" },
+                status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+              },
+              required: ["id", "title", "status"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["steps"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_files",
       description: "列出工作区内目录内容。只读，可自动执行。路径必须相对工作区。",
       parameters: {
@@ -47,6 +77,35 @@ export const TOOL_DEFINITIONS: ModelToolDefinition[] = [
           max_results: { type: "integer", minimum: 1, maximum: 500 },
         },
         required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_status",
+      description: "读取工作区 Git 状态和当前分支。参数固定、只读、无需审批。",
+      parameters: {
+        type: "object",
+        properties: {
+          cwd: { type: "string", description: "相对工作区目录，默认 ." },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_diff",
+      description: "读取工作区未暂存或已暂存的 Git diff。参数固定、只读、无需审批。",
+      parameters: {
+        type: "object",
+        properties: {
+          cwd: { type: "string", description: "相对工作区目录，默认 ." },
+          staged: { type: "boolean", description: "true 查看已暂存 diff，默认 false" },
+        },
         additionalProperties: false,
       },
     },

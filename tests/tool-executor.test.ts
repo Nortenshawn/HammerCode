@@ -33,6 +33,41 @@ describe("local tool executor", () => {
     expect(result.output).toBe("before\n");
   });
 
+  it("provides dedicated approval-free Git status and diff tools", async () => {
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+    const status = await executor.prepare(
+      { id: "git_status_1", name: "git_status", arguments: "{}" },
+      new Date(),
+    );
+    const diff = await executor.prepare(
+      { id: "git_diff_1", name: "git_diff", arguments: '{"staged":true}' },
+      new Date(),
+    );
+    expect(status).toMatchObject({ requiresApproval: false, target: "." });
+    expect(diff).toMatchObject({ requiresApproval: false, target: "." });
+  });
+
+  it("separates auto verification, ordinary and always-approved commands", async () => {
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const executor = new LocalToolExecutor(boundary, ids);
+    const automatic = await executor.prepare(
+      { id: "cmd_test", name: "run_command", arguments: '{"command":"npm test"}' },
+      new Date(),
+    );
+    const ordinary = await executor.prepare(
+      { id: "cmd_build", name: "run_command", arguments: '{"command":"npm run build"}' },
+      new Date(),
+    );
+    const remote = await executor.prepare(
+      { id: "cmd_push", name: "run_command", arguments: '{"command":"git push origin main"}' },
+      new Date(),
+    );
+    expect(automatic.requiresApproval).toBe(false);
+    expect(ordinary).toMatchObject({ requiresApproval: true, approvalPolicy: "permission_mode" });
+    expect(remote).toMatchObject({ requiresApproval: true, approvalPolicy: "always" });
+  });
+
   it("previews a diff and only mutates when executed after approval", async () => {
     const boundary = await WorkspaceBoundary.create(workspace);
     const executor = new LocalToolExecutor(boundary, ids);

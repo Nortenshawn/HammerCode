@@ -6,12 +6,15 @@ import type {
   AgentSession,
   AgentTurn,
   AppBootstrap,
+  ApiConnectionTestResult,
   AssistantMessage,
+  ModelRef,
   ModelTier,
   PermissionMode,
   RendererEvent,
   SessionStatus,
   SessionSummary,
+  TerminationReason,
   ToolAuthorization,
   ToolCall,
   ToolTrace,
@@ -37,6 +40,7 @@ type IconName =
   | "chevron"
   | "file"
   | "folder"
+  | "gear"
   | "plus"
   | "square"
   | "stop"
@@ -50,6 +54,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     chevron: <path d="m9 18 6-6-6-6"/>,
     file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></>,
     folder: <><path d="M3 6h6l2 2h10v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/><path d="M1 10h20"/></>,
+    gear: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.37.37.7.6 1 .3.32.68.46 1.1.46h.1v4h-.1A1.7 1.7 0 0 0 19.4 15Z"/></>,
     plus: <><path d="M12 5v14"/><path d="M5 12h14"/></>,
     square: <rect x="4" y="4" width="16" height="16" rx="3"/>,
     stop: <rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor" stroke="none"/>,
@@ -61,6 +66,51 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
       {paths[name]}
     </svg>
   );
+}
+
+const TERMINATION_LABELS: Record<TerminationReason, string> = {
+  completed: "正常完成",
+  round_limit: "轮次预算耗尽",
+  tool_limit: "工具预算耗尽",
+  time_limit: "运行时间耗尽",
+  cancelled: "用户停止",
+  request_timeout: "请求超时",
+  output_limit: "输出长度耗尽",
+  rate_limited: "服务端限流",
+  server_error: "服务端异常",
+  resource_exhausted: "服务资源不足",
+  model_error: "模型请求异常",
+  tool_error: "工具异常",
+  invalid_model_output: "模型输出无效",
+  context_overflow: "上下文预算不足",
+  interrupted: "运行被中断",
+};
+
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat("zh-CN", { notation: value >= 10_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatDurationLimit(milliseconds: number): string {
+  const minutes = Math.round(milliseconds / 60_000);
+  return minutes >= 60 ? `${(minutes / 60).toFixed(minutes % 60 === 0 ? 0 : 1)} 小时` : `${minutes} 分钟`;
+}
+
+function userFacingError(error: unknown): string {
+  return String(error)
+    .replace(/^Error:\s+Error invoking remote method '[^']+':\s+Error:\s+/i, "")
+    .replace(/^Error:\s+/i, "");
+}
+
+function turnModelLabel(turn: AgentTurn): string {
+  const customModel = /^custom:[0-9a-f-]{36}:(.+)$/i.exec(turn.modelRef ?? "")?.[1];
+  if (customModel) {
+    try {
+      return `${decodeURIComponent(customModel)} · 自定义`;
+    } catch {
+      return "自定义模型";
+    }
+  }
+  return turn.modelTier === "fast" ? "Fast" : "Strong";
 }
 
 function folderName(value: string | null): string {
@@ -242,6 +292,7 @@ function ToolIntent({ call, trace }: { call: ToolCall; trace?: ToolTrace }) {
         <span className="process-status">{TOOL_STATUS_LABELS[status]}</span>
       </summary>
       <div className="process-tool-detail">
+        {trace?.approvalPolicy === "always" && <div><span>风险层级</span><code className="authorization authorization-user_rejected">始终需要用户批准</code></div>}
         {trace?.authorization && <div><span>授权</span><code className={`authorization authorization-${trace.authorization}`}>{AUTHORIZATION_LABELS[trace.authorization]}</code></div>}
         {trace?.target && <div><span>目标</span><code>{trace.target}</code></div>}
         <div><span>参数</span><code>{argumentPreview(call) || "（无）"}</code></div>
@@ -252,6 +303,40 @@ function ToolIntent({ call, trace }: { call: ToolCall; trace?: ToolTrace }) {
   );
 }
 
+function TurnPlanView({ turn }: { turn: AgentTurn }) {
+  if (!turn.plan && !turn.planRequired) return null;
+  return (
+    <section className="turn-plan" aria-label="本轮计划">
+      <header><strong>Plan</strong><span>{turn.plan ? `检查点 ${turn.plan.revision}` : "等待模型建立计划"}</span></header>
+      {turn.plan ? (
+        <ol>
+          {turn.plan.steps.map((step) => (
+            <li className={`plan-step plan-step-${step.status}`} key={step.id}>
+              <span>{step.status === "completed" ? "✓" : step.status === "in_progress" ? "•" : ""}</span>
+              <div><strong>{step.title}</strong><small>{step.status === "completed" ? "已完成" : step.status === "in_progress" ? "进行中" : "待处理"}</small></div>
+            </li>
+          ))}
+        </ol>
+      ) : <p>复杂任务在首次文件修改或命令执行前，必须先记录可恢复的步骤。</p>}
+    </section>
+  );
+}
+
+function TurnMetrics({ turn }: { turn: AgentTurn }) {
+  const metrics = turn.metrics;
+  if (!metrics) return null;
+  return (
+    <div className="turn-metrics" aria-label="运行预算">
+      <span>轮次 <b>{metrics.roundsUsed}/{metrics.maxRounds}</b></span>
+      <span>请求 <b>{metrics.modelRequests}</b>{metrics.retryCount > 0 && ` · 重试 ${metrics.retryCount}/${metrics.maxRetries}`}</span>
+      <span>工具 <b>{metrics.toolCalls}/{metrics.maxToolCalls}</b></span>
+      <span>输出 <b>{formatCompactNumber(metrics.completionTokens)}</b> / 单次 {formatCompactNumber(metrics.maxOutputTokensPerRequest)}</span>
+      <span>上下文 <b>{formatCompactNumber(metrics.promptTokens)}</b>{metrics.tokenUsageEstimated ? " 约" : ""} · 压缩 {metrics.contextCompactions}</span>
+      <span>时限 <b>{formatDurationLimit(metrics.maxRunTimeMs)}</b></span>
+    </div>
+  );
+}
+
 function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession; turn: AgentTurn; finalMessageId?: string }) {
   const terminal = TERMINAL_STATUSES.includes(turn.status);
   const tracesForTurn = session.toolTraces.filter((trace) => trace.turnId === turn.id);
@@ -259,7 +344,7 @@ function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession;
   const processMessages = session.messages.filter((message) => message.turnId === turn.id && message.role !== "user" && message.id !== finalMessageId);
   const isActiveTurn = session.activeTurnId === turn.id && !terminal;
   const hasContent = processMessages.length > 0 || Boolean(isActiveTurn && (session.streamingReasoning || session.streamingText));
-  const turnLabel = `${turn.modelTier === "fast" ? "Fast" : "Strong"} · ${turn.permissionMode === "ask" ? "请求批准" : "完全访问"}`;
+  const turnLabel = `${turnModelLabel(turn)} · ${turn.permissionMode === "ask" ? "请求批准" : "完全访问"}`;
 
   return (
     <details className="work-process" key={`${turn.id}-${terminal ? "terminal" : "active"}`} open={!terminal}>
@@ -272,6 +357,8 @@ function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession;
         <Icon name="chevron" size={15}/>
       </summary>
       <div className="process-timeline">
+        <TurnPlanView turn={turn}/>
+        <TurnMetrics turn={turn}/>
         {!hasContent && <div className="process-placeholder">正在理解这轮请求…</div>}
         {processMessages.map((message) => {
           if (message.role === "tool") {
@@ -313,10 +400,10 @@ function TurnView({ session, turn, index }: { session: AgentSession; turn: Agent
       {finalAssistant && (
         <article className="final-answer">
           <Markdown>{finalAssistant.content}</Markdown>
-          <footer><span className={`final-state final-state-${turn.status}`}><Icon name={turn.status === "completed" ? "check" : "square"} size={14}/>{STATUS_LABELS[turn.status]}</span><span>{turn.modelTier === "fast" ? "Fast" : "Strong"} · {turn.permissionMode === "ask" ? "请求批准" : "完全访问"}</span><time>{formatClock(finalAssistant.createdAt)}</time></footer>
+          <footer><span className={`final-state final-state-${turn.status}`}><Icon name={turn.status === "completed" ? "check" : "square"} size={14}/>{STATUS_LABELS[turn.status]}</span><span>{turnModelLabel(turn)} · {turn.permissionMode === "ask" ? "请求批准" : "完全访问"}</span><time>{formatClock(finalAssistant.createdAt)}</time></footer>
         </article>
       )}
-      {turn.error && <div className="error-panel"><strong>这一轮未完成</strong><p>{turn.error}</p><small>可以直接在下方继续说明或纠正；未完成的工具调用不会重放。</small></div>}
+      {turn.error && <div className="error-panel"><strong>{turn.terminationReason ? TERMINATION_LABELS[turn.terminationReason] : "这一轮未完成"}</strong><p>{turn.error}</p><small>可以直接在下方继续说明或纠正；未完成的工具调用不会重放。</small></div>}
     </section>
   );
 }
@@ -375,6 +462,63 @@ function ChatList({ sessions, activeId, disabled, onSelect }: { sessions: Sessio
   ))}</div>;
 }
 
+function SettingsView({
+  bootstrap,
+  onNotice,
+}: {
+  bootstrap: AppBootstrap;
+  onNotice: (notice: { level: "info" | "error"; text: string }) => void;
+}) {
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [checking, setChecking] = useState<"test" | "save" | null>(null);
+  const [lastResult, setLastResult] = useState<ApiConnectionTestResult | null>(null);
+
+  const submitConnection = async (mode: "test" | "save") => {
+    if (!apiBaseUrl.trim() || !apiKey.trim() || checking) return;
+    setChecking(mode);
+    setLastResult(null);
+    try {
+      if (mode === "test") {
+        const result = await window.hammerCode.testApiConnection({ apiBaseUrl, apiKey });
+        setApiBaseUrl(result.apiBaseUrl);
+        setLastResult(result);
+        onNotice({ level: "info", text: `连接成功：发现 ${result.models.length} 个模型，耗时 ${result.latencyMs} ms。` });
+      } else {
+        const connection = await window.hammerCode.saveApiConnection({ apiBaseUrl, apiKey });
+        setApiBaseUrl("");
+        onNotice({ level: "info", text: `已安全保存 ${connection.name}，可在聊天输入框中选择发现的模型。` });
+      }
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setApiKey("");
+      setChecking(null);
+    }
+  };
+
+  return (
+    <section className="settings-view">
+      <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>添加一个 OpenAI-compatible API。HammerCode 会通过标准 <code>/models</code> 接口验证地址、密钥和模型发现能力。</p></header>
+      <section className="settings-card">
+        <div className="settings-card-title"><div><h2>自提供接口</h2><p>只需要 API URL 和 API Key；模型会在连接成功后自动发现。</p></div><span>{bootstrap.apiConnections.length} 个连接</span></div>
+        <div className="api-form">
+          <label><span>API URL</span><input type="url" value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} placeholder="https://example.com/v1" autoComplete="off" spellCheck={false}/></label>
+          <label><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="输入后不会再次显示" autoComplete="new-password" spellCheck={false}/></label>
+          <div className="api-form-actions"><button className="secondary-action" disabled={!apiBaseUrl.trim() || !apiKey.trim() || Boolean(checking)} onClick={() => void submitConnection("test")}>{checking === "test" ? "正在检测…" : "仅检测"}</button><button className="primary-action" disabled={!apiBaseUrl.trim() || !apiKey.trim() || Boolean(checking)} onClick={() => void submitConnection("save")}>{checking === "save" ? "正在检测并保存…" : "检测并保存"}</button></div>
+        </div>
+        {lastResult && <div className="api-test-result"><span className="connection-dot ready"/><div><strong>连接可用</strong><p>{lastResult.apiBaseUrl} · {lastResult.models.slice(0, 6).join("、")}{lastResult.models.length > 6 ? ` 等 ${lastResult.models.length} 个模型` : ""}</p></div></div>}
+      </section>
+      <section className="settings-card saved-connections">
+        <div className="settings-card-title"><div><h2>已保存连接</h2><p>密钥由 macOS 安全存储加密，界面和聊天不会收到密钥值。</p></div></div>
+        {bootstrap.apiConnections.length === 0 ? <div className="settings-empty">尚未保存自定义连接。</div> : bootstrap.apiConnections.map((connection) => (
+          <article className="connection-card" key={connection.id}><span className={`connection-dot ${connection.status === "connected" ? "ready" : "missing"}`}/><div><strong>{connection.name}</strong><p>{connection.apiBaseUrl}</p><small>{connection.models.length} 个模型 · 最近检测 {new Date(connection.lastCheckedAt).toLocaleString("zh-CN")}</small></div></article>
+        ))}
+      </section>
+    </section>
+  );
+}
+
 export function App() {
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [session, setSession] = useState<AgentSession | null>(null);
@@ -383,7 +527,9 @@ export function App() {
   const [expandedRoots, setExpandedRoots] = useState<Set<string>>(new Set());
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [modelTier, setModelTier] = useState<ModelTier>("fast");
+  const [modelRef, setModelRef] = useState<ModelRef>("builtin:fast");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("ask");
+  const [view, setView] = useState<"chat" | "settings">("chat");
   const [task, setTask] = useState("");
   const [busy, setBusy] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -405,14 +551,16 @@ export function App() {
       setExpandedRoots(new Set(value.workspaces.map((workspace) => workspace.root)));
       setWorkspaceRoot(value.workspaceRoot);
       setModelTier(value.session?.modelTier ?? "fast");
+      setModelRef(value.session?.modelRef ?? `builtin:${value.session?.modelTier ?? "fast"}`);
       setPermissionMode(value.session?.permissionMode ?? "ask");
-    }).catch((error: unknown) => setNotice({ level: "error", text: String(error) }));
+    }).catch((error: unknown) => setNotice({ level: "error", text: userFacingError(error) }));
     const unsubscribe = window.hammerCode.onEvent((event: RendererEvent) => {
       if (event.type === "session_snapshot") {
         setSession(event.session);
         setSessions((items) => upsertSessionSummary(items, event.session));
         setWorkspaces((items) => upsertWorkspaceSession(items, event.session));
         setModelTier(event.session.modelTier);
+        setModelRef(event.session.modelRef ?? `builtin:${event.session.modelTier}`);
         setPermissionMode(event.session.permissionMode);
       }
       if (event.type === "session_updated") {
@@ -422,6 +570,7 @@ export function App() {
       if (event.type === "session_cleared") {
         setSession(null);
         setModelTier("fast");
+        setModelRef("builtin:fast");
         setPermissionMode("ask");
       }
       if (event.type === "sessions_changed") setSessions(event.sessions);
@@ -436,7 +585,15 @@ export function App() {
           return next;
         });
         setModelTier(event.session?.modelTier ?? "fast");
+        setModelRef(event.session?.modelRef ?? `builtin:${event.session?.modelTier ?? "fast"}`);
         setPermissionMode(event.session?.permissionMode ?? "ask");
+      }
+      if (event.type === "config_updated") {
+        setBootstrap((current) => current ? {
+          ...current,
+          config: event.config,
+          apiConnections: event.apiConnections,
+        } : current);
       }
       if (event.type === "notification") setNotice({ level: event.level, text: event.message });
     });
@@ -449,7 +606,7 @@ export function App() {
     workspace.sessions.some((item) => ACTIVE_STATUSES.includes(item.status)),
   );
   const anotherSessionIsRunning = hasRunningSession && !isRunning;
-  const selectedModel = bootstrap?.config.models[modelTier];
+  const selectedModel = bootstrap?.config.availableModels.find((option) => option.ref === modelRef);
   const fileReviews = useMemo(
     () => session ? buildFileReviews(session.fileChanges) : [],
     [session?.fileChanges],
@@ -496,7 +653,7 @@ export function App() {
   const chooseWorkspace = async () => {
     setBusy(true);
     try { await window.hammerCode.chooseWorkspace(); setNotice(null); }
-    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
     finally { setBusy(false); }
   };
 
@@ -515,10 +672,11 @@ export function App() {
     try {
       if (root !== workspaceRoot) await window.hammerCode.selectWorkspace(root);
       await window.hammerCode.newChat();
+      setView("chat");
       setTask("");
       setNotice(null);
     } catch (error) {
-      setNotice({ level: "error", text: String(error) });
+      setNotice({ level: "error", text: userFacingError(error) });
     } finally {
       setBusy(false);
     }
@@ -526,42 +684,45 @@ export function App() {
 
   const newChat = async () => {
     if (busy) return;
-    try { await window.hammerCode.newChat(); setTask(""); setNotice(null); }
-    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    try { await window.hammerCode.newChat(); setView("chat"); setTask(""); setNotice(null); }
+    catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
   };
 
   const selectSession = async (id: string) => {
     if (id === session?.id) return;
     setBusy(true);
-    try { await window.hammerCode.selectSession(id); setNotice(null); }
-    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    try { await window.hammerCode.selectSession(id); setView("chat"); setNotice(null); }
+    catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
     finally { setBusy(false); }
   };
 
-  const persistSettings = async (nextModel: ModelTier, nextPermission: PermissionMode) => {
+  const persistSettings = async (nextModelRef: ModelRef, nextPermission: PermissionMode) => {
     if (isBusy || settingsBusy) return;
-    const selectsUnavailableModel = !bootstrap?.config.models[nextModel].hasApiKey
-      && (!session || nextModel !== session.modelTier);
-    if (selectsUnavailableModel) {
+    const option = bootstrap?.config.availableModels.find((item) => item.ref === nextModelRef);
+    if (!option?.hasApiKey) {
       setNotice({
         level: "error",
-        text: `${nextModel === "fast" ? "Fast" : "Strong"} 模型尚未配置本地 API key。`,
+        text: "这个模型尚未配置可用的 API key。",
       });
       return;
     }
+    const nextModel = option.builtinTier ?? modelTier;
     const previousModel = modelTier;
+    const previousModelRef = modelRef;
     const previousPermission = permissionMode;
     setModelTier(nextModel);
+    setModelRef(nextModelRef);
     setPermissionMode(nextPermission);
     if (!session) return;
     setSettingsBusy(true);
     try {
-      await window.hammerCode.updateSessionSettings({ modelTier: nextModel, permissionMode: nextPermission });
+      await window.hammerCode.updateSessionSettings({ modelTier: nextModel, modelRef: nextModelRef, permissionMode: nextPermission });
       setNotice(null);
     } catch (error) {
       setModelTier(previousModel);
+      setModelRef(previousModelRef);
       setPermissionMode(previousPermission);
-      setNotice({ level: "error", text: String(error) });
+      setNotice({ level: "error", text: userFacingError(error) });
     } finally {
       setSettingsBusy(false);
     }
@@ -569,7 +730,7 @@ export function App() {
 
   const choosePermission = (nextPermission: PermissionMode) => {
     if (nextPermission !== "full_access") {
-      void persistSettings(modelTier, nextPermission);
+      void persistSettings(modelRef, nextPermission);
       return;
     }
     let confirmed = false;
@@ -579,14 +740,14 @@ export function App() {
       setShowFullAccessWarning(true);
       return;
     }
-    void persistSettings(modelTier, nextPermission);
+    void persistSettings(modelRef, nextPermission);
   };
 
   const confirmFullAccess = () => {
     try { window.localStorage.setItem("hammercode.full-access-warning", "acknowledged"); }
     catch { /* The warning is still acknowledged for this selection. */ }
     setShowFullAccessWarning(false);
-    void persistSettings(modelTier, "full_access");
+    void persistSettings(modelRef, "full_access");
   };
 
   const submit = async () => {
@@ -596,21 +757,21 @@ export function App() {
     setShowJumpToLatest(false);
     setNotice(null);
     try {
-      await window.hammerCode.startTask({ task, modelTier, permissionMode });
+      await window.hammerCode.startTask({ task, modelTier, modelRef, permissionMode });
       setTask("");
-    } catch (error) { setNotice({ level: "error", text: String(error) }); }
+    } catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
     finally { setBusy(false); }
   };
 
   const resolveApproval = async (approved: boolean) => {
     if (!session?.pendingApproval) return;
     try { await window.hammerCode.resolveApproval(session.pendingApproval.id, approved); }
-    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
   };
 
   const requestUndo = async (changeId: string) => {
     try { await window.hammerCode.requestUndo(changeId); setNotice(null); }
-    catch (error) { setNotice({ level: "error", text: String(error) }); }
+    catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
   };
 
   if (!bootstrap) return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
@@ -638,6 +799,7 @@ export function App() {
           </div>
         </section>
         <footer className="sidebar-footer">
+          <button className={`settings-nav ${view === "settings" ? "active" : ""}`} onClick={() => setView(view === "settings" ? "chat" : "settings")}><Icon name="gear" size={17}/><span>设置</span></button>
           {(["fast", "strong"] as ModelTier[]).map((tier) => <div className="runtime-line" key={tier}><span className={`connection-dot ${bootstrap.config.models[tier].hasApiKey ? "ready" : "missing"}`}/><strong>{tier === "fast" ? "Fast" : "Strong"} · {bootstrap.config.models[tier].model}</strong></div>)}
           <span>本地工具受工作区安全边界保护</span>
         </footer>
@@ -645,12 +807,12 @@ export function App() {
 
       <main className="workspace">
         <header className="topbar">
-          <div className="topbar-title"><Icon name="folder" size={17}/><strong>{session?.task.split(/\r?\n/, 1)[0]?.slice(0, 64) || "新对话"}</strong>{workspaceRoot && <span>{folderName(workspaceRoot)}</span>}</div>
+          <div className="topbar-title"><Icon name={view === "settings" ? "gear" : "folder"} size={17}/><strong>{view === "settings" ? "设置" : session?.task.split(/\r?\n/, 1)[0]?.slice(0, 64) || "新对话"}</strong>{view === "chat" && workspaceRoot && <span>{folderName(workspaceRoot)}</span>}</div>
           <div className="top-actions">{isRunning && activeTurn && <div className="run-status" aria-label="任务正在运行"><span className="run-status-dot"/>运行中 · <ElapsedTime start={activeTurn.createdAt} prefix="已运行"/></div>}{session?.pendingUndo?.status === "executing" && <span className="undo-running"><Icon name="undo" size={14}/>正在撤销</span>}</div>
         </header>
 
         <section className="conversation" ref={conversationRef} onScroll={handleConversationScroll}>
-          {!session ? (
+          {view === "settings" ? <div className="settings-page">{notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}<SettingsView bootstrap={bootstrap} onNotice={setNotice}/></div> : !session ? (
             <div className="welcome"><img className="welcome-mark" src={logoUrl} alt="HammerCode"/><h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1><p>{workspaceRoot ? (permissionMode === "ask" ? "描述你想完成的开发任务。文件修改和命令执行会逐次向你确认。" : "完全访问已选中：普通工作区操作会自动执行，安全边界仍然生效。") : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>{!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}{workspaceRoot && !selectedModel?.hasApiKey && <div className="config-warning">{modelTier === "fast" ? "Fast" : "Strong"} 模型尚未配置本地 API key，请切换可用模型或完成配置。</div>}</div>
           ) : (
             <div className="message-stack">
@@ -665,15 +827,15 @@ export function App() {
           )}
         </section>
 
-        {showJumpToLatest && <button className="jump-latest" onClick={scrollToLatest}><span>↓</span>{isRunning ? "查看最新进度" : "回到底部"}</button>}
+        {view === "chat" && showJumpToLatest && <button className="jump-latest" onClick={scrollToLatest}><span>↓</span>{isRunning ? "查看最新进度" : "回到底部"}</button>}
 
-        <section className="composer-wrap">
+        {view === "chat" && <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${isBusy ? "disabled" : ""}`}>
             <textarea value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); void submit(); } }} placeholder={workspaceRoot ? (anotherSessionIsRunning ? "另一条聊天正在运行，结束后即可发送" : session ? "继续追问、补充要求或纠正上一轮" : "交给 HammerCode 一个开发任务") : "请先从左侧选择工作区"} disabled={!workspaceRoot || isBusy || anotherSessionIsRunning || busy} rows={3}/>
             <div className="composer-footer">
               <div className="composer-controls">
-                <label><span>模型</span><select value={modelTier} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelTier, permissionMode)}><option value="fast">Fast · {bootstrap.config.models.fast.model}</option><option value="strong" disabled={!bootstrap.config.models.strong.hasApiKey}>Strong · {bootstrap.config.models.strong.model}{bootstrap.config.models.strong.hasApiKey ? "" : "（未配置）"}</option></select></label>
+                <label><span>模型</span><select value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select></label>
                 <label><span>权限</span><select value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select></label>
               </div>
               {isRunning
@@ -681,10 +843,10 @@ export function App() {
                 : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={!task.trim() || !workspaceRoot || isBusy || anotherSessionIsRunning || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
             </div>
           </div>
-        </section>
+        </section>}
       </main>
 
-      {selectedReview && session && (
+      {view === "chat" && selectedReview && session && (
         <DiffDrawer
           review={selectedReview}
           busy={isBusy}

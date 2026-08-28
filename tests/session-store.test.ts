@@ -244,12 +244,67 @@ describe("session persistence", () => {
     expect(state.activeSession).toMatchObject({
       id: "session_v1",
       modelTier: "fast",
+      modelRef: "builtin:fast",
       permissionMode: "ask",
-      turns: [expect.objectContaining({ modelTier: "fast", permissionMode: "ask" })],
+      turns: [expect.objectContaining({ modelTier: "fast", modelRef: "builtin:fast", permissionMode: "ask" })],
     });
     const migratedIndex = JSON.parse(await readFile(path.join(directory, "session-index.json"), "utf8")) as { version: number; workspaces: unknown[] };
     expect(migratedIndex.version).toBe(2);
     expect(migratedIndex.workspaces).toHaveLength(1);
+  });
+
+  it("persists Phase 6 plan checkpoints, retry history, metrics and model references", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const session = createSession("session_phase6", "phase 6", "2026-08-28T04:00:00.000Z");
+    session.modelRef = "custom:00000000-0000-4000-8000-000000000000:model-x";
+    const turn = session.turns[0];
+    turn.modelRef = session.modelRef;
+    turn.planRequired = true;
+    turn.plan = {
+      revision: 1,
+      explanation: "checkpoint",
+      steps: [{ id: "verify", title: "验证", status: "completed" }],
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    };
+    turn.planCheckpoints = [{
+      id: "checkpoint_1",
+      revision: 1,
+      explanation: "checkpoint",
+      steps: [{ id: "verify", title: "验证", status: "completed" }],
+      round: 2,
+      toolCalls: 3,
+      createdAt: session.updatedAt,
+    }];
+    turn.retryEvents = [{ attempt: 1, reason: "server_error", delayMs: 1000, createdAt: session.updatedAt }];
+    turn.metrics = {
+      roundsUsed: 2,
+      maxRounds: 20,
+      modelRequests: 3,
+      retryCount: 1,
+      maxRetries: 2,
+      toolCalls: 3,
+      maxToolCalls: 100,
+      promptTokens: 1000,
+      completionTokens: 200,
+      tokenUsageEstimated: true,
+      maxOutputTokensPerRequest: 32768,
+      contextTokenBudget: 120000,
+      contextCompactions: 1,
+      maxRunTimeMs: 1800000,
+    };
+    const store = new SessionStore(directory);
+    await store.save(session);
+    const restored = await store.load();
+    expect(restored?.modelRef).toBe(session.modelRef);
+    expect(restored?.turns[0]).toMatchObject({
+      modelRef: session.modelRef,
+      plan: { revision: 1 },
+      metrics: { retryCount: 1, contextCompactions: 1 },
+    });
+    expect(restored?.turns[0].planCheckpoints?.[0]).toMatchObject({ id: "checkpoint_1" });
+    expect(restored?.turns[0].retryEvents?.[0]).toMatchObject({ reason: "server_error" });
   });
 
   it("migrates the legacy active-session file without losing the chat", async () => {

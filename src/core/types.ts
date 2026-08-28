@@ -81,6 +81,7 @@ export interface AgentDependencies {
   approvals: ApprovalGateway;
   clock: Clock;
   ids: IdGenerator;
+  wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   onSessionChange?: (session: AgentSession) => void | Promise<void>;
 }
 
@@ -95,6 +96,7 @@ export interface PreparedToolCall {
   summary: string;
   target?: string;
   requiresApproval: boolean;
+  approvalPolicy?: "permission_mode" | "always";
   approvalRequest?: ApprovalRequest;
   fileMutation?: {
     path: string;
@@ -115,6 +117,12 @@ export interface ToolExecutorPort {
 
 export interface AgentRunOptions {
   maxRounds: number;
+  maxToolCalls?: number;
+  maxRunTimeMs?: number;
+  maxModelRetries?: number;
+  retryBaseDelayMs?: number;
+  retryMaxDelayMs?: number;
+  maxOutputTokens?: number;
   contextTokenBudget: number;
   systemPrompt: string;
 }
@@ -124,6 +132,7 @@ export class HammerCodeError extends Error {
     message: string,
     readonly code: string,
     readonly recoverable = false,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "HammerCodeError";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildModelContext, estimateMessageTokens } from "../src/core/context";
-import type { ConversationMessage } from "../src/shared/contracts";
+import { buildContextFacts, buildModelContext, estimateMessageTokens } from "../src/core/context";
+import type { AgentSession, ConversationMessage } from "../src/shared/contracts";
 
 const at = "2026-08-27T00:00:00.000Z";
 
@@ -58,5 +58,75 @@ describe("context management", () => {
     expect(toolIndex).toBeGreaterThan(0);
     expect(result.messages[toolIndex - 1]).toMatchObject({ role: "assistant" });
     expect(result.messages[toolIndex - 1]).toHaveProperty("tool_calls.0.id", "call_1");
+  });
+
+  it("retains persisted constraints, changes, verification and plan facts after deep compaction", () => {
+    const history: ConversationMessage[] = [
+      { id: "u1", turnId: "turn_1", role: "user", content: "原始长任务", createdAt: at },
+      ...Array.from({ length: 40 }, (_, index): ConversationMessage => ({
+        id: `old_${index}`,
+        turnId: "turn_1",
+        role: "assistant",
+        content: `可丢弃旧推理 ${index} ${"z".repeat(800)}`,
+        createdAt: at,
+      })),
+      { id: "u2", turnId: "turn_2", role: "user", content: "最新输入", createdAt: at },
+    ];
+    const result = buildModelContext("system", history, 3_000, {
+      originalTask: "必须完成 Phase 6",
+      recentConstraints: ["不能修改公开接口"],
+      appliedChanges: ["modify src/main.ts（after hash: abc123）"],
+      verificationResults: ["npm test: 成功 · 72 tests passed"],
+      unresolvedErrors: ["server_error: 上次服务端失败"],
+      currentPlan: ["[in_progress] 完成长上下文测试"],
+    });
+    const serialized = JSON.stringify(result.messages);
+    expect(result.compacted).toBe(true);
+    expect(serialized).toContain("必须完成 Phase 6");
+    expect(serialized).toContain("不能修改公开接口");
+    expect(serialized).toContain("abc123");
+    expect(serialized).toContain("72 tests passed");
+    expect(serialized).toContain("完成长上下文测试");
+    expect(estimateMessageTokens(result.messages)).toBeLessThanOrEqual(3_000);
+  });
+
+  it("carries the latest failed turn plan and verification into a new turn's facts", () => {
+    const session = {
+      task: "修复长任务",
+      activeTurnId: "turn_2",
+      turns: [
+        {
+          id: "turn_1",
+          error: "临时服务端失败",
+          terminationReason: "server_error",
+          plan: {
+            revision: 2,
+            steps: [{ id: "verify", title: "完成回归验证", status: "in_progress" }],
+            createdAt: at,
+            updatedAt: at,
+          },
+        },
+        { id: "turn_2" },
+      ],
+      messages: [
+        { id: "u1", turnId: "turn_1", role: "user", content: "修复长任务", createdAt: at },
+        {
+          id: "t1",
+          turnId: "turn_1",
+          role: "tool",
+          toolCallId: "call_1",
+          toolName: "run_command",
+          content: JSON.stringify({ ok: true, summary: "测试通过", output: "103 tests passed" }),
+          createdAt: at,
+        },
+        { id: "u2", turnId: "turn_2", role: "user", content: "继续完成，不要重放", createdAt: at },
+      ],
+      fileChanges: [],
+    } as unknown as AgentSession;
+
+    const facts = buildContextFacts(session);
+    expect(facts.currentPlan).toContain("[in_progress] 完成回归验证");
+    expect(facts.verificationResults.join("\n")).toContain("103 tests passed");
+    expect(facts.unresolvedErrors.join("\n")).toContain("临时服务端失败");
   });
 });

@@ -1,8 +1,18 @@
-import type { ConversationMessage } from "../shared/contracts";
+import type { AgentSession, ConversationMessage, ToolMessage } from "../shared/contracts";
 import type { ModelMessage } from "./types";
 import { HammerCodeError } from "./types";
 
 const SUMMARY_LIMIT = 12_000;
+const FACTS_LIMIT = 6_000;
+
+export interface ContextFacts {
+  originalTask: string;
+  recentConstraints: string[];
+  appliedChanges: string[];
+  verificationResults: string[];
+  unresolvedErrors: string[];
+  currentPlan: string[];
+}
 
 export function estimateTokens(value: string): number {
   if (!value) return 0;
@@ -61,6 +71,58 @@ function summarizeRemoved(messages: ConversationMessage[]): string {
   return lines.join("\n").slice(0, SUMMARY_LIMIT);
 }
 
+export function buildContextFacts(session: AgentSession): ContextFacts {
+  const userMessages = session.messages.filter((message) => message.role === "user");
+  const latestVerificationMessages = session.messages
+    .filter(
+      (message): message is ToolMessage =>
+        message.role === "tool" &&
+        ["run_command", "git_status", "git_diff"].includes(message.toolName),
+    )
+    .slice(-8)
+    .map((message) => {
+      try {
+        const parsed = JSON.parse(message.content) as { summary?: unknown; output?: unknown; ok?: unknown };
+        const output = typeof parsed.output === "string" ? ` · ${parsed.output.slice(0, 400)}` : "";
+        return `${message.toolName}: ${parsed.ok === true ? "成功" : "未成功"} · ${String(parsed.summary ?? "无摘要")}${output}`;
+      } catch {
+        return `${message.toolName}: ${message.content.slice(0, 300)}`;
+      }
+    });
+  const activeTurn = session.turns.find((turn) => turn.id === session.activeTurnId);
+  const planTurn = activeTurn?.plan
+    ? activeTurn
+    : [...session.turns].reverse().find((turn) => turn.plan);
+  return {
+    originalTask: session.task.slice(0, 2_000),
+    recentConstraints: userMessages.slice(-3).map((message) => message.content.slice(0, 1_000)),
+    appliedChanges: session.fileChanges
+      .filter((change) => change.status === "applied")
+      .slice(-20)
+      .map((change) => `${change.kind} ${change.path}（after hash: ${change.afterHash ?? "deleted"}）`),
+    verificationResults: latestVerificationMessages,
+    unresolvedErrors: session.turns
+      .filter((turn) => turn.error)
+      .slice(-5)
+      .map((turn) => `${turn.terminationReason ?? "error"}: ${turn.error!.slice(0, 500)}`),
+    currentPlan: planTurn?.plan?.steps.map((step) => `[${step.status}] ${step.title}`) ?? [],
+  };
+}
+
+function renderFacts(facts: ContextFacts | undefined): string {
+  if (!facts) return "";
+  const lines = [
+    "以下是从持久化会话状态提取的优先事实，只用于防止历史压缩丢失关键约束：",
+    `- 原始任务：${facts.originalTask}`,
+  ];
+  for (const item of facts.recentConstraints) lines.push(`- 近期用户约束：${item}`);
+  for (const item of facts.appliedChanges) lines.push(`- 已落盘变更：${item}`);
+  for (const item of facts.verificationResults) lines.push(`- 工具/验证记录：${item}`);
+  for (const item of facts.unresolvedErrors) lines.push(`- 历史失败：${item}`);
+  for (const item of facts.currentPlan) lines.push(`- 当前计划：${item}`);
+  return lines.join("\n").slice(0, FACTS_LIMIT);
+}
+
 function groupProtocolMessages(messages: ConversationMessage[]): ConversationMessage[][] {
   const groups: ConversationMessage[][] = [];
   for (let index = 0; index < messages.length; index += 1) {
@@ -92,6 +154,7 @@ export function buildModelContext(
   systemPrompt: string,
   history: ConversationMessage[],
   tokenBudget: number,
+  facts?: ContextFacts,
 ): ContextBuildResult {
   const system: ModelMessage = { role: "system", content: systemPrompt };
   const full = [system, ...history.map(toModelMessage)];
@@ -118,7 +181,8 @@ export function buildModelContext(
 
   const kept = [...(firstUser ? [firstUser] : []), ...keptGroups.flat()];
   const removed = groups.slice(0, keptGroupStart).flat();
-  let summaryText = summarizeRemoved(removed);
+  const priorityFacts = renderFacts(facts);
+  let summaryText = [priorityFacts, summarizeRemoved(removed)].filter(Boolean).join("\n\n");
   let summary: ModelMessage = { role: "system", content: summaryText };
   let compacted = [system, summary, ...kept.map(toModelMessage)];
   let estimate = estimateMessageTokens(compacted);

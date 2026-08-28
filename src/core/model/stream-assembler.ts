@@ -17,6 +17,7 @@ export interface AssembledModelResponse {
   reasoningContent: string;
   toolCalls: ToolCall[];
   finishReason: ModelFinishReason;
+  usage?: { promptTokens?: number; completionTokens?: number };
 }
 
 export class StreamAssembler {
@@ -24,12 +25,14 @@ export class StreamAssembler {
   private reasoningContent = "";
   private readonly toolCalls = new Map<number, PartialToolCall>();
   private finishReason: ModelFinishReason = null;
+  private usage: { promptTokens?: number; completionTokens?: number } | undefined;
 
   push(chunk: ModelStreamChunk): void {
     if (chunk.content) this.content += chunk.content;
     if (chunk.reasoningContent) this.reasoningContent += chunk.reasoningContent;
     for (const delta of chunk.toolCallDeltas ?? []) this.pushToolDelta(delta);
     if (chunk.finishReason !== undefined) this.finishReason = chunk.finishReason;
+    if (chunk.usage) this.usage = chunk.usage;
   }
 
   private pushToolDelta(delta: ModelToolCallDelta): void {
@@ -69,6 +72,7 @@ export class StreamAssembler {
       reasoningContent: this.reasoningContent,
       toolCalls,
       finishReason: this.finishReason,
+      usage: this.usage,
     };
   }
 }

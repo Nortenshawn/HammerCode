@@ -19,6 +19,11 @@ const configSchema = z.object({
   models: z.object({ fast: modelConfigSchema, strong: modelConfigSchema }),
   contextTokenBudget: z.number().int().min(4_000).max(900_000),
   maxAgentRounds: z.number().int().min(1).max(100),
+  maxToolCalls: z.number().int().min(1).max(1_000),
+  maxRunTimeMs: z.number().int().min(5_000).max(86_400_000),
+  maxModelRetries: z.number().int().min(0).max(8),
+  retryBaseDelayMs: z.number().int().min(100).max(60_000),
+  retryMaxDelayMs: z.number().int().min(100).max(300_000),
 });
 
 export type RuntimeModelConfig = z.infer<typeof modelConfigSchema>;
@@ -114,6 +119,11 @@ export function loadRuntimeConfig(): RuntimeConfig {
       120_000,
     ),
     maxAgentRounds: readInteger(process.env.HAMMERCODE_MAX_AGENT_ROUNDS, 20),
+    maxToolCalls: readInteger(process.env.HAMMERCODE_MAX_TOOL_CALLS, 100),
+    maxRunTimeMs: readInteger(process.env.HAMMERCODE_MAX_RUN_TIME_MS, 1_800_000),
+    maxModelRetries: readInteger(process.env.HAMMERCODE_MAX_MODEL_RETRIES, 2),
+    retryBaseDelayMs: readInteger(process.env.HAMMERCODE_RETRY_BASE_DELAY_MS, 1_000),
+    retryMaxDelayMs: readInteger(process.env.HAMMERCODE_RETRY_MAX_DELAY_MS, 8_000),
   });
   if (!parsed.success) {
     const safeIssues = parsed.error.issues.map((issue) => issue.path.join(".")).join("、");
@@ -127,6 +137,13 @@ export function loadRuntimeConfig(): RuntimeConfig {
     );
   }
   for (const model of Object.values(parsed.data.models)) validateEndpoint(model.apiBaseUrl);
+  if (parsed.data.retryMaxDelayMs < parsed.data.retryBaseDelayMs) {
+    throw new HammerCodeError(
+      "运行配置无效：重试最大延迟不得小于初始延迟",
+      "INVALID_CONFIG",
+      true,
+    );
+  }
   return parsed.data;
 }
 
@@ -155,13 +172,39 @@ function publicModel(
   };
 }
 
-export function toPublicConfig(config: RuntimeConfig): PublicRuntimeConfig {
+export function toPublicConfig(
+  config: RuntimeConfig,
+  customModels: PublicRuntimeConfig["availableModels"] = [],
+): PublicRuntimeConfig {
+  const fast = publicModel("fast", "Fast", config.models.fast);
+  const strong = publicModel("strong", "Strong", config.models.strong);
   return {
-    models: {
-      fast: publicModel("fast", "Fast", config.models.fast),
-      strong: publicModel("strong", "Strong", config.models.strong),
-    },
+    models: { fast, strong },
+    availableModels: [
+      {
+        ref: "builtin:fast",
+        label: `Fast · ${fast.model}`,
+        provider: fast.provider,
+        model: fast.model,
+        apiBaseUrl: fast.apiBaseUrl,
+        hasApiKey: fast.hasApiKey,
+        builtinTier: "fast",
+      },
+      {
+        ref: "builtin:strong",
+        label: `Strong · ${strong.model}`,
+        provider: strong.provider,
+        model: strong.model,
+        apiBaseUrl: strong.apiBaseUrl,
+        hasApiKey: strong.hasApiKey,
+        builtinTier: "strong",
+      },
+      ...customModels,
+    ],
     contextTokenBudget: config.contextTokenBudget,
     maxAgentRounds: config.maxAgentRounds,
+    maxToolCalls: config.maxToolCalls,
+    maxRunTimeMs: config.maxRunTimeMs,
+    maxModelRetries: config.maxModelRetries,
   };
 }

@@ -65,13 +65,63 @@ const messageSchema = z.discriminatedUnion("role", [
 const terminationSchema = z.enum([
   "completed",
   "round_limit",
+  "tool_limit",
+  "time_limit",
   "cancelled",
+  "request_timeout",
+  "output_limit",
+  "rate_limited",
+  "server_error",
+  "resource_exhausted",
   "model_error",
   "tool_error",
   "invalid_model_output",
   "context_overflow",
   "interrupted",
 ]);
+const planStepSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  status: z.enum(["pending", "in_progress", "completed"]),
+});
+const planSchema = z.object({
+  revision: z.number().int().positive(),
+  explanation: z.string().optional(),
+  steps: z.array(planStepSchema),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+const planCheckpointSchema = z.object({
+  id: z.string(),
+  revision: z.number().int().positive(),
+  explanation: z.string().optional(),
+  steps: z.array(planStepSchema),
+  round: z.number().int().nonnegative(),
+  toolCalls: z.number().int().nonnegative(),
+  createdAt: z.string(),
+});
+const retryEventSchema = z.object({
+  attempt: z.number().int().positive(),
+  reason: z.enum(["rate_limited", "server_error", "resource_exhausted"]),
+  delayMs: z.number().int().nonnegative(),
+  createdAt: z.string(),
+});
+const metricsSchema = z.object({
+  roundsUsed: z.number().int().nonnegative(),
+  maxRounds: z.number().int().positive(),
+  modelRequests: z.number().int().nonnegative(),
+  retryCount: z.number().int().nonnegative(),
+  maxRetries: z.number().int().nonnegative(),
+  toolCalls: z.number().int().nonnegative(),
+  maxToolCalls: z.number().int().positive(),
+  promptTokens: z.number().int().nonnegative(),
+  completionTokens: z.number().int().nonnegative(),
+  tokenUsageEstimated: z.boolean(),
+  maxOutputTokensPerRequest: z.number().int().positive(),
+  contextTokenBudget: z.number().int().positive(),
+  contextCompactions: z.number().int().nonnegative(),
+  maxRunTimeMs: z.number().int().positive(),
+});
 const turnSchema = z.object({
   id: z.string(),
   userMessageId: z.string(),
@@ -82,7 +132,13 @@ const turnSchema = z.object({
   updatedAt: z.string(),
   finishedAt: z.string().optional(),
   modelTier: z.enum(MODEL_TIERS).optional(),
+  modelRef: z.string().min(1).max(1_000).optional(),
   permissionMode: z.enum(PERMISSION_MODES).optional(),
+  planRequired: z.boolean().optional(),
+  plan: planSchema.optional(),
+  planCheckpoints: z.array(planCheckpointSchema).optional(),
+  retryEvents: z.array(retryEventSchema).optional(),
+  metrics: metricsSchema.optional(),
 });
 const fileChangeSchema = z.object({
   id: z.string(),
@@ -130,6 +186,7 @@ const sessionSchema = z.object({
   status: z.enum(SESSION_STATUSES),
   task: z.string(),
   modelTier: z.enum(MODEL_TIERS).optional(),
+  modelRef: z.string().min(1).max(1_000).optional(),
   permissionMode: z.enum(PERMISSION_MODES).optional(),
   turns: z.array(turnSchema).optional(),
   activeTurnId: z.string().optional(),
@@ -148,6 +205,7 @@ const sessionSchema = z.object({
       durationMs: z.number().optional(),
       fileChangeId: z.string().optional(),
       authorization: authorizationSchema.optional(),
+      approvalPolicy: z.enum(["none", "permission_mode", "always"]).optional(),
     }),
   ),
   fileChanges: z.array(fileChangeSchema).optional(),
@@ -219,13 +277,17 @@ function inferAuthorization(trace: ParsedSession["toolTraces"][number]): ToolAut
 function normalizeSessionShape(parsed: ParsedSession): AgentSession {
   const rawMessages = parsed.messages.map((message) => ({ ...message }));
   const defaultModelTier = parsed.modelTier ?? parsed.turns?.at(-1)?.modelTier ?? "fast";
+  const defaultModelRef = parsed.modelRef ?? parsed.turns?.at(-1)?.modelRef ?? `builtin:${defaultModelTier}`;
   const defaultPermissionMode =
     parsed.permissionMode ?? parsed.turns?.at(-1)?.permissionMode ?? "ask";
   let turns: AgentTurn[] =
     parsed.turns?.map((turn) => ({
       ...turn,
       modelTier: turn.modelTier ?? defaultModelTier,
+      modelRef: turn.modelRef ?? `builtin:${turn.modelTier ?? defaultModelTier}`,
       permissionMode: turn.permissionMode ?? "ask",
+      planCheckpoints: turn.planCheckpoints ?? [],
+      retryEvents: turn.retryEvents ?? [],
     })) ?? [];
 
   if (turns.length === 0) {
@@ -240,6 +302,7 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
         terminationReason: isLast ? parsed.terminationReason : "completed",
         error: isLast ? parsed.error : undefined,
         modelTier: defaultModelTier,
+        modelRef: defaultModelRef,
         permissionMode: "ask",
         createdAt: message.createdAt,
         updatedAt: isLast ? parsed.updatedAt : users[index + 1]?.createdAt ?? parsed.updatedAt,
@@ -275,6 +338,7 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
     status: parsed.status,
     task: parsed.task,
     modelTier: parsed.modelTier ?? turns.at(-1)?.modelTier ?? "fast",
+    modelRef: parsed.modelRef ?? turns.at(-1)?.modelRef ?? defaultModelRef,
     permissionMode: parsed.permissionMode ?? defaultPermissionMode,
     turns,
     activeTurnId,

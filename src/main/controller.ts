@@ -13,6 +13,7 @@ import { redactSecrets, systemClock, toErrorMessage, uuidGenerator } from "../co
 import {
   MODEL_TIERS,
   PERMISSION_MODES,
+  type ApiConnectionInput,
   type AgentSession,
   type AppBootstrap,
   type RendererEvent,
@@ -20,6 +21,7 @@ import {
   type SessionSummary,
   type WorkspaceSummary,
 } from "../shared/contracts";
+import { ApiConnectionStore } from "./api-connection-store";
 import { PendingApprovalGateway } from "./approval-gateway";
 import type { RuntimeConfig } from "./config";
 import { toPublicConfig } from "./config";
@@ -29,6 +31,7 @@ const startTaskSchema = z
   .object({
     task: z.string().trim().min(1).max(100_000),
     modelTier: z.enum(MODEL_TIERS),
+    modelRef: z.string().min(1).max(1_000).optional(),
     permissionMode: z.enum(PERMISSION_MODES),
   })
   .strict();
@@ -70,9 +73,11 @@ export class AppController {
     private readonly window: BrowserWindow,
     private readonly config: RuntimeConfig,
     private readonly store: SessionStore,
+    private readonly apiConnections: ApiConnectionStore,
   ) {}
 
   async initialize(): Promise<void> {
+    await this.apiConnections.load();
     await this.refreshNavigation();
     await this.reconcileInterruptedUndo();
   }
@@ -83,7 +88,8 @@ export class AppController {
       sessions: this.sessions,
       workspaces: this.workspaces,
       workspaceRoot: this.workspaceRoot,
-      config: toPublicConfig(this.config),
+      config: this.publicConfig(),
+      apiConnections: this.apiConnections.listPublic(),
     };
   }
 
@@ -152,15 +158,9 @@ export class AppController {
     if (this.runningSessionId === session.id || this.isUndoBusy()) {
       throw new HammerCodeError("任务、审批或撤销运行时不能切换模型或权限", "SESSION_BUSY", true);
     }
-    if (settings.modelTier !== session.modelTier && !this.config.models[settings.modelTier].apiKey) {
-      const variable = settings.modelTier === "fast" ? "DEEPSEEK_API_KEY" : "GLM_API_KEY";
-      throw new HammerCodeError(
-        `${settings.modelTier === "fast" ? "Fast" : "Strong"} 模型未配置 ${variable}`,
-        "API_KEY_REQUIRED",
-        true,
-      );
-    }
+    this.resolveModel(settings.modelTier, settings.modelRef);
     session.modelTier = settings.modelTier;
+    session.modelRef = settings.modelRef ?? `builtin:${settings.modelTier}`;
     session.permissionMode = settings.permissionMode;
     session.updatedAt = systemClock.now().toISOString();
     await this.store.save(session);
@@ -175,15 +175,8 @@ export class AppController {
       throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
     }
     if (this.isBusy()) throw new HammerCodeError("已有任务或撤销正在运行", "SESSION_BUSY", true);
-    const modelConfig = this.config.models[request.modelTier];
-    if (!modelConfig.apiKey) {
-      const variable = request.modelTier === "fast" ? "DEEPSEEK_API_KEY" : "GLM_API_KEY";
-      throw new HammerCodeError(
-        `${request.modelTier === "fast" ? "Fast" : "Strong"} 模型未配置 ${variable}`,
-        "API_KEY_REQUIRED",
-        true,
-      );
-    }
+    const selected = this.resolveModel(request.modelTier, request.modelRef);
+    const modelConfig = selected.config;
 
     const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
     const approvals = new PendingApprovalGateway();
@@ -223,6 +216,12 @@ export class AppController {
       },
       {
         maxRounds: this.config.maxAgentRounds,
+        maxToolCalls: this.config.maxToolCalls,
+        maxRunTimeMs: this.config.maxRunTimeMs,
+        maxModelRetries: this.config.maxModelRetries,
+        retryBaseDelayMs: this.config.retryBaseDelayMs,
+        retryMaxDelayMs: this.config.retryMaxDelayMs,
+        maxOutputTokens: modelConfig.maxOutputTokens,
         contextTokenBudget: this.config.contextTokenBudget,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
       },
@@ -231,6 +230,7 @@ export class AppController {
     this.approvals = approvals;
     const settings: SessionSettings = {
       modelTier: request.modelTier,
+      modelRef: selected.modelRef,
       permissionMode: request.permissionMode,
     };
     const run = this.currentSession
@@ -253,6 +253,20 @@ export class AppController {
         if (this.approvals === approvals) this.approvals = null;
       });
     return { sessionId: snapshot.id };
+  }
+
+  async testApiConnection(input: unknown) {
+    return this.apiConnections.test(input as ApiConnectionInput);
+  }
+
+  async saveApiConnection(input: unknown) {
+    const connection = await this.apiConnections.save(input as ApiConnectionInput);
+    this.emit({
+      type: "config_updated",
+      config: this.publicConfig(),
+      apiConnections: this.apiConnections.listPublic(),
+    });
+    return connection;
   }
 
   cancelTask(detail = "任务已由用户取消"): void {
@@ -470,6 +484,57 @@ export class AppController {
 
   private emit(event: RendererEvent): void {
     if (!this.window.isDestroyed()) this.window.webContents.send("hammercode:event", event);
+  }
+
+  private publicConfig() {
+    return toPublicConfig(this.config, this.apiConnections.listModelOptions());
+  }
+
+  private resolveModel(modelTier: SessionSettings["modelTier"], requestedRef?: string): {
+    modelRef: string;
+    config: RuntimeConfig["models"]["fast"] | {
+      provider: "custom";
+      apiKey: string;
+      apiBaseUrl: string;
+      model: string;
+      thinking: "disabled";
+      reasoningEffort: "low";
+      maxOutputTokens: number;
+      requestTimeoutMs: number;
+    };
+  } {
+    const modelRef = requestedRef ?? `builtin:${modelTier}`;
+    if (modelRef === "builtin:fast" || modelRef === "builtin:strong") {
+      const selectedTier = modelRef === "builtin:fast" ? "fast" : "strong";
+      if (selectedTier !== modelTier) {
+        throw new HammerCodeError("模型引用与 Fast/Strong 档位不一致", "INVALID_MODEL_REF", true);
+      }
+      const config = this.config.models[selectedTier];
+      if (!config.apiKey) {
+        const variable = selectedTier === "fast" ? "DEEPSEEK_API_KEY" : "GLM_API_KEY";
+        throw new HammerCodeError(
+          `${selectedTier === "fast" ? "Fast" : "Strong"} 模型未配置 ${variable}`,
+          "API_KEY_REQUIRED",
+          true,
+        );
+      }
+      return { modelRef, config };
+    }
+    const custom = this.apiConnections.resolve(modelRef);
+    if (!custom) throw new HammerCodeError("找不到选中的自定义模型", "INVALID_MODEL_REF", true);
+    return {
+      modelRef,
+      config: {
+        provider: "custom",
+        apiKey: custom.apiKey,
+        apiBaseUrl: custom.apiBaseUrl,
+        model: custom.model,
+        thinking: "disabled",
+        reasoningEffort: "low",
+        maxOutputTokens: 32_768,
+        requestTimeoutMs: this.config.models.fast.requestTimeoutMs,
+      },
+    };
   }
 }
 

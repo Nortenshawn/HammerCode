@@ -45,7 +45,7 @@ const streamChunkSchema = z.object({
 });
 
 export interface OpenAICompatibleClientConfig {
-  provider: "deepseek" | "zhipu";
+  provider: "deepseek" | "zhipu" | "custom";
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -65,7 +65,6 @@ export function buildChatCompletionBody(
     tools: request.tools,
     stream: true,
     max_tokens: config.maxOutputTokens,
-    reasoning_effort: config.reasoningEffort,
   };
   if (config.provider === "zhipu") {
     return {
@@ -75,13 +74,30 @@ export function buildChatCompletionBody(
       temperature: 1,
       top_p: 0.95,
       thinking: { type: "enabled", clear_thinking: false },
+      reasoning_effort: config.reasoningEffort,
+    };
+  }
+  if (config.provider === "custom") {
+    return {
+      ...common,
+      tool_choice: "auto",
     };
   }
   return {
     ...common,
     stream_options: { include_usage: true },
     thinking: { type: config.thinking },
+    reasoning_effort: config.reasoningEffort,
   };
+}
+
+function retryAfterMilliseconds(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(300_000, Math.round(seconds * 1_000));
+  const date = Date.parse(value);
+  if (!Number.isFinite(date)) return undefined;
+  return Math.min(300_000, Math.max(0, date - Date.now()));
 }
 
 export class OpenAICompatibleChatClient implements ModelClient {
@@ -117,10 +133,30 @@ export class OpenAICompatibleChatClient implements ModelClient {
 
       if (!response.ok) {
         const body = redactSecrets((await response.text()).slice(0, 8_000));
+        const detail = `模型请求失败（HTTP ${response.status}）：${body || response.statusText}`;
+        if (response.status === 408) {
+          throw new HammerCodeError(detail, "MODEL_REQUEST_TIMEOUT", true);
+        }
+        if (response.status === 429) {
+          throw new HammerCodeError(
+            detail,
+            "MODEL_RATE_LIMITED",
+            true,
+            retryAfterMilliseconds(response.headers.get("retry-after")),
+          );
+        }
+        if (response.status >= 500) {
+          throw new HammerCodeError(
+            detail,
+            "MODEL_SERVER_ERROR",
+            true,
+            retryAfterMilliseconds(response.headers.get("retry-after")),
+          );
+        }
         throw new HammerCodeError(
-          `模型请求失败（HTTP ${response.status}）：${body || response.statusText}`,
+          detail,
           "MODEL_HTTP_ERROR",
-          response.status === 408 || response.status === 429 || response.status >= 500,
+          false,
         );
       }
       if (!response.body) {
@@ -167,6 +203,21 @@ export class OpenAICompatibleChatClient implements ModelClient {
       if (!sawDone && !request.signal.aborted) {
         throw new HammerCodeError("模型流在 [DONE] 前意外结束", "MODEL_STREAM_INTERRUPTED", true);
       }
+    } catch (error) {
+      if (error instanceof HammerCodeError) throw error;
+      if (request.signal.aborted) throw request.signal.reason;
+      if (timeoutController.signal.aborted) {
+        throw new HammerCodeError(
+          `模型请求在 ${this.config.requestTimeoutMs}ms 后超时`,
+          "MODEL_REQUEST_TIMEOUT",
+          true,
+        );
+      }
+      throw new HammerCodeError(
+        `模型网络请求失败：${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+        "MODEL_NETWORK_ERROR",
+        true,
+      );
     } finally {
       clearTimeout(timeout);
       if (listeningForAbort) request.signal.removeEventListener("abort", onAbort);

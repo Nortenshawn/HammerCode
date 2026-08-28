@@ -1,5 +1,6 @@
 import path from "node:path";
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { ApiConnectionStore } from "./api-connection-store";
 import { AppController, safeIpcError } from "./controller";
 import { loadRuntimeConfig } from "./config";
 import { SessionStore } from "./session-store";
@@ -34,7 +35,15 @@ async function createWindow(): Promise<void> {
 
   const config = loadRuntimeConfig();
   const store = new SessionStore(path.join(app.getPath("userData"), "sessions"));
-  controller = new AppController(mainWindow, config, store);
+  const apiConnections = new ApiConnectionStore(
+    path.join(app.getPath("userData"), "settings"),
+    {
+      isAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (value) => safeStorage.encryptString(value),
+      decrypt: (value) => safeStorage.decryptString(value),
+    },
+  );
+  controller = new AppController(mainWindow, config, store, apiConnections);
   await controller.initialize();
   registerIpc(controller);
 
@@ -68,6 +77,12 @@ function registerIpc(appController: AppController): void {
   );
   handle("hammercode:update-session-settings", (settings: unknown) =>
     appController.updateSessionSettings(settings),
+  );
+  handle("hammercode:test-api-connection", (input: unknown) =>
+    appController.testApiConnection(input),
+  );
+  handle("hammercode:save-api-connection", (input: unknown) =>
+    appController.saveApiConnection(input),
   );
   handle("hammercode:start-task", (request: unknown) => appController.startTask(request));
   handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));

@@ -5,14 +5,16 @@ import type {
   FileChange,
   ModelTier,
   PermissionMode,
+  ModelRef,
   TerminationReason,
   ToolMessage,
   ToolResult,
   ToolTrace,
 } from "../shared/contracts";
-import { buildModelContext } from "./context";
+import { buildContextFacts, buildModelContext, estimateTokens } from "./context";
 import { StreamAssembler } from "./model/stream-assembler";
 import { closeUnresolvedToolCalls } from "./session-recovery";
+import { applyPlanUpdate, isComplexTask, parsePlanUpdate, requiresPlanBeforeTool } from "./plan";
 import { transitionState } from "./state-machine";
 import type { AgentDependencies, AgentRunOptions } from "./types";
 import { HammerCodeError } from "./types";
@@ -22,6 +24,7 @@ const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed"]);
 
 export interface TurnExecutionSettings {
   modelTier: ModelTier;
+  modelRef?: ModelRef;
   permissionMode: PermissionMode;
 }
 
@@ -35,6 +38,7 @@ export class AgentRunner {
   private runAbort: AbortController | null = null;
   private running = false;
   private cancellationDetail = "任务已由用户取消";
+  private runDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly dependencies: AgentDependencies,
@@ -59,7 +63,12 @@ export class AgentRunner {
       userMessageId,
       status: "idle",
       modelTier: settings.modelTier,
+      modelRef: settings.modelRef ?? `builtin:${settings.modelTier}`,
       permissionMode: settings.permissionMode,
+      planRequired: isComplexTask(task),
+      planCheckpoints: [],
+      retryEvents: [],
+      metrics: this.initialMetrics(),
       createdAt: now,
       updatedAt: now,
     };
@@ -69,6 +78,7 @@ export class AgentRunner {
       status: "idle",
       task: task.trim(),
       modelTier: settings.modelTier,
+      modelRef: settings.modelRef ?? `builtin:${settings.modelTier}`,
       permissionMode: settings.permissionMode,
       turns: [turn],
       activeTurnId: turnId,
@@ -119,12 +129,18 @@ export class AgentRunner {
       userMessageId,
       status: "idle",
       modelTier: settings.modelTier,
+      modelRef: settings.modelRef ?? `builtin:${settings.modelTier}`,
       permissionMode: settings.permissionMode,
+      planRequired: isComplexTask(input),
+      planCheckpoints: [],
+      retryEvents: [],
+      metrics: this.initialMetrics(),
       createdAt: now,
       updatedAt: now,
     });
     this.session.activeTurnId = turnId;
     this.session.modelTier = settings.modelTier;
+    this.session.modelRef = settings.modelRef ?? `builtin:${settings.modelTier}`;
     this.session.permissionMode = settings.permissionMode;
     this.session.messages.push({
       id: userMessageId,
@@ -156,6 +172,11 @@ export class AgentRunner {
     this.cancellationDetail = "任务已由用户取消";
     const abort = new AbortController();
     this.runAbort = abort;
+    const maxRunTimeMs = this.maxRunTimeMs();
+    this.runDeadlineTimer = setTimeout(
+      () => abort.abort(new HammerCodeError("任务达到运行时间上限", "RUN_TIME_LIMIT", true)),
+      maxRunTimeMs,
+    );
     try {
       await this.moveTo("requesting", startReason);
       await this.runLoop(abort.signal);
@@ -166,19 +187,21 @@ export class AgentRunner {
         now,
         () => this.dependencies.ids.next("message"),
       );
-      if (isAbortError(error) || abort.signal.aborted) {
+      const abortReason = abort.signal.reason;
+      if (abortReason instanceof HammerCodeError && abortReason.code === "RUN_TIME_LIMIT") {
+        await this.terminate(
+          "time_limit",
+          `已达到运行时间上限（${Math.round(maxRunTimeMs / 1_000)} 秒），任务已停止。`,
+        );
+      } else if (isAbortError(error) || abort.signal.aborted) {
         await this.terminate("cancelled", this.cancellationDetail);
       } else {
-        const reason: TerminationReason =
-          error instanceof HammerCodeError && error.code === "CONTEXT_OVERFLOW"
-            ? "context_overflow"
-            : error instanceof HammerCodeError &&
-                ["INVALID_TOOL_CALL", "MODEL_INVALID_CHUNK", "MODEL_INVALID_JSON"].includes(error.code)
-              ? "invalid_model_output"
-              : "model_error";
+        const reason = this.terminationReasonFor(error);
         await this.terminate(reason, toErrorMessage(error));
       }
     } finally {
+      if (this.runDeadlineTimer) clearTimeout(this.runDeadlineTimer);
+      this.runDeadlineTimer = null;
       this.running = false;
       this.runAbort = null;
     }
@@ -193,21 +216,13 @@ export class AgentRunner {
         this.options.systemPrompt,
         this.requireSession().messages,
         this.options.contextTokenBudget,
+        buildContextFacts(this.requireSession()),
       );
-      const assembler = new StreamAssembler();
-
-      for await (const chunk of this.dependencies.model.stream({
-        messages: context.messages,
-        tools: this.dependencies.tools.definitions,
-        signal,
-      })) {
-        assembler.push(chunk);
-        if (chunk.content) this.requireSession().streamingText += chunk.content;
-        if (chunk.reasoningContent) this.requireSession().streamingReasoning += chunk.reasoningContent;
-        if (chunk.content || chunk.reasoningContent) await this.publish();
-      }
-
-      const response = assembler.result();
+      const metrics = this.currentTurn().metrics!;
+      metrics.roundsUsed = round;
+      if (context.compacted) metrics.contextCompactions += 1;
+      const response = await this.requestModelWithRetry(context.messages, context.estimatedTokens, signal);
+      this.recordUsage(response, context.estimatedTokens);
       this.assertFreshToolCallIds(response.toolCalls.map((call) => call.id));
       const assistant: AssistantMessage = {
         id: this.dependencies.ids.next("message"),
@@ -230,10 +245,16 @@ export class AgentRunner {
         throw new HammerCodeError("模型输出被内容策略截断", "MODEL_CONTENT_FILTER", true);
       }
       if (response.finishReason === "insufficient_system_resource") {
-        throw new HammerCodeError("模型服务资源不足，请稍后重试", "MODEL_RESOURCE_EXHAUSTED", true);
+        throw new HammerCodeError("模型服务资源不足，已用尽本轮退避重试", "MODEL_RESOURCE_EXHAUSTED", true);
       }
       if (response.toolCalls.length > 0) {
-        for (const call of response.toolCalls) await this.executeTool(call, signal);
+        for (const call of response.toolCalls) {
+          if (metrics.toolCalls >= metrics.maxToolCalls) {
+            throw new HammerCodeError("已达到工具调用次数上限", "TOOL_LIMIT", true);
+          }
+          metrics.toolCalls += 1;
+          await this.executeTool(call, signal);
+        }
         continue;
       }
       if (response.finishReason === "stop") {
@@ -247,6 +268,85 @@ export class AgentRunner {
       "round_limit",
       `已达到安全轮次上限（${this.options.maxRounds}），任务停止且不会继续调用模型。`,
     );
+  }
+
+  private async requestModelWithRetry(
+    messages: Parameters<AgentDependencies["model"]["stream"]>[0]["messages"],
+    estimatedPromptTokens: number,
+    signal: AbortSignal,
+  ): Promise<ReturnType<StreamAssembler["result"]>> {
+    const turn = this.currentTurn();
+    const metrics = turn.metrics!;
+    while (true) {
+      if (signal.aborted) throw signal.reason;
+      this.requireSession().streamingText = "";
+      this.requireSession().streamingReasoning = "";
+      const assembler = new StreamAssembler();
+      metrics.modelRequests += 1;
+      try {
+        for await (const chunk of this.dependencies.model.stream({
+          messages,
+          tools: this.dependencies.tools.definitions,
+          signal,
+        })) {
+          assembler.push(chunk);
+          if (chunk.content) this.requireSession().streamingText += chunk.content;
+          if (chunk.reasoningContent) this.requireSession().streamingReasoning += chunk.reasoningContent;
+          if (chunk.content || chunk.reasoningContent) await this.publish();
+        }
+        const response = assembler.result();
+        if (response.finishReason === "insufficient_system_resource") {
+          throw new HammerCodeError(
+            "模型服务临时资源不足",
+            "MODEL_RESOURCE_EXHAUSTED",
+            true,
+          );
+        }
+        return response;
+      } catch (error) {
+        const retryReason = this.retryReasonFor(error);
+        if (!retryReason || metrics.retryCount >= metrics.maxRetries || signal.aborted) throw error;
+        metrics.retryCount += 1;
+        const requestedDelay = error instanceof HammerCodeError ? error.retryAfterMs : undefined;
+        const exponential = this.retryBaseDelayMs() * 2 ** (metrics.retryCount - 1);
+        const delayMs = Math.min(this.retryMaxDelayMs(), requestedDelay ?? exponential);
+        turn.retryEvents = [
+          ...(turn.retryEvents ?? []),
+          {
+            attempt: metrics.retryCount,
+            reason: retryReason,
+            delayMs,
+            createdAt: this.dependencies.clock.now().toISOString(),
+          },
+        ];
+        this.requireSession().streamingText = "";
+        this.requireSession().streamingReasoning = "";
+        metrics.promptTokens += estimatedPromptTokens;
+        metrics.tokenUsageEstimated = true;
+        await this.publish();
+        await this.wait(delayMs, signal);
+      }
+    }
+  }
+
+  private recordUsage(
+    response: ReturnType<StreamAssembler["result"]>,
+    estimatedPromptTokens: number,
+  ): void {
+    const metrics = this.currentTurn().metrics!;
+    if (response.usage?.promptTokens !== undefined) metrics.promptTokens += response.usage.promptTokens;
+    else {
+      metrics.promptTokens += estimatedPromptTokens;
+      metrics.tokenUsageEstimated = true;
+    }
+    if (response.usage?.completionTokens !== undefined) {
+      metrics.completionTokens += response.usage.completionTokens;
+    } else {
+      metrics.completionTokens += estimateTokens(
+        `${response.reasoningContent}\n${response.content}\n${response.toolCalls.map((call) => call.arguments).join("\n")}`,
+      );
+      metrics.tokenUsageEstimated = true;
+    }
   }
 
   private assertFreshToolCallIds(callIds: string[]): void {
@@ -280,11 +380,31 @@ export class AgentRunner {
     session.toolTraces.push(trace);
     await this.publish();
 
+    if (this.currentTurn().planRequired && !this.currentTurn().plan && requiresPlanBeforeTool(call.name)) {
+      const result: ToolResult = {
+        ok: false,
+        summary: "复杂任务需要先建立显式计划",
+        output: "请先调用 update_plan，记录可检查的步骤后再执行副作用工具。",
+        errorCode: "PLAN_REQUIRED",
+      };
+      trace.status = "failed";
+      trace.authorization = "not_required";
+      trace.approvalPolicy = "none";
+      trace.result = result;
+      trace.finishedAt = this.dependencies.clock.now().toISOString();
+      this.appendToolMessage(call, result);
+      await this.publish();
+      return;
+    }
+
     let prepared;
     try {
       prepared = await this.dependencies.tools.prepare(call, this.dependencies.clock.now());
       trace.summary = prepared.summary;
       trace.target = prepared.target;
+      trace.approvalPolicy = prepared.requiresApproval
+        ? prepared.approvalPolicy ?? "permission_mode"
+        : "none";
       if (prepared.approvalRequest) {
         prepared.approvalRequest.turnId = turnId;
         prepared.approvalRequest.operation = "agent_tool";
@@ -312,7 +432,10 @@ export class AgentRunner {
 
     if (!prepared.requiresApproval) {
       trace.authorization = "not_required";
-    } else if (this.currentTurn().permissionMode === "full_access") {
+    } else if (
+      this.currentTurn().permissionMode === "full_access" &&
+      prepared.approvalPolicy !== "always"
+    ) {
       trace.status = "approved";
       trace.authorization = "full_access";
       await this.publish();
@@ -381,6 +504,25 @@ export class AgentRunner {
       };
       session.fileChanges.push(change);
       trace.fileChangeId = change.id;
+    }
+    if (result.ok && call.name === "update_plan") {
+      try {
+        applyPlanUpdate(
+          this.currentTurn(),
+          parsePlanUpdate(call.arguments),
+          this.dependencies.ids,
+          finished.toISOString(),
+        );
+      } catch (error) {
+        result = {
+          ok: false,
+          summary: "计划检查点未更新",
+          output: toErrorMessage(error),
+          errorCode: error instanceof HammerCodeError ? error.code : "INVALID_PLAN",
+        };
+        trace.status = "failed";
+        trace.result = result;
+      }
     }
     this.appendToolMessage(call, result);
     await this.moveTo("requesting", `${call.name} ${result.ok ? "执行完成" : "执行失败"}`);
@@ -453,5 +595,79 @@ export class AgentRunner {
   private requireSession(): AgentSession {
     if (!this.session) throw new HammerCodeError("会话尚未创建", "NO_SESSION");
     return this.session;
+  }
+
+  private initialMetrics() {
+    return {
+      roundsUsed: 0,
+      maxRounds: this.options.maxRounds,
+      modelRequests: 0,
+      retryCount: 0,
+      maxRetries: this.options.maxModelRetries ?? 2,
+      toolCalls: 0,
+      maxToolCalls: this.options.maxToolCalls ?? 100,
+      promptTokens: 0,
+      completionTokens: 0,
+      tokenUsageEstimated: false,
+      maxOutputTokensPerRequest: this.options.maxOutputTokens ?? 32_768,
+      contextTokenBudget: this.options.contextTokenBudget,
+      contextCompactions: 0,
+      maxRunTimeMs: this.maxRunTimeMs(),
+    };
+  }
+
+  private maxRunTimeMs(): number {
+    return this.options.maxRunTimeMs ?? 1_800_000;
+  }
+
+  private retryBaseDelayMs(): number {
+    return this.options.retryBaseDelayMs ?? 1_000;
+  }
+
+  private retryMaxDelayMs(): number {
+    return this.options.retryMaxDelayMs ?? 8_000;
+  }
+
+  private retryReasonFor(error: unknown): "rate_limited" | "server_error" | "resource_exhausted" | null {
+    if (!(error instanceof HammerCodeError)) return null;
+    if (error.code === "MODEL_RATE_LIMITED") return "rate_limited";
+    if (error.code === "MODEL_SERVER_ERROR") return "server_error";
+    if (error.code === "MODEL_RESOURCE_EXHAUSTED") return "resource_exhausted";
+    return null;
+  }
+
+  private terminationReasonFor(error: unknown): TerminationReason {
+    if (!(error instanceof HammerCodeError)) return "model_error";
+    if (error.code === "CONTEXT_OVERFLOW") return "context_overflow";
+    if (error.code === "MODEL_REQUEST_TIMEOUT") return "request_timeout";
+    if (error.code === "MODEL_LENGTH_LIMIT") return "output_limit";
+    if (error.code === "MODEL_RATE_LIMITED") return "rate_limited";
+    if (error.code === "MODEL_SERVER_ERROR") return "server_error";
+    if (error.code === "MODEL_RESOURCE_EXHAUSTED") return "resource_exhausted";
+    if (error.code === "TOOL_LIMIT") return "tool_limit";
+    if (error.code === "RUN_TIME_LIMIT") return "time_limit";
+    if (["INVALID_TOOL_CALL", "MODEL_INVALID_CHUNK", "MODEL_INVALID_JSON"].includes(error.code)) {
+      return "invalid_model_output";
+    }
+    return "model_error";
+  }
+
+  private wait(milliseconds: number, signal: AbortSignal): Promise<void> {
+    if (this.dependencies.wait) return this.dependencies.wait(milliseconds, signal);
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      const timer = setTimeout(resolve, milliseconds);
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    });
   }
 }

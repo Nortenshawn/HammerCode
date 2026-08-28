@@ -13,6 +13,10 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number];
 export const MODEL_TIERS = ["fast", "strong"] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
+export const BUILTIN_MODEL_REFS = ["builtin:fast", "builtin:strong"] as const;
+export type BuiltinModelRef = (typeof BUILTIN_MODEL_REFS)[number];
+export type ModelRef = string;
+
 export const PERMISSION_MODES = ["ask", "full_access"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
@@ -75,6 +79,7 @@ export interface ToolTrace {
   durationMs?: number;
   fileChangeId?: string;
   authorization?: ToolAuthorization;
+  approvalPolicy?: "none" | "permission_mode" | "always";
 }
 
 export interface UserMessage {
@@ -110,12 +115,69 @@ export type ConversationMessage = UserMessage | AssistantMessage | ToolMessage;
 export type TerminationReason =
   | "completed"
   | "round_limit"
+  | "tool_limit"
+  | "time_limit"
   | "cancelled"
+  | "request_timeout"
+  | "output_limit"
+  | "rate_limited"
+  | "server_error"
+  | "resource_exhausted"
   | "model_error"
   | "tool_error"
   | "invalid_model_output"
   | "context_overflow"
   | "interrupted";
+
+export type PlanStepStatus = "pending" | "in_progress" | "completed";
+
+export interface PlanStep {
+  id: string;
+  title: string;
+  status: PlanStepStatus;
+}
+
+export interface TurnPlan {
+  revision: number;
+  explanation?: string;
+  steps: PlanStep[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanCheckpoint {
+  id: string;
+  revision: number;
+  explanation?: string;
+  steps: PlanStep[];
+  round: number;
+  toolCalls: number;
+  createdAt: string;
+}
+
+export interface ModelRetryEvent {
+  attempt: number;
+  reason: "rate_limited" | "server_error" | "resource_exhausted";
+  delayMs: number;
+  createdAt: string;
+}
+
+export interface TurnRunMetrics {
+  roundsUsed: number;
+  maxRounds: number;
+  modelRequests: number;
+  retryCount: number;
+  maxRetries: number;
+  toolCalls: number;
+  maxToolCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  tokenUsageEstimated: boolean;
+  maxOutputTokensPerRequest: number;
+  contextTokenBudget: number;
+  contextCompactions: number;
+  maxRunTimeMs: number;
+}
 
 export interface StateTransition {
   turnId: string;
@@ -135,7 +197,13 @@ export interface AgentTurn {
   updatedAt: string;
   finishedAt?: string;
   modelTier: ModelTier;
+  modelRef?: ModelRef;
   permissionMode: PermissionMode;
+  planRequired?: boolean;
+  plan?: TurnPlan;
+  planCheckpoints?: PlanCheckpoint[];
+  retryEvents?: ModelRetryEvent[];
+  metrics?: TurnRunMetrics;
 }
 
 export type FileChangeKind = "create" | "modify" | "delete";
@@ -171,6 +239,7 @@ export interface AgentSession {
   status: SessionStatus;
   task: string;
   modelTier: ModelTier;
+  modelRef?: ModelRef;
   permissionMode: PermissionMode;
   turns: AgentTurn[];
   activeTurnId: string;
@@ -220,10 +289,46 @@ export interface PublicModelConfig {
   hasApiKey: boolean;
 }
 
+export interface PublicModelOption {
+  ref: ModelRef;
+  label: string;
+  provider: "deepseek" | "zhipu" | "custom";
+  model: string;
+  apiBaseUrl: string;
+  hasApiKey: boolean;
+  builtinTier?: ModelTier;
+  connectionId?: string;
+}
+
+export interface PublicApiConnection {
+  id: string;
+  name: string;
+  apiBaseUrl: string;
+  models: string[];
+  status: "connected" | "error";
+  lastCheckedAt: string;
+  error?: string;
+}
+
+export interface ApiConnectionInput {
+  apiBaseUrl: string;
+  apiKey: string;
+}
+
+export interface ApiConnectionTestResult {
+  apiBaseUrl: string;
+  models: string[];
+  latencyMs: number;
+}
+
 export interface PublicRuntimeConfig {
   models: Record<ModelTier, PublicModelConfig>;
+  availableModels: PublicModelOption[];
   contextTokenBudget: number;
   maxAgentRounds: number;
+  maxToolCalls: number;
+  maxRunTimeMs: number;
+  maxModelRetries: number;
 }
 
 export interface AppBootstrap {
@@ -232,10 +337,12 @@ export interface AppBootstrap {
   workspaces: WorkspaceSummary[];
   workspaceRoot: string | null;
   config: PublicRuntimeConfig;
+  apiConnections: PublicApiConnection[];
 }
 
 export interface SessionSettings {
   modelTier: ModelTier;
+  modelRef?: ModelRef;
   permissionMode: PermissionMode;
 }
 
@@ -248,6 +355,11 @@ export type RendererEvent =
   | { type: "session_updated"; session: AgentSession }
   | { type: "session_cleared" }
   | { type: "sessions_changed"; sessions: SessionSummary[] }
+  | {
+      type: "config_updated";
+      config: PublicRuntimeConfig;
+      apiConnections: PublicApiConnection[];
+    }
   | {
       type: "workspace_changed";
       workspaceRoot: string | null;
@@ -264,6 +376,8 @@ export interface HammerCodeApi {
   newChat(): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   updateSessionSettings(settings: SessionSettings): Promise<void>;
+  testApiConnection(input: ApiConnectionInput): Promise<ApiConnectionTestResult>;
+  saveApiConnection(input: ApiConnectionInput): Promise<PublicApiConnection>;
   startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;
   cancelTask(): Promise<void>;
