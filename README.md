@@ -74,7 +74,7 @@ src/
 tests/        核心单元与端到端模拟测试
 ```
 
-更详细的边界、数据流和安全决策见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，演示检查单见 [docs/DEMO.md](docs/DEMO.md)，迭代记录见 [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md)。
+更详细的边界、数据流和安全决策见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，演示检查单见 [docs/DEMO.md](docs/DEMO.md)，当前路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)，历史与真实模型证据分别见 [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) 和 [docs/ONLINE_TEST_REPORT.md](docs/ONLINE_TEST_REPORT.md)。
 
 ## 基础设施依赖说明
 

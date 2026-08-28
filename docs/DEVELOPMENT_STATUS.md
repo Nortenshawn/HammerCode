@@ -38,10 +38,10 @@ HammerCode 已从可完成单次任务的 MVP，演进为可在单工作区中�
 - 自动测试覆盖状态转换、流式工具组装、路径边界、审批策略、命令生命周期、上下文预算、连续 turn、中断恢复、重复副作用阻断、累计 diff 和安全撤销。
 - 发布前固定执行：`npm run typecheck`、`npm test`、`npm run build`、`npm run package:mac`。
 
-## 下一阶段候选项
+### 阶段三：真实在线闭环与可靠性
 
-- 为超长聊天补充更细粒度、可观测的分层上下文压缩策略。
-- 增加变更记录的持久化配额与旧内容淘汰策略，避免长生命周期聊天无限增长。
-- 为命令执行后的工作区变化提供只读检测报告，但不承诺自动撤销任意命令副作用。
-- 完成 macOS App Sandbox、签名与公证方案评估。
-- 在复用同一模型端口和 agent core 的前提下评估 strong 模型路由，首版仍只维护 OpenAI-compatible 协议边界。
+- 状态：已完成（2026-08-28）。
+- 已指定 `/Users/norten/Developer/HammerTest` 作为真实 DeepSeek API 与本地副作用的固定验收沙箱。
+- 已验证空目录开发、审批、命令、连续追问、重启恢复、累计 diff、安全撤销、审批拒绝和路径越界阻断；证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
+
+后续范围、实现顺序和退出标准不再写入本状态记录，统一见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。
