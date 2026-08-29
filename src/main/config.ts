@@ -3,7 +3,7 @@ import { app } from "electron";
 import dotenv from "dotenv";
 import { z } from "zod";
 import { HammerCodeError } from "../core/types";
-import type { ModelTier, PublicModelConfig, PublicRuntimeConfig } from "../shared/contracts";
+import type { ModelTier, PublicModelConfig, PublicModelConnection, PublicRuntimeConfig } from "../shared/contracts";
 
 const modelConfigSchema = z.object({
   provider: z.enum(["deepseek", "zhipu"]),
@@ -29,12 +29,6 @@ const configSchema = z.object({
 
 export type RuntimeModelConfig = z.infer<typeof modelConfigSchema>;
 export type RuntimeConfig = z.infer<typeof configSchema>;
-
-export interface PublicModelConnectionState {
-  status: PublicModelConfig["connectionStatus"];
-  message?: string;
-  lastCheckedAt?: string;
-}
 
 function readInteger(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === "") return fallback;
@@ -157,9 +151,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
 
 function publicModel(
   tier: ModelTier,
-  label: string,
   config: RuntimeModelConfig,
-  state?: PublicModelConnectionState,
+  connection: PublicModelConnection,
 ): PublicModelConfig {
   let displayBaseUrl: string;
   try {
@@ -170,50 +163,46 @@ function publicModel(
   }
   return {
     tier,
-    label,
+    label: connection.name,
     provider: config.provider,
-    model: config.model,
-    apiBaseUrl: displayBaseUrl,
+    model: connection.model,
+    apiBaseUrl: connection.apiBaseUrl || displayBaseUrl,
     thinking: config.thinking,
     reasoningEffort: config.reasoningEffort,
     maxOutputTokens: config.maxOutputTokens,
-    hasApiKey: Boolean(config.apiKey),
-    connectionStatus: state?.status ?? (config.apiKey ? "configured" : "missing"),
-    connectionMessage: state?.message,
-    lastCheckedAt: state?.lastCheckedAt,
+    hasApiKey: connection.hasApiKey,
+    connectionStatus: connection.connectionStatus,
+    connectionMessage: connection.connectionMessage,
+    lastCheckedAt: connection.lastCheckedAt,
   };
 }
 
 export function toPublicConfig(
   config: RuntimeConfig,
-  states: Partial<Record<ModelTier, PublicModelConnectionState>> = {},
+  connections: PublicModelConnection[],
 ): PublicRuntimeConfig {
-  const fast = publicModel("fast", "Fast", config.models.fast, states.fast);
-  const strong = publicModel("strong", "Strong", config.models.strong, states.strong);
+  const fastConnection = connections.find((connection) => connection.id === "builtin:fast");
+  const strongConnection = connections.find((connection) => connection.id === "builtin:strong");
+  if (!fastConnection || !strongConnection) {
+    throw new HammerCodeError("Fast/Strong 默认模型连接缺失", "DEFAULT_MODEL_CONNECTION_MISSING");
+  }
+  const fast = publicModel("fast", config.models.fast, fastConnection);
+  const strong = publicModel("strong", config.models.strong, strongConnection);
   return {
     models: { fast, strong },
-    availableModels: [
-      {
-        ref: "builtin:fast",
-        label: `Fast · ${fast.model}`,
-        provider: fast.provider,
-        model: fast.model,
-        apiBaseUrl: fast.apiBaseUrl,
-        hasApiKey: fast.hasApiKey,
-        connectionStatus: fast.connectionStatus,
-        builtinTier: "fast",
-      },
-      {
-        ref: "builtin:strong",
-        label: `Strong · ${strong.model}`,
-        provider: strong.provider,
-        model: strong.model,
-        apiBaseUrl: strong.apiBaseUrl,
-        hasApiKey: strong.hasApiKey,
-        connectionStatus: strong.connectionStatus,
-        builtinTier: "strong",
-      },
-    ],
+    connections,
+    availableModels: connections.map((connection) => ({
+      ref: connection.ref,
+      label: `${connection.name} · ${connection.model}`,
+      provider: connection.provider,
+      model: connection.model,
+      apiBaseUrl: connection.apiBaseUrl,
+      hasApiKey: connection.hasApiKey,
+      connectionStatus: connection.connectionStatus,
+      builtinTier: connection.tier,
+      connectionId: connection.id,
+      kind: connection.kind,
+    })),
     contextTokenBudget: config.contextTokenBudget,
     maxAgentRounds: config.maxAgentRounds,
     maxToolCalls: config.maxToolCalls,

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -747,6 +747,13 @@ describe("agent runner", () => {
     const { ids, clock } = fixtures();
     const writes: Array<{ kind: string; subject: string; statement: string }> = [];
     const memory: ProjectMemoryPort = {
+      settings: async () => ({
+        enabled: true,
+        useMemories: true,
+        generateMemories: true,
+        maxRecallRecords: 6,
+        maxRecallCharacters: 3_000,
+      }),
       retrieve: async () => ({
         records: [],
         rendered: "[decision] package-manager: 使用 npm（置信：user_confirmed；来源：用户确认）",
@@ -799,6 +806,47 @@ describe("agent runner", () => {
     expect(writes).toEqual([expect.objectContaining({ kind: "decision", subject: "test-runner", statement: "使用 Vitest" })]);
     expect(result.toolTraces.find((trace) => trace.call.name === "remember_project")?.result?.metadata).toMatchObject({
       confidence: "model_inference",
+    });
+  });
+
+  it("snapshots disabled project memory per turn without injecting tools or context", async () => {
+    const { ids, clock } = fixtures();
+    const retrieve = vi.fn();
+    const recordToolFact = vi.fn();
+    const memory: ProjectMemoryPort = {
+      settings: async () => ({
+        enabled: false,
+        useMemories: true,
+        generateMemories: true,
+        maxRecallRecords: 6,
+        maxRecallCharacters: 3_000,
+      }),
+      retrieve,
+      rememberInference: vi.fn(),
+      recordToolFact,
+    };
+    const model = new ScriptedModel([[{ content: "完成。", finishReason: "stop" }]]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: { definitions: [], prepare: async () => { throw new Error("unused"); } },
+        approvals: approve,
+        ids,
+        clock,
+        projectMemory: memory,
+      },
+      { maxRounds: 2, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+    const result = await runner.start("不要使用跨聊天记忆", "/tmp");
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(recordToolFact).not.toHaveBeenCalled();
+    expect(model.requests[0].tools).toEqual([]);
+    expect(model.requests[0].messages[0]).toEqual({ role: "system", content: "system" });
+    expect(result.turns[0].projectMemorySettings).toMatchObject({ enabled: false });
+    expect(result.turns[0].metrics).toMatchObject({
+      projectMemoryRecords: 0,
+      projectMemoryCharacters: 0,
+      projectMemoryTokens: 0,
     });
   });
 

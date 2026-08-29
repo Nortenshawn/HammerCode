@@ -9,6 +9,7 @@ import type {
   ProjectMemoryKind,
   ProjectMemoryRecall,
   ProjectMemoryRecord,
+  ProjectMemorySettings,
   SubagentMode,
   SubagentRole,
   SubagentTask,
@@ -99,6 +100,7 @@ export interface AgentDependencies {
 }
 
 export interface ProjectMemoryPort {
+  settings(workspaceRoot: string): Promise<ProjectMemorySettings>;
   retrieve(
     workspaceRoot: string,
     query: string,

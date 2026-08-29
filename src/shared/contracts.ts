@@ -15,7 +15,8 @@ export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export const BUILTIN_MODEL_REFS = ["builtin:fast", "builtin:strong"] as const;
 export type BuiltinModelRef = (typeof BUILTIN_MODEL_REFS)[number];
-export type ModelRef = BuiltinModelRef;
+export type ConnectionModelRef = `connection:${string}`;
+export type ModelRef = BuiltinModelRef | ConnectionModelRef;
 
 export const PERMISSION_MODES = ["ask", "full_access"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
@@ -177,6 +178,9 @@ export interface TurnRunMetrics {
   contextTokenBudget: number;
   currentContextTokens: number;
   contextCompactions: number;
+  projectMemoryRecords: number;
+  projectMemoryCharacters: number;
+  projectMemoryTokens: number;
   maxRunTimeMs: number;
 }
 
@@ -205,6 +209,7 @@ export interface AgentTurn {
   planCheckpoints?: PlanCheckpoint[];
   retryEvents?: ModelRetryEvent[];
   metrics?: TurnRunMetrics;
+  projectMemorySettings?: ProjectMemorySettings;
 }
 
 export type FileChangeKind = "create" | "modify" | "delete";
@@ -386,20 +391,46 @@ export interface PublicModelOption {
   hasApiKey: boolean;
   connectionStatus: PublicModelConfig["connectionStatus"];
   builtinTier: ModelTier;
+  connectionId: string;
+  kind: "default" | "custom";
 }
 
-export interface ModelConnectionInput {
+export interface PublicModelConnection {
+  id: string;
+  ref: ModelRef;
+  kind: "default" | "custom";
+  name: string;
   tier: ModelTier;
+  provider: "deepseek" | "zhipu";
+  model: string;
+  apiBaseUrl: string;
+  hasApiKey: boolean;
+  connectionStatus: PublicModelConfig["connectionStatus"];
+  connectionMessage?: string;
+  lastCheckedAt?: string;
+}
+
+export interface ModelConnectionProbeInput {
+  connectionId?: string;
   apiBaseUrl: string;
   apiKey?: string;
 }
 
 export interface ModelConnectionTestResult {
-  tier: ModelTier;
+  connectionId?: string;
   apiBaseUrl: string;
-  model: string;
+  models: string[];
   latencyMs: number;
   status: "connected";
+}
+
+export interface ModelConnectionSaveInput {
+  connectionId?: string;
+  name: string;
+  tier: ModelTier;
+  model: string;
+  apiBaseUrl: string;
+  apiKey?: string;
 }
 
 export interface WorkspaceEntry {
@@ -448,8 +479,17 @@ export interface ProjectMemoryRecord {
 export interface ProjectMemorySnapshot {
   workspaceRoot: string;
   revision: number;
+  settings: ProjectMemorySettings;
   records: ProjectMemoryRecord[];
   updatedAt: string;
+}
+
+export interface ProjectMemorySettings {
+  enabled: boolean;
+  useMemories: boolean;
+  generateMemories: boolean;
+  maxRecallRecords: number;
+  maxRecallCharacters: number;
 }
 
 export interface ProjectMemoryRecall {
@@ -459,8 +499,18 @@ export interface ProjectMemoryRecall {
   characterCount: number;
 }
 
+export interface ProjectMemoryTransferResult {
+  status: "exported" | "imported" | "cancelled";
+  fileName?: string;
+  imported?: number;
+  skipped?: number;
+  conflicted?: number;
+  recordCount?: number;
+}
+
 export interface PublicRuntimeConfig {
   models: Record<ModelTier, PublicModelConfig>;
+  connections: PublicModelConnection[];
   availableModels: PublicModelOption[];
   contextTokenBudget: number;
   maxAgentRounds: number;
@@ -544,8 +594,10 @@ export interface HammerCodeApi {
   newChat(): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   updateSessionSettings(settings: SessionSettings): Promise<void>;
-  testModelConnection(input: ModelConnectionInput): Promise<ModelConnectionTestResult>;
-  saveModelConnection(input: ModelConnectionInput): Promise<ModelConnectionTestResult>;
+  testModelConnection(input: ModelConnectionProbeInput): Promise<ModelConnectionTestResult>;
+  saveModelConnection(input: ModelConnectionSaveInput): Promise<PublicModelConnection>;
+  renameModelConnection(connectionId: string, name: string): Promise<PublicModelConnection>;
+  deleteModelConnection(connectionId: string): Promise<void>;
   compressContext(): Promise<ChatContextMemory>;
   openSideChat(): Promise<EphemeralSideChatState>;
   sendSideChat(sideChatId: string, content: string): Promise<void>;
@@ -553,6 +605,9 @@ export interface HammerCodeApi {
   closeSideChat(sideChatId: string): Promise<void>;
   searchWorkspaceEntries(query: string): Promise<WorkspaceEntry[]>;
   listProjectMemory(): Promise<ProjectMemorySnapshot | null>;
+  updateProjectMemorySettings(settings: ProjectMemorySettings): Promise<ProjectMemorySnapshot | null>;
+  exportProjectMemory(): Promise<ProjectMemoryTransferResult>;
+  importProjectMemory(): Promise<ProjectMemoryTransferResult>;
   deleteProjectMemory(memoryId: string): Promise<ProjectMemorySnapshot | null>;
   startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;

@@ -364,3 +364,40 @@ Phase 8 的比例布局、分界边界、窄窗折叠/恢复、真实 BTW 多轮
 - `npm run typecheck`、26 个测试文件共 145 项测试、生产构建和 Apple Silicon 目录包全部通过；未签名目录包符合当前本地演示阶段预期。
 
 最终测试产物保留在 `HammerTest/Phase9`：`counter.js` 当前值为 42，`counter.test.js` 外部复核仍为 1/1 通过，`package.json` 仅声明 ESM。该目录可用于人工复核真实模型闭环，未清理。
+
+## HC-ONLINE-2026-08-29-05
+
+- 时间：2026-08-29 14:11–14:46（Asia/Shanghai）
+- 基线提交：`7ac1fd9`
+- 正式界面：Electron 开发构建与 `release/mac-arm64/HammerCode.app`，均经过 main/preload/renderer 完整链路
+- 模型：真实 `fast = deepseek-v4-flash`、真实 `strong = glm-5.3-flash`
+- 工作区：`/Users/norten/Developer/HammerTest`；新增测试目录为 `Phase10Memory` 与 `Phase10Imported`
+- 凭据：只由正式 main process 的统一配置与加密存储使用；界面、测试输出和本报告均未展示、打印或复制 key
+
+### 记忆开关、预算与迁移
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 新项目默认值 | 未存在 Phase 9 记忆文件的 hot100 项目显示总开关关闭；读取/生成偏好保留但禁用 | 通过 |
+| v1 迁移 | HammerTest 的三条 Phase 9 记录迁移到 v2 后总开关、读取和生成均保持开启 | 通过 |
+| 关闭隔离 | 关闭 HammerTest 项目记忆后新建聊天，真实 Fast 在 0 工具调用下明确回答不知道 `PHASE9_MEMORY_MARKER` | 通过 |
+| 开启召回 | 重新开启后另建聊天，真实 Fast 在 0 工具调用下准确回答 `phase9-counter-contract`、`expectedCounter=42` 与 `model_inference` 来源 | 通过 |
+| 上下文成本 | 设置页显示最近只注入 3 条、约 285 tokens；默认上限为 6 条/3000 字符，没有装入整份记忆库 | 通过 |
+| 导出隐私 | 正式包直接生成 `HammerTest-hammercode-memory.json`，模式 `0600`、2270 字节、3 条记录、SHA-256 校验有效；不含工作区绝对路径和本地 session/turn/tool/subtask 标识 | 通过 |
+| 幂等导入 | 通过正式文件面板导入同一批三条记录，结果为导入 0 条、跳过 3 条；当前项目记录数保持 3 | 通过 |
+
+### 模型连接与系统界面
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| Fast 检测 | 官方 `/models` 返回 3 个模型，耗时 197 ms；应用保持绿色已配置状态 | 通过 |
+| Strong 检测 | 官方 `/models` 返回 10 个模型，耗时 182 ms；`glm-5.3-flash` 可选 | 通过 |
+| 默认槽重命名 | Fast 在正式设置页改名为“日常模型”并成功恢复为 Fast；稳定引用和已有聊天不变 | 通过 |
+| 新增连接入口 | 表单只要求名称、Fast/Strong 档位、API URL、API Key；检测成功前模型与保存按钮不可用。协议保存/删除和加密由自动测试覆盖，本轮未留下演示连接 | 通过 |
+| 圆环浮窗 | 实际 Electron 窗口悬停显示深色小浮窗，包含百分比、`k/k` 窗口、自动阈值与压缩次数；圆环无点击行为 | 通过 |
+
+### Finder 路径与最终交付
+
+macOS 的旧 LaunchServices 记录曾指向会被普通构建清理的 `dist/mac-arm64/HammerCode.app`，系统因此弹出“找不到该文件”；另外相对保存路径会继承访达的失效位置。打包输出现已独立到 `release/`，工作区与导入面板使用存在的绝对默认路径，项目记忆导出改为在当前工作区用 `wx` 原子创建并自动使用 `-2/-3` 避免覆盖。最终从 `/Users/norten/Developer/HammerCode/release/mac-arm64/HammerCode.app` 启动成功，renderer URL 指向该包内的 `app.asar`，没有再次出现失效路径弹窗。
+
+最终 `npm run typecheck`、26 个测试文件共 150 项测试、生产构建和 Apple Silicon 目录包全部通过。HammerTest 根目录只保留最终便携文件；调试阶段的旧导出已移动到 `Phase10Memory`，不会污染演示列表。

@@ -6,6 +6,7 @@ import type {
   ModelTier,
   PermissionMode,
   ModelRef,
+  ProjectMemorySettings,
   TerminationReason,
   ToolMessage,
   ToolResult,
@@ -197,6 +198,7 @@ export class AgentRunner {
       maxRunTimeMs,
     );
     try {
+      await this.captureProjectMemorySettings();
       await this.moveTo("requesting", startReason);
       await this.compactPendingContext(abort.signal);
       await this.runLoop(abort.signal);
@@ -371,7 +373,7 @@ export class AgentRunner {
           messages,
           tools: [
             ...this.dependencies.tools.definitions,
-            ...(this.dependencies.projectMemory ? PROJECT_MEMORY_TOOL_DEFINITIONS : []),
+            ...this.projectMemoryToolDefinitions(),
             ...(this.dependencies.subagents ? [SUBAGENT_TOOL_DEFINITION] : []),
           ],
           signal,
@@ -656,7 +658,7 @@ export class AgentRunner {
         trace.result = result;
       }
     }
-    if (result.ok && this.dependencies.projectMemory) {
+    if (result.ok && this.dependencies.projectMemory && this.canGenerateProjectMemory()) {
       try {
         const memory = await this.dependencies.projectMemory.recordToolFact({
           workspaceRoot: session.workspaceRoot,
@@ -695,10 +697,14 @@ export class AgentRunner {
       const memory = this.dependencies.projectMemory;
       if (!memory) throw new HammerCodeError("项目记忆当前不可用", "PROJECT_MEMORY_UNAVAILABLE", true);
       if (call.name === "search_project_memory") {
+        if (!this.canUseProjectMemory()) {
+          throw new HammerCodeError("本轮未启用项目记忆读取", "PROJECT_MEMORY_USE_DISABLED", true);
+        }
         const args = parseProjectMemorySearch(call.arguments);
+        const settings = this.currentTurn().projectMemorySettings!;
         const recall = await memory.retrieve(session.workspaceRoot, args.query, {
-          maxRecords: args.max_records,
-          maxCharacters: 6_000,
+          maxRecords: Math.min(args.max_records, settings.maxRecallRecords),
+          maxCharacters: settings.maxRecallCharacters,
         });
         result = {
           ok: true,
@@ -708,6 +714,9 @@ export class AgentRunner {
           metadata: { records: recall.records.length, characters: recall.characterCount },
         };
       } else {
+        if (!this.canGenerateProjectMemory()) {
+          throw new HammerCodeError("本轮未启用项目记忆生成", "PROJECT_MEMORY_GENERATION_DISABLED", true);
+        }
         const args = parseProjectMemoryWrite(call.arguments);
         const record = await memory.rememberInference({
           workspaceRoot: session.workspaceRoot,
@@ -843,13 +852,24 @@ export class AgentRunner {
   }
 
   private async systemPromptWithProjectMemory(session: AgentSession): Promise<string> {
-    if (!this.dependencies.projectMemory) return this.options.systemPrompt;
+    const metrics = this.currentTurn().metrics!;
+    metrics.projectMemoryRecords = 0;
+    metrics.projectMemoryCharacters = 0;
+    metrics.projectMemoryTokens = 0;
+    if (!this.dependencies.projectMemory || !this.canUseProjectMemory()) return this.options.systemPrompt;
+    const settings = this.currentTurn().projectMemorySettings!;
     const latestUser = [...session.messages].reverse().find((message) => message.role === "user");
     const recall = await this.dependencies.projectMemory.retrieve(
       session.workspaceRoot,
       `${session.task}\n${latestUser?.content ?? ""}`,
-      { maxRecords: 12, maxCharacters: 6_000 },
+      {
+        maxRecords: settings.maxRecallRecords,
+        maxCharacters: settings.maxRecallCharacters,
+      },
     );
+    metrics.projectMemoryRecords = recall.records.length;
+    metrics.projectMemoryCharacters = recall.characterCount;
+    metrics.projectMemoryTokens = estimateTokens(recall.rendered);
     if (!recall.rendered) return this.options.systemPrompt;
     return [
       this.options.systemPrompt,
@@ -946,8 +966,50 @@ export class AgentRunner {
       contextTokenBudget: this.options.contextTokenBudget,
       currentContextTokens: 0,
       contextCompactions: autoCompacted ? 1 : 0,
+      projectMemoryRecords: 0,
+      projectMemoryCharacters: 0,
+      projectMemoryTokens: 0,
       maxRunTimeMs: this.maxRunTimeMs(),
     };
+  }
+
+  private async captureProjectMemorySettings(): Promise<void> {
+    const disabled: ProjectMemorySettings = {
+      enabled: false,
+      useMemories: false,
+      generateMemories: false,
+      maxRecallRecords: 6,
+      maxRecallCharacters: 3_000,
+    };
+    const memory = this.dependencies.projectMemory;
+    if (!memory) {
+      this.currentTurn().projectMemorySettings = disabled;
+      return;
+    }
+    try {
+      this.currentTurn().projectMemorySettings = await memory.settings(this.requireSession().workspaceRoot);
+    } catch {
+      this.currentTurn().projectMemorySettings = disabled;
+    }
+  }
+
+  private canUseProjectMemory(): boolean {
+    const settings = this.currentTurn().projectMemorySettings;
+    return Boolean(settings?.enabled && settings.useMemories);
+  }
+
+  private canGenerateProjectMemory(): boolean {
+    const settings = this.currentTurn().projectMemorySettings;
+    return Boolean(settings?.enabled && settings.generateMemories);
+  }
+
+  private projectMemoryToolDefinitions() {
+    if (!this.dependencies.projectMemory) return [];
+    return PROJECT_MEMORY_TOOL_DEFINITIONS.filter((definition) => {
+      if (definition.function.name === "search_project_memory") return this.canUseProjectMemory();
+      if (definition.function.name === "remember_project") return this.canGenerateProjectMemory();
+      return false;
+    });
   }
 
   private shouldAutoCompact(session: AgentSession): boolean {

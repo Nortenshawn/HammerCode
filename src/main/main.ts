@@ -92,6 +92,12 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:save-model-connection", (input: unknown) =>
     appController.saveModelConnection(input),
   );
+  handle("hammercode:rename-model-connection", (connectionId: unknown, name: unknown) =>
+    appController.renameModelConnection(connectionId, name),
+  );
+  handle("hammercode:delete-model-connection", (connectionId: unknown) =>
+    appController.deleteModelConnection(connectionId),
+  );
   handle("hammercode:compress-context", () => appController.compressContext());
   handle("hammercode:open-side-chat", () => appController.openSideChat());
   handle("hammercode:send-side-chat", (sideChatId: unknown, content: unknown) =>
@@ -107,6 +113,11 @@ function registerIpc(appController: AppController): void {
     appController.searchWorkspaceEntries(query),
   );
   handle("hammercode:list-project-memory", () => appController.listProjectMemory());
+  handle("hammercode:update-project-memory-settings", (settings: unknown) =>
+    appController.updateProjectMemorySettings(settings),
+  );
+  handle("hammercode:export-project-memory", () => appController.exportProjectMemory());
+  handle("hammercode:import-project-memory", () => appController.importProjectMemory());
   handle("hammercode:delete-project-memory", (memoryId: unknown) =>
     appController.deleteProjectMemory(memoryId),
   );

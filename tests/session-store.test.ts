@@ -297,6 +297,9 @@ describe("session persistence", () => {
       contextTokenBudget: 120000,
       currentContextTokens: 2400,
       contextCompactions: 1,
+      projectMemoryRecords: 0,
+      projectMemoryCharacters: 0,
+      projectMemoryTokens: 0,
       maxRunTimeMs: 1800000,
     };
     session.contextMemory = {
@@ -322,6 +325,22 @@ describe("session persistence", () => {
     expect(restored?.contextMemory).toMatchObject({ summary: "当前聊天的压缩记忆", mode: "explicit", compactionCount: 1 });
     expect(restored?.turns[0].planCheckpoints?.[0]).toMatchObject({ id: "checkpoint_1" });
     expect(restored?.turns[0].retryEvents?.[0]).toMatchObject({ reason: "server_error" });
+  });
+
+  it("preserves current connection references across restarts", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const session = createSession("session_connection", "使用导入模型", "2026-08-29T04:00:00.000Z");
+    const ref = "connection:00000000-0000-4000-8000-000000000001" as const;
+    session.modelRef = ref;
+    session.turns[0].modelRef = ref;
+
+    const store = new SessionStore(directory);
+    await store.save(session);
+
+    const restored = await store.load();
+    expect(restored?.modelRef).toBe(ref);
+    expect(restored?.turns[0].modelRef).toBe(ref);
   });
 
   it("migrates the legacy active-session file without losing the chat", async () => {

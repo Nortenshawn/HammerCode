@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,6 +28,34 @@ afterEach(async () => {
 });
 
 describe("project memory store", () => {
+  it("keeps new projects disabled and migrates Phase 9 files without changing their behavior", async () => {
+    const root = await workspace("settings");
+    const storage = await workspace("settings-store");
+    const { ids, clock } = fixtures();
+    const store = new ProjectMemoryStore(storage, clock, ids);
+    expect((await store.snapshot(root)).settings).toEqual({
+      enabled: false,
+      useMemories: true,
+      generateMemories: true,
+      maxRecallRecords: 6,
+      maxRecallCharacters: 3_000,
+    });
+
+    const now = "2026-08-29T00:00:00.000Z";
+    const legacyPath = path.join(storage, `${createHash("sha256").update(root).digest("hex")}.json`);
+    await writeFile(legacyPath, JSON.stringify({
+      version: 1,
+      workspaceRoot: root,
+      revision: 0,
+      records: [],
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const migrated = new ProjectMemoryStore(storage, clock, ids);
+    expect((await migrated.snapshot(root)).settings.enabled).toBe(true);
+    expect(JSON.parse(await readFile(legacyPath, "utf8"))).toMatchObject({ version: 2, settings: { enabled: true } });
+  });
+
   it("persists records per normalized workspace without leaking across projects", async () => {
     const first = await workspace("first");
     const second = await workspace("second");
@@ -176,5 +205,72 @@ describe("project memory store", () => {
     const snapshot = await store.snapshot(root);
     expect(snapshot.records).toHaveLength(12);
     expect(new Set(snapshot.records.map((record) => record.subject)).size).toBe(12);
+  });
+
+  it("exports portable data and imports it idempotently into only the selected project", async () => {
+    const source = await workspace("export-source");
+    const target = await workspace("export-target");
+    const untouched = await workspace("export-untouched");
+    const storage = await workspace("export-store");
+    const { ids, clock } = fixtures();
+    const store = new ProjectMemoryStore(storage, clock, ids);
+    await store.rememberUser({
+      workspaceRoot: source,
+      kind: "decision",
+      subject: "package-manager",
+      statement: "使用 npm",
+      source: {
+        type: "user",
+        label: "用户确认 · session_source/turn_source",
+        sessionId: "source-session",
+      },
+    });
+
+    const exported = await store.exportData(source);
+    expect(exported).not.toContain(source);
+    expect(exported).not.toContain(target);
+    expect(exported).not.toContain("source-session");
+    expect(exported).not.toContain("session_source");
+    expect(JSON.parse(exported)).toMatchObject({
+      format: "hammercode-project-memory",
+      version: 1,
+      recordsChecksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    const first = await store.importData(target, exported);
+    expect(first).toMatchObject({ imported: 1, skipped: 0, conflicted: 0 });
+    expect(first.snapshot.records[0]).toMatchObject({
+      workspaceRoot: target,
+      subject: "package-manager",
+      source: { label: "导入 · 用户确认" },
+    });
+    const second = await store.importData(target, exported);
+    expect(second).toMatchObject({ imported: 0, skipped: 1 });
+    expect((await store.snapshot(untouched)).records).toHaveLength(0);
+  });
+
+  it("rejects damaged exports atomically and marks imported verification as stale", async () => {
+    const source = await workspace("damaged-source");
+    const target = await workspace("damaged-target");
+    const storage = await workspace("damaged-store");
+    const { ids, clock } = fixtures();
+    const store = new ProjectMemoryStore(storage, clock, ids);
+    await store.recordToolFact({
+      workspaceRoot: source,
+      sessionId: "s1",
+      turnId: "t1",
+      call: { id: "test_1", name: "run_command", arguments: '{"command":"npm test"}' },
+      result: { ok: true, summary: "测试通过", output: "1 test passed" },
+    });
+    const exported = await store.exportData(source);
+    const imported = await store.importData(target, exported);
+    expect(imported.snapshot.records[0]).toMatchObject({
+      kind: "verification",
+      status: "invalidated",
+      invalidatedReason: "导入的验证结果不适用于当前工作区，必须重新运行验证",
+    });
+
+    const damaged = JSON.stringify({ ...JSON.parse(exported), recordsChecksum: "0".repeat(64) });
+    await expect(store.importData(target, damaged)).rejects.toMatchObject({ code: "PROJECT_MEMORY_IMPORT_CHECKSUM_MISMATCH" });
+    expect((await store.snapshot(target)).records).toHaveLength(1);
   });
 });

@@ -9,9 +9,9 @@ import type {
   AssistantMessage,
   EphemeralSideChatState,
   ModelRef,
-  ModelConnectionTestResult,
   ModelTier,
   PermissionMode,
+  PublicModelConnection,
   RendererEvent,
   SessionStatus,
   SessionSummary,
@@ -518,6 +518,106 @@ function ChatList({ sessions, activeId, disabled, onSelect }: { sessions: Sessio
   ))}</div>;
 }
 
+function ModelConnectionEditor({
+  connection,
+  busy,
+  onBusyChange,
+  onSaved,
+  onNotice,
+}: {
+  connection?: PublicModelConnection;
+  busy: boolean;
+  onBusyChange: (busy: boolean) => void;
+  onSaved?: () => void;
+  onNotice: (notice: { level: "info" | "error"; text: string }) => void;
+}) {
+  const [name, setName] = useState(connection?.name ?? "新连接");
+  const [apiBaseUrl, setApiBaseUrl] = useState(connection?.apiBaseUrl ?? "");
+  const [apiKey, setApiKey] = useState("");
+  const [tier, setTier] = useState<ModelTier>(connection?.tier ?? "fast");
+  const [models, setModels] = useState<string[]>(connection ? [connection.model] : []);
+  const [model, setModel] = useState(connection?.model ?? "");
+  const [action, setAction] = useState<"test" | "save" | "rename" | "delete" | null>(null);
+
+  useEffect(() => {
+    if (!connection) return;
+    setName(connection.name);
+    setApiBaseUrl(connection.apiBaseUrl);
+    setTier(connection.tier);
+    setModels((current) => current.includes(connection.model) ? current : [connection.model, ...current]);
+    setModel(connection.model);
+  }, [connection?.id, connection?.name, connection?.apiBaseUrl, connection?.tier, connection?.model]);
+
+  const run = async (nextAction: "test" | "save" | "rename" | "delete") => {
+    if (busy || action) return;
+    setAction(nextAction);
+    onBusyChange(true);
+    try {
+      if (nextAction === "test") {
+        const result = await window.hammerCode.testModelConnection({
+          connectionId: connection?.id,
+          apiBaseUrl,
+          apiKey: apiKey.trim() || undefined,
+        });
+        setApiBaseUrl(result.apiBaseUrl);
+        setModels(result.models);
+        if (!result.models.includes(model)) setModel(result.models[0] ?? "");
+        onNotice({ level: "info", text: `连接可用，发现 ${result.models.length} 个模型，耗时 ${result.latencyMs} ms。` });
+      } else if (nextAction === "save") {
+        const saved = await window.hammerCode.saveModelConnection({
+          connectionId: connection?.id,
+          name,
+          tier,
+          model,
+          apiBaseUrl,
+          apiKey: apiKey.trim() || undefined,
+        });
+        setApiKey("");
+        onNotice({ level: "info", text: `${saved.name} 已保存并通过连接检测。` });
+        onSaved?.();
+      } else if (nextAction === "rename" && connection) {
+        const renamed = await window.hammerCode.renameModelConnection(connection.id, name);
+        onNotice({ level: "info", text: `已重命名为 ${renamed.name}。` });
+      } else if (nextAction === "delete" && connection) {
+        await window.hammerCode.deleteModelConnection(connection.id);
+        onNotice({ level: "info", text: `${connection.name} 已删除。` });
+      }
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setAction(null);
+      onBusyChange(false);
+    }
+  };
+
+  const status = connection?.connectionStatus ?? "missing";
+  const statusLabel = status === "connected" ? "已连接" : status === "configured" ? "已配置" : status === "error" ? "检测失败" : "未配置";
+  const canUseExistingKey = Boolean(connection?.hasApiKey);
+  const canProbe = Boolean(apiBaseUrl.trim() && (apiKey.trim() || canUseExistingKey));
+  const canSave = Boolean(canProbe && name.trim() && model && (connection || models.length > 0));
+
+  return <section className="settings-card model-settings-card">
+    <div className="settings-card-title"><div><h2>{connection?.name ?? "新增连接"}</h2><p>{connection?.kind === "default" ? "默认模型槽" : "OpenAI-compatible 连接"} · {tier === "fast" ? "Fast" : "Strong"}</p></div><span className={`model-status status-${status}`}><i className={`connection-dot ${status === "missing" ? "missing" : status === "error" ? "error" : "ready"}`}/>{statusLabel}</span></div>
+    <div className="api-form connection-editor-form">
+      <div className="connection-form-grid">
+        <label><span>名称</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={60} autoComplete="off"/></label>
+        <label><span>运行档位</span><select value={tier} disabled={connection?.kind === "default"} onChange={(event) => setTier(event.target.value as ModelTier)}><option value="fast">Fast</option><option value="strong">Strong</option></select></label>
+      </div>
+      <label><span>API URL</span><input type="url" value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} autoComplete="off" spellCheck={false}/></label>
+      <label><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={canUseExistingKey ? "已安全保存；留空则继续使用" : "请输入 API Key"} autoComplete="new-password" spellCheck={false}/></label>
+      <label><span>模型</span><select value={model} disabled={models.length === 0} onChange={(event) => setModel(event.target.value)}>{models.length === 0 ? <option value="">先检测连接</option> : models.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+      <div className="api-form-actions connection-actions">
+        {connection && <button className="secondary-action" disabled={!name.trim() || name.trim() === connection.name || busy} onClick={() => void run("rename")}>{action === "rename" ? "重命名中…" : "重命名"}</button>}
+        {connection?.kind === "custom" && <button className="danger-action" disabled={busy} onClick={() => void run("delete")}>{action === "delete" ? "删除中…" : "删除"}</button>}
+        <span/>
+        <button className="secondary-action" disabled={!canProbe || busy} onClick={() => void run("test")}>{action === "test" ? "正在检测…" : "检测"}</button>
+        <button className="primary-action" disabled={!canSave || busy} onClick={() => void run("save")}>{action === "save" ? "正在保存…" : "保存"}</button>
+      </div>
+    </div>
+    {connection && (connection.connectionMessage || connection.lastCheckedAt) && <div className={`api-test-result ${status === "error" ? "failed" : ""}`}><span className={`connection-dot ${status === "error" ? "error" : "ready"}`}/><div><strong>{statusLabel}</strong><p>{connection.apiBaseUrl}{connection.connectionMessage ? ` · ${connection.connectionMessage}` : ""}</p>{connection.lastCheckedAt && <small>最近检测 {new Date(connection.lastCheckedAt).toLocaleString("zh-CN")}</small>}</div></div>}
+  </section>;
+}
+
 function SettingsView({
   bootstrap,
   onNotice,
@@ -525,41 +625,11 @@ function SettingsView({
   bootstrap: AppBootstrap;
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
 }) {
-  const [urls, setUrls] = useState<Record<ModelTier, string>>(() => ({
-    fast: bootstrap.config.models.fast.apiBaseUrl,
-    strong: bootstrap.config.models.strong.apiBaseUrl,
-  }));
-  const [keys, setKeys] = useState<Record<ModelTier, string>>({ fast: "", strong: "" });
-  const [checking, setChecking] = useState<{ tier: ModelTier; mode: "test" | "save" } | null>(null);
-  const [lastResults, setLastResults] = useState<Partial<Record<ModelTier, ModelConnectionTestResult>>>({});
+  const [connectionBusy, setConnectionBusy] = useState(false);
+  const [showNewConnection, setShowNewConnection] = useState(false);
   const [deletingMemory, setDeletingMemory] = useState<string | null>(null);
-
-  useEffect(() => {
-    setUrls({
-      fast: bootstrap.config.models.fast.apiBaseUrl,
-      strong: bootstrap.config.models.strong.apiBaseUrl,
-    });
-  }, [bootstrap.config.models.fast.apiBaseUrl, bootstrap.config.models.strong.apiBaseUrl]);
-
-  const submitConnection = async (tier: ModelTier, mode: "test" | "save") => {
-    if (!urls[tier].trim() || checking) return;
-    setChecking({ tier, mode });
-    setLastResults((items) => ({ ...items, [tier]: undefined }));
-    try {
-      const input = { tier, apiBaseUrl: urls[tier], apiKey: keys[tier].trim() || undefined };
-      const result = mode === "test"
-        ? await window.hammerCode.testModelConnection(input)
-        : await window.hammerCode.saveModelConnection(input);
-      setUrls((items) => ({ ...items, [tier]: result.apiBaseUrl }));
-      setLastResults((items) => ({ ...items, [tier]: result }));
-      onNotice({ level: "info", text: `${tier === "fast" ? "Fast" : "Strong"} 连接成功：${result.model}，耗时 ${result.latencyMs} ms。` });
-    } catch (error) {
-      onNotice({ level: "error", text: userFacingError(error) });
-    } finally {
-      setKeys((items) => ({ ...items, [tier]: "" }));
-      setChecking(null);
-    }
-  };
+  const [savingMemory, setSavingMemory] = useState(false);
+  const [transferringMemory, setTransferringMemory] = useState<"import" | "export" | null>(null);
 
   const deleteMemory = async (memoryId: string) => {
     if (deletingMemory) return;
@@ -574,26 +644,57 @@ function SettingsView({
     }
   };
 
+  const updateMemorySettings = async (next: Partial<NonNullable<AppBootstrap["projectMemory"]>["settings"]>) => {
+    const current = bootstrap.projectMemory?.settings;
+    if (!current || savingMemory) return;
+    setSavingMemory(true);
+    try {
+      await window.hammerCode.updateProjectMemorySettings({ ...current, ...next });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setSavingMemory(false);
+    }
+  };
+
+  const transferMemory = async (mode: "import" | "export") => {
+    if (transferringMemory) return;
+    setTransferringMemory(mode);
+    try {
+      const result = mode === "import"
+        ? await window.hammerCode.importProjectMemory()
+        : await window.hammerCode.exportProjectMemory();
+      if (result.status === "cancelled") return;
+      onNotice({
+        level: "info",
+        text: result.status === "exported"
+          ? `已导出 ${result.recordCount ?? 0} 条项目记忆到 ${result.fileName ?? "文件"}。`
+          : `已从 ${result.fileName ?? "文件"} 导入 ${result.imported ?? 0} 条，跳过 ${result.skipped ?? 0} 条重复记录。`,
+      });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setTransferringMemory(null);
+    }
+  };
+
   return (
     <section className="settings-view">
-      <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>HammerCode 只保留 Fast 与 Strong 两个固定模型。API Key 由 macOS 安全存储加密，重启后仍可使用，但不会回显到界面。</p></header>
-      {(["fast", "strong"] as ModelTier[]).map((tier) => {
-        const model = bootstrap.config.models[tier];
-        const activeCheck = checking?.tier === tier ? checking.mode : null;
-        const statusLabel = model.connectionStatus === "connected" ? "已连接" : model.connectionStatus === "configured" ? "已配置" : model.connectionStatus === "error" ? "检测失败" : "未配置";
-        const canUseExistingKey = model.hasApiKey;
-        return <section className="settings-card model-settings-card" key={tier}>
-          <div className="settings-card-title"><div><h2>{tier === "fast" ? "Fast" : "Strong"} · {model.model}</h2><p>{tier === "fast" ? "日常快速任务，DeepSeek OpenAI-compatible 接口。" : "复杂任务，智谱 OpenAI-compatible 接口。"}</p></div><span className={`model-status status-${model.connectionStatus}`}><i className={`connection-dot ${model.connectionStatus === "missing" ? "missing" : model.connectionStatus === "error" ? "error" : "ready"}`}/>{statusLabel}</span></div>
-          <div className="api-form">
-            <label><span>API URL</span><input type="url" value={urls[tier]} onChange={(event) => setUrls((items) => ({ ...items, [tier]: event.target.value }))} autoComplete="off" spellCheck={false}/></label>
-            <label><span>API Key</span><input type="password" value={keys[tier]} onChange={(event) => setKeys((items) => ({ ...items, [tier]: event.target.value }))} placeholder={canUseExistingKey ? "已安全保存；留空则继续使用" : "请输入 API Key"} autoComplete="new-password" spellCheck={false}/></label>
-            <div className="api-form-actions"><button className="secondary-action" disabled={!urls[tier].trim() || (!keys[tier].trim() && !canUseExistingKey) || Boolean(checking)} onClick={() => void submitConnection(tier, "test")}>{activeCheck === "test" ? "正在检测…" : "检测连接"}</button><button className="primary-action" disabled={!urls[tier].trim() || (!keys[tier].trim() && !canUseExistingKey) || Boolean(checking)} onClick={() => void submitConnection(tier, "save")}>{activeCheck === "save" ? "正在保存…" : "保存并检测"}</button></div>
-          </div>
-          {(lastResults[tier] || model.connectionMessage || model.lastCheckedAt) && <div className={`api-test-result ${model.connectionStatus === "error" ? "failed" : ""}`}><span className={`connection-dot ${model.connectionStatus === "error" ? "error" : "ready"}`}/><div><strong>{lastResults[tier] ? "连接可用" : statusLabel}</strong><p>{lastResults[tier]?.apiBaseUrl ?? model.apiBaseUrl}{model.connectionMessage ? ` · ${model.connectionMessage}` : ""}</p>{model.lastCheckedAt && <small>最近检测 {new Date(model.lastCheckedAt).toLocaleString("zh-CN")}</small>}</div></div>}
-        </section>;
-      })}
+      <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>Fast 与 Strong 是默认连接，也可以重命名。你还可以添加其他 OpenAI-compatible 接口；API Key 只在主进程中加密保存，不会回显。</p></header>
+      <div className="settings-section-heading"><div><h2>模型连接</h2><p>检测 URL 后选择服务端返回的模型。</p></div><button className="secondary-action" disabled={connectionBusy || showNewConnection} onClick={() => setShowNewConnection(true)}>新增连接</button></div>
+      {bootstrap.config.connections.map((connection) => <ModelConnectionEditor key={connection.id} connection={connection} busy={connectionBusy} onBusyChange={setConnectionBusy} onNotice={onNotice}/>)}
+      {showNewConnection && <div className="new-connection-wrap"><ModelConnectionEditor busy={connectionBusy} onBusyChange={setConnectionBusy} onSaved={() => setShowNewConnection(false)} onNotice={onNotice}/><button className="cancel-new-connection" disabled={connectionBusy} onClick={() => setShowNewConnection(false)}>取消新增</button></div>}
       <section className="settings-card memory-settings-card">
-        <div className="settings-card-title"><div><h2>项目记忆</h2><p>当前工作区跨聊天共享。每条记录保留来源、置信级别和失效状态；删除不会影响聊天原始历史。</p></div><span>{bootstrap.projectMemory?.records.filter((record) => record.status === "active").length ?? 0} 条有效</span></div>
+        <div className="settings-card-title"><div><h2>项目记忆</h2><p>只在当前项目的聊天之间共享，不会跨项目使用。关闭后保留已有记录，但下一轮不再读取或生成。</p></div><span>{bootstrap.projectMemory?.records.filter((record) => record.status === "active").length ?? 0} 条有效</span></div>
+        {bootstrap.workspaceRoot && bootstrap.projectMemory && <div className="memory-controls">
+          <label className="setting-switch"><span><strong>启用项目记忆</strong><small>新项目默认关闭</small></span><input type="checkbox" checked={bootstrap.projectMemory.settings.enabled} disabled={savingMemory} onChange={(event) => void updateMemorySettings({ enabled: event.target.checked })}/><i aria-hidden="true"/></label>
+          <div className="memory-subcontrols">
+            <label className="setting-switch"><span><strong>读取记忆</strong><small>向新一轮注入相关记录</small></span><input type="checkbox" checked={bootstrap.projectMemory.settings.useMemories} disabled={!bootstrap.projectMemory.settings.enabled || savingMemory} onChange={(event) => void updateMemorySettings({ useMemories: event.target.checked })}/><i aria-hidden="true"/></label>
+            <label className="setting-switch"><span><strong>生成记忆</strong><small>记录文件变更、验证和明确决定</small></span><input type="checkbox" checked={bootstrap.projectMemory.settings.generateMemories} disabled={!bootstrap.projectMemory.settings.enabled || savingMemory} onChange={(event) => void updateMemorySettings({ generateMemories: event.target.checked })}/><i aria-hidden="true"/></label>
+          </div>
+          <div className="memory-budget"><span>每轮最多 {bootstrap.projectMemory.settings.maxRecallRecords} 条 · {bootstrap.projectMemory.settings.maxRecallCharacters.toLocaleString("zh-CN")} 字符</span><span>{bootstrap.session?.turns.at(-1)?.metrics ? `最近注入 ${bootstrap.session.turns.at(-1)!.metrics!.projectMemoryRecords} 条 · 约 ${bootstrap.session.turns.at(-1)!.metrics!.projectMemoryTokens} tokens` : "尚无召回记录"}</span></div>
+          <div className="memory-transfer-actions"><button className="secondary-action" disabled={Boolean(transferringMemory)} onClick={() => void transferMemory("import")}>{transferringMemory === "import" ? "正在导入…" : "导入"}</button><button className="secondary-action" disabled={Boolean(transferringMemory)} onClick={() => void transferMemory("export")}>{transferringMemory === "export" ? "正在导出…" : "导出"}</button></div>
+        </div>}
         {!bootstrap.workspaceRoot ? <p className="memory-empty">选择工作区后可查看项目记忆。</p> : !bootstrap.projectMemory?.records.length ? <p className="memory-empty">这个工作区还没有项目记忆。</p> : <div className="memory-list">
           {bootstrap.projectMemory.records.map((record) => <article className={`memory-item memory-${record.status}`} key={record.id}>
             <div><strong>{record.subject}</strong><span>{record.kind === "decision" ? "决定" : record.kind === "constraint" ? "约束" : record.kind === "verification" ? "验证" : "事实"} · {record.confidence === "tool_verified" ? "工具核验" : record.confidence === "user_confirmed" ? "用户确认" : "模型推断"} · {record.status === "active" ? "有效" : record.status === "conflicted" ? "冲突" : record.status === "invalidated" ? "已失效" : "已删除"}</span></div>
@@ -626,7 +727,7 @@ function ContextRing({
   const tooltip = compacting
     ? "正在使用模型压缩上下文，完成前不会替换现有记忆"
     : `已用 ${Math.round(ratio * 100)}% · 记忆窗口 ${formatMemoryTokens(used)}/${formatMemoryTokens(budget)} · 自动压缩 ${Math.round(autoCompactRatio * 100)}% · 已压缩 ${compactions} 次`;
-  return <span className={`context-ring ${session ? "" : "empty"} ${compacting ? "compacting" : ""}`} title={tooltip} role="img" aria-label={tooltip}>
+  return <span className={`context-ring ${session ? "" : "empty"} ${compacting ? "compacting" : ""}`} data-tooltip={tooltip} role="img" aria-label={tooltip}>
     <svg viewBox="0 0 22 22" aria-hidden="true"><circle className="context-ring-track" cx="11" cy="11" r={radius}/><circle className="context-ring-value" cx="11" cy="11" r={radius} strokeDasharray={circumference} strokeDashoffset={circumference * (1 - ratio)}/></svg>
   </span>;
 }

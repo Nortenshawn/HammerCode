@@ -4,7 +4,6 @@ import { z } from "zod";
 import { closeUnresolvedToolCalls } from "../core/session-recovery";
 import { fallbackChatTitle } from "../shared/chat-title";
 import {
-  BUILTIN_MODEL_REFS,
   MODEL_TIERS,
   PERMISSION_MODES,
   SESSION_STATUSES,
@@ -126,7 +125,17 @@ const metricsSchema = z.object({
   contextTokenBudget: z.number().int().positive(),
   currentContextTokens: z.number().int().nonnegative().optional(),
   contextCompactions: z.number().int().nonnegative(),
+  projectMemoryRecords: z.number().int().nonnegative().default(0),
+  projectMemoryCharacters: z.number().int().nonnegative().default(0),
+  projectMemoryTokens: z.number().int().nonnegative().default(0),
   maxRunTimeMs: z.number().int().positive(),
+});
+const projectMemorySettingsSchema = z.object({
+  enabled: z.boolean(),
+  useMemories: z.boolean(),
+  generateMemories: z.boolean(),
+  maxRecallRecords: z.number().int().min(1).max(20),
+  maxRecallCharacters: z.number().int().min(500).max(20_000),
 });
 const contextMemorySchema = z.object({
   version: z.literal(1),
@@ -156,6 +165,7 @@ const turnSchema = z.object({
   planCheckpoints: z.array(planCheckpointSchema).optional(),
   retryEvents: z.array(retryEventSchema).optional(),
   metrics: metricsSchema.optional(),
+  projectMemorySettings: projectMemorySettingsSchema.optional(),
 });
 const fileChangeSchema = z.object({
   id: z.string(),
@@ -239,7 +249,7 @@ const subagentSchema = z.object({
   task: z.string(),
   status: z.enum(["pending", "requesting", "executing_tool", "completed", "cancelled", "failed"]),
   modelTier: z.enum(MODEL_TIERS),
-  modelRef: z.enum(BUILTIN_MODEL_REFS),
+  modelRef: z.string().regex(/^(?:builtin:(?:fast|strong)|connection:[0-9a-f-]{36})$/i),
   parentPermissionMode: z.enum(PERMISSION_MODES),
   effectivePermission: z.enum(["read_only", "proposal_only"]),
   budget: subagentBudgetSchema,
@@ -361,6 +371,12 @@ function builtinModelRef(tier: "fast" | "strong"): ModelRef {
   return tier === "fast" ? "builtin:fast" : "builtin:strong";
 }
 
+function normalizeModelRef(ref: string | undefined, tier: "fast" | "strong"): ModelRef {
+  if (ref === builtinModelRef(tier)) return ref;
+  if (/^connection:[0-9a-f-]{36}$/i.test(ref ?? "")) return ref as ModelRef;
+  return builtinModelRef(tier);
+}
+
 function inferAuthorization(trace: ParsedSession["toolTraces"][number]): ToolAuthorization {
   if (trace.authorization) return trace.authorization;
   if (trace.status === "blocked") return "safety_blocked";
@@ -372,14 +388,14 @@ function inferAuthorization(trace: ParsedSession["toolTraces"][number]): ToolAut
 function normalizeSessionShape(parsed: ParsedSession): AgentSession {
   const rawMessages = parsed.messages.map((message) => ({ ...message }));
   const defaultModelTier = parsed.modelTier ?? parsed.turns?.at(-1)?.modelTier ?? "fast";
-  const defaultModelRef = builtinModelRef(defaultModelTier);
+  const defaultModelRef = normalizeModelRef(parsed.modelRef, defaultModelTier);
   const defaultPermissionMode =
     parsed.permissionMode ?? parsed.turns?.at(-1)?.permissionMode ?? "ask";
   let turns: AgentTurn[] =
     parsed.turns?.map((turn) => ({
       ...turn,
       modelTier: turn.modelTier ?? defaultModelTier,
-      modelRef: builtinModelRef(turn.modelTier ?? defaultModelTier),
+      modelRef: normalizeModelRef(turn.modelRef, turn.modelTier ?? defaultModelTier),
       permissionMode: turn.permissionMode ?? "ask",
       planCheckpoints: turn.planCheckpoints ?? [],
       retryEvents: turn.retryEvents ?? [],
@@ -438,7 +454,7 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
     task: parsed.task,
     title: parsed.title,
     modelTier: parsed.modelTier ?? turns.at(-1)?.modelTier ?? "fast",
-    modelRef: builtinModelRef(parsed.modelTier ?? turns.at(-1)?.modelTier ?? defaultModelTier),
+    modelRef: normalizeModelRef(parsed.modelRef, parsed.modelTier ?? turns.at(-1)?.modelTier ?? defaultModelTier),
     permissionMode: parsed.permissionMode ?? defaultPermissionMode,
     turns,
     activeTurnId,
@@ -464,6 +480,7 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
     } : undefined,
     subtasks: parsed.subtasks?.map((task) => ({
       ...task,
+      modelRef: normalizeModelRef(task.modelRef, task.modelTier),
       metrics: task.metrics ? {
         ...task.metrics,
         currentContextTokens: task.metrics.currentContextTokens ?? 0,

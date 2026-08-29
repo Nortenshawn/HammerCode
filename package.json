@@ -44,6 +44,9 @@
     "appId": "cn.edu.nju.hammercode",
     "productName": "HammerCode",
     "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
     "asar": true,
     "files": [
       "dist/**/*",

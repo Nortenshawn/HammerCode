@@ -1,5 +1,6 @@
 import path from "node:path";
-import { dialog, type BrowserWindow } from "electron";
+import { chmod, readFile, stat, writeFile } from "node:fs/promises";
+import { app, dialog, type BrowserWindow } from "electron";
 import { z } from "zod";
 import { AgentRunner } from "../core/agent-runner";
 import { fallbackChatTitle, generateChatTitle } from "../core/chat-title";
@@ -17,15 +18,17 @@ import { HammerCodeError } from "../core/types";
 import { isAbortError, redactSecrets, systemClock, toErrorMessage, uuidGenerator } from "../core/utils";
 import { WorkspaceWriteLeaseManager } from "../core/write-leases";
 import {
-  BUILTIN_MODEL_REFS,
   MODEL_TIERS,
   PERMISSION_MODES,
   type AgentSession,
   type AppBootstrap,
   type EphemeralSideChatState,
-  type ModelConnectionInput,
+  type ModelConnectionProbeInput,
+  type ModelConnectionSaveInput,
   type ModelRef,
   type ProjectMemorySnapshot,
+  type ProjectMemorySettings,
+  type ProjectMemoryTransferResult,
   type RendererEvent,
   type SessionSettings,
   type SessionSummary,
@@ -34,7 +37,7 @@ import {
 import { PendingApprovalGateway } from "./approval-gateway";
 import type { RuntimeConfig } from "./config";
 import { toPublicConfig } from "./config";
-import { ModelCredentialStore } from "./model-credential-store";
+import { connectionModelRef, ModelCredentialStore } from "./model-credential-store";
 import { ProjectMemoryStore } from "./project-memory-store";
 import { SessionStore } from "./session-store";
 import { searchWorkspace } from "./workspace-search";
@@ -43,7 +46,7 @@ const startTaskSchema = z
   .object({
     task: z.string().trim().min(1).max(100_000),
     modelTier: z.enum(MODEL_TIERS),
-    modelRef: z.enum(BUILTIN_MODEL_REFS).optional(),
+    modelRef: z.string().regex(/^(?:builtin:(?:fast|strong)|connection:[0-9a-f-]{36})$/i).optional(),
     permissionMode: z.enum(PERMISSION_MODES),
   })
   .strict();
@@ -53,14 +56,31 @@ const sessionIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const changeIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const workspaceRootSchema = z.string().min(1).max(4096);
 const workspaceQuerySchema = z.string().max(240);
-const modelConnectionSchema = z.object({
-  tier: z.enum(MODEL_TIERS),
+const modelConnectionProbeSchema = z.object({
+  connectionId: z.union([z.enum(["builtin:fast", "builtin:strong"]), z.string().uuid()]).optional(),
   apiBaseUrl: z.string().trim().min(1).max(2_048),
   apiKey: z.string().trim().min(1).max(16_384).optional(),
 }).strict();
+const modelConnectionSaveSchema = z.object({
+  connectionId: z.union([z.enum(["builtin:fast", "builtin:strong"]), z.string().uuid()]).optional(),
+  name: z.string().trim().min(1).max(60),
+  tier: z.enum(MODEL_TIERS),
+  model: z.string().trim().min(1).max(500),
+  apiBaseUrl: z.string().trim().min(1).max(2_048),
+  apiKey: z.string().trim().min(1).max(16_384).optional(),
+}).strict();
+const modelConnectionIdSchema = z.union([z.enum(["builtin:fast", "builtin:strong"]), z.string().uuid()]);
+const modelConnectionNameSchema = z.string().trim().min(1).max(60);
 const sideChatIdSchema = z.string().regex(/^btw_[a-zA-Z0-9_-]{1,200}$/);
 const sideChatContentSchema = z.string().trim().min(1).max(20_000);
 const projectMemoryIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
+const projectMemorySettingsSchema = z.object({
+  enabled: z.boolean(),
+  useMemories: z.boolean(),
+  generateMemories: z.boolean(),
+  maxRecallRecords: z.number().int().min(1).max(20),
+  maxRecallCharacters: z.number().int().min(500).max(20_000),
+}).strict();
 
 function toSummary(session: AgentSession): SessionSummary {
   return {
@@ -124,6 +144,7 @@ export class AppController {
     if (this.isUndoBusy()) throw new HammerCodeError("撤销运行时不能切换工作区", "SESSION_BUSY", true);
     const result = await dialog.showOpenDialog(this.window, {
       title: "选择 HammerCode 工作区",
+      defaultPath: this.workspaceRoot ?? app.getPath("documents"),
       properties: ["openDirectory", "createDirectory"],
       buttonLabel: "选择工作区",
     });
@@ -191,7 +212,7 @@ export class AppController {
     }
     this.resolveModel(settings.modelTier, settings.modelRef);
     session.modelTier = settings.modelTier;
-    session.modelRef = settings.modelRef ?? `builtin:${settings.modelTier}`;
+    session.modelRef = (settings.modelRef ?? `builtin:${settings.modelTier}`) as ModelRef;
     session.permissionMode = settings.permissionMode;
     session.updatedAt = systemClock.now().toISOString();
     await this.store.save(session);
@@ -315,18 +336,42 @@ export class AppController {
   }
 
   async testModelConnection(input: unknown) {
-    const parsed: ModelConnectionInput = modelConnectionSchema.parse(input);
-    return this.modelCredentials.test(parsed, this.config.models[parsed.tier]);
+    const parsed: ModelConnectionProbeInput = modelConnectionProbeSchema.parse(input);
+    return this.modelCredentials.test(parsed, this.config.models);
   }
 
   async saveModelConnection(input: unknown) {
-    const parsed: ModelConnectionInput = modelConnectionSchema.parse(input);
-    const result = await this.modelCredentials.save(parsed, this.config.models[parsed.tier]);
+    const parsed: ModelConnectionSaveInput = modelConnectionSaveSchema.parse(input);
+    const result = await this.modelCredentials.save(parsed, this.config.models);
     this.emit({
       type: "config_updated",
       config: this.publicConfig(),
     });
     return result;
+  }
+
+  async renameModelConnection(idInput: unknown, nameInput: unknown) {
+    const id = modelConnectionIdSchema.parse(idInput);
+    const name = modelConnectionNameSchema.parse(nameInput);
+    const result = await this.modelCredentials.rename(id, name, this.config.models);
+    this.emit({ type: "config_updated", config: this.publicConfig() });
+    return result;
+  }
+
+  async deleteModelConnection(idInput: unknown): Promise<void> {
+    const id = modelConnectionIdSchema.parse(idInput);
+    if (this.runningSessionId || this.sideChat?.snapshot.status === "requesting") {
+      throw new HammerCodeError("模型正在使用中，任务结束后才能删除连接", "MODEL_CONNECTION_BUSY", true);
+    }
+    const deletedRef = connectionModelRef(id);
+    await this.modelCredentials.delete(id);
+    if (this.currentSession?.modelRef === deletedRef) {
+      this.currentSession.modelRef = `builtin:${this.currentSession.modelTier}`;
+      this.currentSession.updatedAt = systemClock.now().toISOString();
+      await this.store.save(this.currentSession);
+      this.emit({ type: "session_snapshot", session: this.currentSession });
+    }
+    this.emit({ type: "config_updated", config: this.publicConfig() });
   }
 
   async compressContext() {
@@ -432,6 +477,70 @@ export class AppController {
     if (!this.workspaceRoot) return null;
     this.currentProjectMemory = await this.projectMemory.snapshot(this.workspaceRoot);
     return this.currentProjectMemory;
+  }
+
+  async updateProjectMemorySettings(input: unknown): Promise<ProjectMemorySnapshot | null> {
+    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+    const settings: ProjectMemorySettings = projectMemorySettingsSchema.parse(input);
+    this.currentProjectMemory = await this.projectMemory.updateSettings(this.workspaceRoot, settings);
+    return this.currentProjectMemory;
+  }
+
+  async exportProjectMemory(): Promise<ProjectMemoryTransferResult> {
+    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+    const snapshot = await this.projectMemory.snapshot(this.workspaceRoot);
+    const stem = `${path.basename(this.workspaceRoot)}-hammercode-memory`;
+    const data = await this.projectMemory.exportData(this.workspaceRoot);
+    let filePath: string | null = null;
+    for (let attempt = 1; attempt <= 100; attempt += 1) {
+      const suffix = attempt === 1 ? "" : `-${attempt}`;
+      const candidate = path.join(this.workspaceRoot, `${stem}${suffix}.json`);
+      try {
+        await writeFile(candidate, data, {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx",
+        });
+        await chmod(candidate, 0o600);
+        filePath = candidate;
+        break;
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") continue;
+        throw error;
+      }
+    }
+    if (!filePath) {
+      throw new HammerCodeError("项目目录中已有过多同名导出文件，请整理后重试", "PROJECT_MEMORY_EXPORT_NAME_EXHAUSTED", true);
+    }
+    return {
+      status: "exported",
+      fileName: path.basename(filePath),
+      recordCount: snapshot.records.length,
+    };
+  }
+
+  async importProjectMemory(): Promise<ProjectMemoryTransferResult> {
+    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+    const result = await dialog.showOpenDialog(this.window, {
+      title: "导入项目记忆",
+      defaultPath: this.workspaceRoot,
+      properties: ["openFile"],
+      buttonLabel: "导入到当前项目",
+    });
+    if (result.canceled || !result.filePaths[0]) return { status: "cancelled" };
+    const filePath = result.filePaths[0];
+    if ((await stat(filePath)).size > 2_000_000) {
+      throw new HammerCodeError("项目记忆文件超过 2 MB 上限", "PROJECT_MEMORY_IMPORT_TOO_LARGE", true);
+    }
+    const imported = await this.projectMemory.importData(this.workspaceRoot, await readFile(filePath, "utf8"));
+    this.currentProjectMemory = imported.snapshot;
+    return {
+      status: "imported",
+      fileName: path.basename(filePath),
+      imported: imported.imported,
+      skipped: imported.skipped,
+      conflicted: imported.conflicted,
+    };
   }
 
   async deleteProjectMemory(idInput: unknown): Promise<ProjectMemorySnapshot | null> {
@@ -801,25 +910,20 @@ export class AppController {
 
   private publicConfig() {
     const resolved = this.resolvedRuntimeConfig();
-    return toPublicConfig(resolved, Object.fromEntries(MODEL_TIERS.map((tier) => {
-      const credential = this.modelCredentials.resolve(tier, this.config.models[tier]);
-      return [tier, {
-        status: credential.status,
-        message: credential.error,
-        lastCheckedAt: credential.lastCheckedAt,
-      }];
-    })));
+    return toPublicConfig(resolved, this.modelCredentials.listPublic(this.config.models));
   }
 
   private resolvedRuntimeConfig(): RuntimeConfig {
     return {
       ...this.config,
       models: Object.fromEntries(MODEL_TIERS.map((tier) => {
-        const credential = this.modelCredentials.resolve(tier, this.config.models[tier]);
+        const credential = this.modelCredentials.resolve(`builtin:${tier}`, this.config.models);
+        if (!credential) throw new HammerCodeError("默认模型连接缺失", "DEFAULT_MODEL_CONNECTION_MISSING");
         return [tier, {
           ...this.config.models[tier],
           apiKey: credential.apiKey,
           apiBaseUrl: credential.apiBaseUrl,
+          model: credential.model,
         }];
       })) as RuntimeConfig["models"],
     };
@@ -829,31 +933,24 @@ export class AppController {
     modelRef: ModelRef;
     config: RuntimeConfig["models"]["fast"];
   } {
-    if (requestedRef && requestedRef !== "builtin:fast" && requestedRef !== "builtin:strong") {
-      throw new HammerCodeError("模型只允许选择 Fast 或 Strong", "INVALID_MODEL_REF", true);
+    const modelRef = (requestedRef ?? `builtin:${modelTier}`) as ModelRef;
+    const credential = this.modelCredentials.resolve(modelRef, this.config.models);
+    if (!credential) throw new HammerCodeError("找不到选中的模型连接", "INVALID_MODEL_REF", true);
+    if (credential.tier !== modelTier) {
+      throw new HammerCodeError("模型连接与运行档位不一致", "INVALID_MODEL_REF", true);
     }
-    const modelRef: ModelRef = requestedRef === "builtin:strong"
-      ? "builtin:strong"
-      : requestedRef === "builtin:fast"
-        ? "builtin:fast"
-        : modelTier === "strong" ? "builtin:strong" : "builtin:fast";
-    if (modelRef === "builtin:fast" || modelRef === "builtin:strong") {
-      const selectedTier = modelRef === "builtin:fast" ? "fast" : "strong";
-      if (selectedTier !== modelTier) {
-        throw new HammerCodeError("模型引用与 Fast/Strong 档位不一致", "INVALID_MODEL_REF", true);
-      }
-      const config = this.resolvedRuntimeConfig().models[selectedTier];
-      if (!config.apiKey) {
-        const variable = selectedTier === "fast" ? "DEEPSEEK_API_KEY" : "GLM_API_KEY";
-        throw new HammerCodeError(
-          `${selectedTier === "fast" ? "Fast" : "Strong"} 模型未配置 ${variable}`,
-          "API_KEY_REQUIRED",
-          true,
-        );
-      }
-      return { modelRef, config };
+    if (!credential.apiKey) {
+      throw new HammerCodeError(`${credential.name} 尚未配置 API Key`, "API_KEY_REQUIRED", true);
     }
-    throw new HammerCodeError("模型只允许选择 Fast 或 Strong", "INVALID_MODEL_REF", true);
+    return {
+      modelRef,
+      config: {
+        ...this.config.models[credential.tier],
+        apiKey: credential.apiKey,
+        apiBaseUrl: credential.apiBaseUrl,
+        model: credential.model,
+      },
+    };
   }
 }
 

@@ -12,9 +12,26 @@ import type {
   ProjectMemoryKind,
   ProjectMemoryRecall,
   ProjectMemoryRecord,
+  ProjectMemorySettings,
   ProjectMemorySnapshot,
   ProjectMemorySource,
 } from "../shared/contracts";
+
+const DEFAULT_MEMORY_SETTINGS: ProjectMemorySettings = {
+  enabled: false,
+  useMemories: true,
+  generateMemories: true,
+  maxRecallRecords: 6,
+  maxRecallCharacters: 3_000,
+};
+
+const memorySettingsSchema = z.object({
+  enabled: z.boolean(),
+  useMemories: z.boolean(),
+  generateMemories: z.boolean(),
+  maxRecallRecords: z.number().int().min(1).max(20),
+  maxRecallCharacters: z.number().int().min(500).max(20_000),
+}).strict();
 
 const memorySourceSchema = z.object({
   type: z.enum(["tool", "user", "model", "subagent"]),
@@ -50,7 +67,7 @@ const memoryRecordSchema = z.object({
   deletedAt: z.string().datetime({ offset: true }).optional(),
 }).strict();
 
-const memoryFileSchema = z.object({
+const memoryFileV1Schema = z.object({
   version: z.literal(1),
   workspaceRoot: z.string().min(1).max(4_096),
   revision: z.number().int().nonnegative(),
@@ -59,7 +76,50 @@ const memoryFileSchema = z.object({
   updatedAt: z.string().datetime({ offset: true }),
 }).strict();
 
+const memoryFileSchema = z.object({
+  version: z.literal(2),
+  workspaceRoot: z.string().min(1).max(4_096),
+  revision: z.number().int().nonnegative(),
+  settings: memorySettingsSchema,
+  records: z.array(memoryRecordSchema).max(10_000),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+}).strict();
+
+const portableSourceSchema = memorySourceSchema.omit({
+  sessionId: true,
+  turnId: true,
+  toolCallId: true,
+  subtaskId: true,
+}).strict();
+
+const portableRecordSchema = memoryRecordSchema.omit({
+  id: true,
+  workspaceRoot: true,
+  conflictWith: true,
+  deletedAt: true,
+}).extend({
+  source: portableSourceSchema,
+  status: z.enum(["active", "conflicted", "invalidated"]),
+}).strict();
+
+const memoryExportSchema = z.object({
+  format: z.literal("hammercode-project-memory"),
+  version: z.literal(1),
+  exportedAt: z.string().datetime({ offset: true }),
+  recordsChecksum: z.string().regex(/^[a-f0-9]{64}$/),
+  records: z.array(portableRecordSchema).max(5_000),
+}).strict();
+
 type MemoryFile = z.infer<typeof memoryFileSchema>;
+type PortableRecord = z.infer<typeof portableRecordSchema>;
+
+export interface ProjectMemoryImportResult {
+  snapshot: ProjectMemorySnapshot;
+  imported: number;
+  skipped: number;
+  conflicted: number;
+}
 
 function scopeName(workspaceRoot: string): string {
   return createHash("sha256").update(workspaceRoot).digest("hex");
@@ -67,6 +127,28 @@ function scopeName(workspaceRoot: string): string {
 
 function normalizeStatement(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function memoryFingerprint(record: Pick<ProjectMemoryRecord, "kind" | "subject" | "statement" | "confidence">): string {
+  return createHash("sha256")
+    .update(`${record.kind}\u0000${record.subject.trim().toLocaleLowerCase()}\u0000${normalizeStatement(record.statement)}\u0000${record.confidence}`)
+    .digest("hex");
+}
+
+function portableChecksum(records: PortableRecord[]): string {
+  return createHash("sha256").update(JSON.stringify(records)).digest("hex");
+}
+
+function portableSourceLabel(source: ProjectMemorySource): string {
+  const withoutInternalIds = source.label
+    .replace(/\s*·\s*session_[a-z0-9-]+(?:\/turn_[a-z0-9-]+)?/gi, "")
+    .replace(/\s*·\s*(?:tool|subtask)_[a-z0-9-]+/gi, "")
+    .trim();
+  if (withoutInternalIds) return withoutInternalIds.slice(0, 500);
+  if (source.type === "tool") return `工具 ${source.toolName ?? "调用"}`;
+  if (source.type === "user") return "用户确认";
+  if (source.type === "subagent") return "子任务结果";
+  return "模型推断";
 }
 
 function queryTerms(query: string): string[] {
@@ -103,14 +185,126 @@ export class ProjectMemoryStore implements ProjectMemoryPort {
     });
   }
 
+  async settings(workspaceRoot: string): Promise<ProjectMemorySettings> {
+    return { ...(await this.snapshot(workspaceRoot)).settings };
+  }
+
+  async updateSettings(
+    workspaceRoot: string,
+    input: ProjectMemorySettings,
+  ): Promise<ProjectMemorySnapshot> {
+    const settings = memorySettingsSchema.parse(input);
+    return this.withWorkspaceLock(workspaceRoot, async () => {
+      const state = await this.load(workspaceRoot);
+      state.settings = settings;
+      await this.save(state);
+      return this.toSnapshot(state);
+    });
+  }
+
+  async exportData(workspaceRoot: string): Promise<string> {
+    const snapshot = await this.snapshot(workspaceRoot);
+    const records: PortableRecord[] = snapshot.records.map((record) => portableRecordSchema.parse({
+      kind: record.kind,
+      subject: record.subject,
+      statement: record.statement,
+      confidence: record.confidence,
+      source: portableSourceSchema.parse({
+        type: record.source.type,
+        toolName: record.source.toolName,
+        label: portableSourceLabel(record.source),
+      }),
+      invalidation: record.invalidation,
+      status: record.status,
+      invalidatedReason: record.invalidatedReason,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    }));
+    return `${JSON.stringify({
+      format: "hammercode-project-memory",
+      version: 1,
+      exportedAt: this.clock.now().toISOString(),
+      recordsChecksum: portableChecksum(records),
+      records,
+    }, null, 2)}\n`;
+  }
+
+  async importData(workspaceRoot: string, input: string): Promise<ProjectMemoryImportResult> {
+    if (Buffer.byteLength(input, "utf8") > 2_000_000) {
+      throw new HammerCodeError("项目记忆文件超过 2 MB 上限", "PROJECT_MEMORY_IMPORT_TOO_LARGE", true);
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(input);
+    } catch {
+      throw new HammerCodeError("项目记忆文件不是有效 JSON", "PROJECT_MEMORY_IMPORT_INVALID_JSON", true);
+    }
+    const parsed = memoryExportSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new HammerCodeError("项目记忆文件格式或版本不受支持", "PROJECT_MEMORY_IMPORT_INVALID_FORMAT", true);
+    }
+    if (portableChecksum(parsed.data.records) !== parsed.data.recordsChecksum) {
+      throw new HammerCodeError("项目记忆文件校验失败，内容可能已损坏", "PROJECT_MEMORY_IMPORT_CHECKSUM_MISMATCH", true);
+    }
+
+    return this.withWorkspaceLock(workspaceRoot, async () => {
+      const state = await this.load(workspaceRoot);
+      const known = new Set(state.records.filter((record) => record.status !== "deleted").map(memoryFingerprint));
+      const importedRecords: ProjectMemoryRecord[] = [];
+      let skipped = 0;
+      for (const source of parsed.data.records) {
+        if (known.has(memoryFingerprint(source))) {
+          skipped += 1;
+          continue;
+        }
+        const now = this.clock.now().toISOString();
+        const imported: ProjectMemoryRecord = {
+          id: this.ids.next("memory"),
+          workspaceRoot,
+          kind: source.kind,
+          subject: source.subject,
+          statement: source.statement,
+          confidence: source.confidence,
+          source: {
+            ...source.source,
+            label: `导入 · ${source.source.label}`.slice(0, 500),
+          },
+          invalidation: source.invalidation.type === "workspace_revision"
+            ? { type: "none" }
+            : source.invalidation,
+          status: source.status === "conflicted" ? "active" : source.status,
+          conflictWith: [],
+          invalidatedReason: source.invalidation.type === "workspace_revision"
+            ? "导入的验证结果不适用于当前工作区，必须重新运行验证"
+            : source.invalidatedReason,
+          createdAt: source.createdAt,
+          updatedAt: now,
+        };
+        if (source.invalidation.type === "workspace_revision") imported.status = "invalidated";
+        state.records.push(imported);
+        importedRecords.push(imported);
+        known.add(memoryFingerprint(imported));
+      }
+      this.recomputeConflicts(state);
+      await this.refreshInvalidations(state);
+      await this.save(state);
+      return {
+        snapshot: this.toSnapshot(state),
+        imported: importedRecords.length,
+        skipped,
+        conflicted: importedRecords.filter((record) => record.status === "conflicted").length,
+      };
+    });
+  }
+
   async retrieve(
     workspaceRoot: string,
     query: string,
     options: { maxRecords?: number; maxCharacters?: number } = {},
   ): Promise<ProjectMemoryRecall> {
     const snapshot = await this.snapshot(workspaceRoot);
-    const maxRecords = Math.max(1, Math.min(20, options.maxRecords ?? 12));
-    const maxCharacters = Math.max(500, Math.min(20_000, options.maxCharacters ?? 6_000));
+    const maxRecords = Math.max(1, Math.min(20, options.maxRecords ?? snapshot.settings.maxRecallRecords));
+    const maxCharacters = Math.max(500, Math.min(20_000, options.maxCharacters ?? snapshot.settings.maxRecallCharacters));
     const terms = queryTerms(query);
     const confidenceScore: Record<ProjectMemoryConfidence, number> = {
       tool_verified: 30,
@@ -126,7 +320,7 @@ export class ProjectMemoryStore implements ProjectMemoryPort {
       })
       .sort((left, right) => right.score - left.score || right.record.updatedAt.localeCompare(left.record.updatedAt));
     const relevant = ranked.filter((item) => terms.length === 0 || item.score > confidenceScore[item.record.confidence]);
-    const candidates = relevant.length > 0 ? relevant : ranked.slice(0, Math.min(4, maxRecords));
+    const candidates = relevant.length > 0 ? relevant : ranked.slice(0, Math.min(2, maxRecords));
 
     const selected: ProjectMemoryRecord[] = [];
     let rendered = "";
@@ -386,15 +580,38 @@ export class ProjectMemoryStore implements ProjectMemoryPort {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const file = path.join(this.directory, `${scopeName(workspaceRoot)}.json`);
     try {
-      const parsed = memoryFileSchema.parse(JSON.parse(await readFile(file, "utf8")));
+      const raw: unknown = JSON.parse(await readFile(file, "utf8"));
+      const current = memoryFileSchema.safeParse(raw);
+      const legacy = current.success ? null : memoryFileV1Schema.safeParse(raw);
+      const parsed: MemoryFile = current.success
+        ? current.data
+        : legacy?.success
+          ? {
+              ...legacy.data,
+              version: 2,
+              settings: {
+                ...DEFAULT_MEMORY_SETTINGS,
+                enabled: true,
+              },
+            }
+          : memoryFileSchema.parse(raw);
       if (parsed.workspaceRoot !== workspaceRoot) {
         throw new HammerCodeError("项目记忆工作区标识不匹配", "PROJECT_MEMORY_SCOPE_MISMATCH");
       }
+      if (legacy?.success) await this.save(parsed);
       return parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       const now = this.clock.now().toISOString();
-      return { version: 1, workspaceRoot, revision: 0, records: [], createdAt: now, updatedAt: now };
+      return {
+        version: 2,
+        workspaceRoot,
+        revision: 0,
+        settings: { ...DEFAULT_MEMORY_SETTINGS },
+        records: [],
+        createdAt: now,
+        updatedAt: now,
+      };
     }
   }
 
@@ -428,6 +645,7 @@ export class ProjectMemoryStore implements ProjectMemoryPort {
     return {
       workspaceRoot: state.workspaceRoot,
       revision: state.revision,
+      settings: { ...state.settings },
       records: state.records.filter((record) => record.status !== "deleted"),
       updatedAt: state.updatedAt,
     };

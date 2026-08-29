@@ -1,49 +1,77 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { HammerCodeError } from "../core/types";
 import { redactSecrets } from "../core/utils";
-import { MODEL_TIERS, type ModelConnectionInput, type ModelConnectionTestResult, type ModelTier } from "../shared/contracts";
+import {
+  BUILTIN_MODEL_REFS,
+  MODEL_TIERS,
+  type BuiltinModelRef,
+  type ModelConnectionProbeInput,
+  type ModelConnectionSaveInput,
+  type ModelConnectionTestResult,
+  type ModelRef,
+  type ModelTier,
+  type PublicModelConnection,
+} from "../shared/contracts";
 
 const MAX_PROBE_BYTES = 1_000_000;
+const MAX_MODELS = 500;
 const PROBE_TIMEOUT_MS = 15_000;
 
-const inputSchema = z.object({
-  tier: z.enum(MODEL_TIERS),
+const connectionIdSchema = z.union([z.enum(BUILTIN_MODEL_REFS), z.string().uuid()]);
+const probeInputSchema = z.object({
+  connectionId: connectionIdSchema.optional(),
   apiBaseUrl: z.string().trim().min(1).max(2_048),
   apiKey: z.string().trim().min(1).max(16_384).optional(),
 }).strict();
-
-const credentialSchema = z.object({
+const saveInputSchema = z.object({
+  connectionId: connectionIdSchema.optional(),
+  name: z.string().trim().min(1).max(60),
+  tier: z.enum(MODEL_TIERS),
+  model: z.string().trim().min(1).max(500),
+  apiBaseUrl: z.string().trim().min(1).max(2_048),
+  apiKey: z.string().trim().min(1).max(16_384).optional(),
+}).strict();
+const nameSchema = z.string().trim().min(1).max(60);
+const modelsResponseSchema = z.object({
+  data: z.array(z.object({ id: z.string().trim().min(1).max(500) }).passthrough()).min(1),
+});
+const storedConnectionSchema = z.object({
+  id: connectionIdSchema,
+  kind: z.enum(["default", "custom"]),
+  name: z.string().min(1).max(60),
+  tier: z.enum(MODEL_TIERS),
+  apiBaseUrl: z.string().url(),
+  model: z.string().min(1).max(500),
+  encryptedApiKey: z.string().min(1).optional(),
+  models: z.array(z.string().min(1).max(500)).max(MAX_MODELS),
+  status: z.enum(["missing", "configured", "connected", "error"]),
+  lastCheckedAt: z.string().optional(),
+  error: z.string().max(1_000).optional(),
+}).strict();
+const storeSchema = z.object({
+  version: z.literal(2),
+  connections: z.array(storedConnectionSchema).max(100),
+}).strict();
+const legacyCredentialSchema = z.object({
   apiBaseUrl: z.string().url(),
   encryptedApiKey: z.string().min(1),
   status: z.enum(["configured", "connected", "error"]),
   lastCheckedAt: z.string().optional(),
   error: z.string().optional(),
 });
-
-const storeSchema = z.object({
+const legacyStoreSchema = z.object({
   version: z.literal(1),
   credentials: z.object({
-    fast: credentialSchema.optional(),
-    strong: credentialSchema.optional(),
+    fast: legacyCredentialSchema.optional(),
+    strong: legacyCredentialSchema.optional(),
   }),
 });
 
-const legacyStoreSchema = z.object({
-  version: z.literal(1),
-  connections: z.array(z.object({
-    apiBaseUrl: z.string().url(),
-    encryptedApiKey: z.string().min(1),
-    models: z.array(z.string()),
-  }).passthrough()),
-});
-
-const modelsResponseSchema = z.object({
-  data: z.array(z.object({ id: z.string().trim().min(1).max(500) }).passthrough()).min(1),
-});
-
-type StoredCredential = z.infer<typeof credentialSchema>;
+type StoredConnection = z.infer<typeof storedConnectionSchema>;
+type LegacyCredential = z.infer<typeof legacyCredentialSchema>;
 
 export interface CredentialCipher {
   isAvailable(): boolean;
@@ -58,6 +86,12 @@ export interface ModelFallback {
 }
 
 export interface ResolvedModelCredential {
+  id: string;
+  ref: ModelRef;
+  kind: "default" | "custom";
+  name: string;
+  tier: ModelTier;
+  model: string;
   apiKey: string;
   apiBaseUrl: string;
   status: "missing" | "configured" | "connected" | "error";
@@ -83,6 +117,17 @@ export function normalizeApiBaseUrl(input: string): string {
     .replace(/\/(?:chat\/completions|models)\/?$/i, "")
     .replace(/\/+$/, "") || "/";
   return `${url.origin}${url.pathname === "/" ? "" : url.pathname}`;
+}
+
+export function connectionModelRef(id: string): ModelRef {
+  if (id === "builtin:fast" || id === "builtin:strong") return id;
+  return `connection:${id}`;
+}
+
+export function parseConnectionModelRef(ref: string): string | null {
+  if (ref === "builtin:fast" || ref === "builtin:strong") return ref;
+  const match = /^connection:([0-9a-f-]{36})$/i.exec(ref);
+  return match && z.string().uuid().safeParse(match[1]).success ? match[1] : null;
 }
 
 async function readResponseLimited(response: Response): Promise<string> {
@@ -114,9 +159,9 @@ async function readResponseLimited(response: Response): Promise<string> {
 
 export class ModelCredentialStore {
   private readonly filePath: string;
-  private readonly legacyFilePath: string;
+  private readonly obsoleteFilePath: string;
   private readonly fetchImpl: typeof fetch;
-  private credentials: Partial<Record<ModelTier, StoredCredential>> = {};
+  private connections: StoredConnection[] = [];
   private loaded = false;
 
   constructor(
@@ -125,128 +170,200 @@ export class ModelCredentialStore {
     fetchImpl: typeof fetch = fetch,
   ) {
     this.filePath = path.join(settingsDirectory, "model-credentials.json");
-    this.legacyFilePath = path.join(settingsDirectory, "api-connections.json");
+    this.obsoleteFilePath = path.join(settingsDirectory, "api-connections.json");
     this.fetchImpl = fetchImpl;
   }
 
   async load(fallbacks: Record<ModelTier, ModelFallback>): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
-    try {
-      const parsed = storeSchema.safeParse(JSON.parse(await readFile(this.filePath, "utf8")) as unknown);
-      this.credentials = parsed.success ? parsed.data.credentials : {};
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.credentials = {};
-    }
-
+    let legacy: Partial<Record<ModelTier, LegacyCredential>> = {};
     let changed = false;
-    if (this.cipher.isAvailable()) {
-      const legacy = await this.readLegacy();
-      for (const tier of MODEL_TIERS) {
-        if (this.credentials[tier]) continue;
-        const fallback = fallbacks[tier];
-        let apiKey = fallback.apiKey;
-        let apiBaseUrl = fallback.apiBaseUrl;
-        if (!apiKey) {
-          const matching = legacy.find((connection) => connection.models.includes(fallback.model));
-          if (matching) {
-            try {
-              apiKey = this.cipher.decrypt(Buffer.from(matching.encryptedApiKey, "base64"));
-              apiBaseUrl = matching.apiBaseUrl;
-            } catch {
-              apiKey = "";
-            }
-          }
-        }
-        if (!apiKey) continue;
-        this.credentials[tier] = {
-          apiBaseUrl: normalizeApiBaseUrl(apiBaseUrl),
-          encryptedApiKey: this.cipher.encrypt(apiKey).toString("base64"),
-          status: "configured",
-        };
+    try {
+      const raw: unknown = JSON.parse(await readFile(this.filePath, "utf8"));
+      const current = storeSchema.safeParse(raw);
+      if (current.success) this.connections = current.data.connections;
+      else {
+        const previous = legacyStoreSchema.safeParse(raw);
+        if (previous.success) legacy = previous.data.credentials;
         changed = true;
       }
-      if (changed) await this.persist();
-      await rm(this.legacyFilePath, { force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") changed = true;
     }
+
+    for (const tier of MODEL_TIERS) {
+      const id: BuiltinModelRef = tier === "fast" ? "builtin:fast" : "builtin:strong";
+      const index = this.connections.findIndex((connection) => connection.id === id);
+      if (index >= 0) {
+        const current = this.connections[index];
+        if (current.kind !== "default" || current.tier !== tier) {
+          this.connections[index] = { ...current, kind: "default", tier };
+          changed = true;
+        }
+        continue;
+      }
+      const fallback = fallbacks[tier];
+      const previous = legacy[tier];
+      let encryptedApiKey = previous?.encryptedApiKey;
+      if (!encryptedApiKey && fallback.apiKey && this.cipher.isAvailable()) {
+        encryptedApiKey = this.cipher.encrypt(fallback.apiKey).toString("base64");
+      }
+      this.connections.push({
+        id,
+        kind: "default",
+        name: tier === "fast" ? "Fast" : "Strong",
+        tier,
+        apiBaseUrl: normalizeApiBaseUrl(previous?.apiBaseUrl ?? fallback.apiBaseUrl),
+        model: fallback.model,
+        encryptedApiKey,
+        models: [fallback.model],
+        status: previous?.status ?? (fallback.apiKey ? "configured" : "missing"),
+        lastCheckedAt: previous?.lastCheckedAt,
+        error: previous?.error,
+      });
+      changed = true;
+    }
+    this.connections = this.sortedConnections(this.connections);
+    if (changed) await this.persist();
+    await rm(this.obsoleteFilePath, { force: true });
   }
 
-  resolve(tier: ModelTier, fallback: ModelFallback): ResolvedModelCredential {
-    const stored = this.credentials[tier];
-    if (!stored) {
-      return {
-        apiKey: fallback.apiKey,
-        apiBaseUrl: fallback.apiBaseUrl,
-        status: fallback.apiKey ? "configured" : "missing",
-      };
-    }
-    if (!this.cipher.isAvailable()) {
-      return {
-        apiKey: fallback.apiKey,
-        apiBaseUrl: stored.apiBaseUrl,
-        status: fallback.apiKey ? stored.status : "error",
-        lastCheckedAt: stored.lastCheckedAt,
-        error: fallback.apiKey ? stored.error : "系统安全存储不可用",
-      };
-    }
-    try {
-      return {
-        apiKey: this.cipher.decrypt(Buffer.from(stored.encryptedApiKey, "base64")),
-        apiBaseUrl: stored.apiBaseUrl,
-        status: stored.status,
-        lastCheckedAt: stored.lastCheckedAt,
-        error: stored.error,
-      };
-    } catch {
-      return {
-        apiKey: fallback.apiKey,
-        apiBaseUrl: stored.apiBaseUrl,
-        status: "error",
-        lastCheckedAt: stored.lastCheckedAt,
-        error: "已保存的 API Key 无法解密，请重新配置",
-      };
-    }
+  listPublic(fallbacks: Record<ModelTier, ModelFallback>): PublicModelConnection[] {
+    return this.connections.map((connection) => this.toPublic(connection, fallbacks));
   }
 
-  async test(input: ModelConnectionInput, fallback: ModelFallback): Promise<ModelConnectionTestResult> {
-    const parsed = inputSchema.parse(input);
-    const resolved = this.resolve(parsed.tier, fallback);
-    return this.probe(
-      parsed.tier,
-      normalizeApiBaseUrl(parsed.apiBaseUrl),
-      parsed.apiKey ?? resolved.apiKey,
-      fallback.model,
-    );
+  resolve(ref: string, fallbacks: Record<ModelTier, ModelFallback>): ResolvedModelCredential | null {
+    const id = parseConnectionModelRef(ref);
+    if (!id) return null;
+    const connection = this.connections.find((item) => item.id === id);
+    if (!connection) return null;
+    const fallback = connection.kind === "default" ? fallbacks[connection.tier] : undefined;
+    let apiKey = fallback?.apiKey ?? "";
+    let error = connection.error;
+    if (connection.encryptedApiKey) {
+      if (!this.cipher.isAvailable()) {
+        if (!apiKey) error = "系统安全存储不可用";
+      } else {
+        try {
+          apiKey = this.cipher.decrypt(Buffer.from(connection.encryptedApiKey, "base64"));
+        } catch {
+          if (!apiKey) error = "已保存的 API Key 无法解密，请重新配置";
+        }
+      }
+    }
+    const status = apiKey
+      ? error ? "error" : connection.status === "missing" ? "configured" : connection.status
+      : error ? "error" : "missing";
+    return {
+      id: connection.id,
+      ref: connectionModelRef(connection.id),
+      kind: connection.kind,
+      name: connection.name,
+      tier: connection.tier,
+      model: connection.model,
+      apiKey,
+      apiBaseUrl: connection.apiBaseUrl,
+      status,
+      lastCheckedAt: connection.lastCheckedAt,
+      error,
+    };
   }
 
-  async save(input: ModelConnectionInput, fallback: ModelFallback): Promise<ModelConnectionTestResult> {
-    const parsed = inputSchema.parse(input);
+  async test(
+    input: ModelConnectionProbeInput,
+    fallbacks: Record<ModelTier, ModelFallback>,
+  ): Promise<ModelConnectionTestResult> {
+    const parsed = probeInputSchema.parse(input);
+    const existing = parsed.connectionId
+      ? this.connections.find((connection) => connection.id === parsed.connectionId)
+      : undefined;
+    if (parsed.connectionId && !existing) {
+      throw new HammerCodeError("找不到这条模型连接", "MODEL_CONNECTION_NOT_FOUND", true);
+    }
+    const resolved = existing ? this.resolve(connectionModelRef(existing.id), fallbacks) : null;
+    const apiKey = parsed.apiKey ?? resolved?.apiKey ?? "";
+    const apiBaseUrl = normalizeApiBaseUrl(parsed.apiBaseUrl);
+    const probe = await this.probe(apiBaseUrl, apiKey);
+    return { connectionId: parsed.connectionId, ...probe, status: "connected" };
+  }
+
+  async save(
+    input: ModelConnectionSaveInput,
+    fallbacks: Record<ModelTier, ModelFallback>,
+  ): Promise<PublicModelConnection> {
+    const parsed = saveInputSchema.parse(input);
+    const existing = parsed.connectionId
+      ? this.connections.find((connection) => connection.id === parsed.connectionId)
+      : undefined;
+    if (parsed.connectionId && !existing) {
+      throw new HammerCodeError("找不到这条模型连接", "MODEL_CONNECTION_NOT_FOUND", true);
+    }
+    if (existing?.kind === "default" && existing.tier !== parsed.tier) {
+      throw new HammerCodeError("Fast/Strong 默认槽不能改变运行档位", "DEFAULT_MODEL_TIER_IMMUTABLE", true);
+    }
     if (!this.cipher.isAvailable()) {
       throw new HammerCodeError("系统安全存储当前不可用，不能保存 API Key", "SECURE_STORAGE_UNAVAILABLE", true);
     }
-    const current = this.resolve(parsed.tier, fallback);
-    const apiKey = parsed.apiKey ?? current.apiKey;
+    const resolved = existing ? this.resolve(connectionModelRef(existing.id), fallbacks) : null;
+    const apiKey = parsed.apiKey ?? resolved?.apiKey ?? "";
+    if (!apiKey) throw new HammerCodeError("请输入 API Key", "API_KEY_REQUIRED", true);
     const apiBaseUrl = normalizeApiBaseUrl(parsed.apiBaseUrl);
-    const result = await this.probe(parsed.tier, apiBaseUrl, apiKey, fallback.model);
-    this.credentials[parsed.tier] = {
+    const probe = await this.probe(apiBaseUrl, apiKey);
+    if (!probe.models.includes(parsed.model)) {
+      throw new HammerCodeError(`服务端没有返回所选模型 ${parsed.model}`, "MODEL_NOT_AVAILABLE", true);
+    }
+    const id = existing?.id ?? randomUUID();
+    const connection: StoredConnection = {
+      id,
+      kind: existing?.kind ?? "custom",
+      name: parsed.name,
+      tier: existing?.kind === "default" ? existing.tier : parsed.tier,
       apiBaseUrl,
+      model: parsed.model,
       encryptedApiKey: this.cipher.encrypt(apiKey).toString("base64"),
+      models: probe.models,
       status: "connected",
       lastCheckedAt: new Date().toISOString(),
     };
+    this.connections = this.sortedConnections([
+      ...this.connections.filter((item) => item.id !== id),
+      connection,
+    ]);
     await this.persist();
-    return result;
+    return this.toPublic(connection, fallbacks);
   }
 
-  private async probe(
-    tier: ModelTier,
-    apiBaseUrl: string,
-    apiKey: string,
-    model: string,
-  ): Promise<ModelConnectionTestResult> {
-    if (!apiKey.trim()) {
-      throw new HammerCodeError(`${tier === "fast" ? "Fast" : "Strong"} 尚未配置 API Key`, "API_KEY_REQUIRED", true);
+  async rename(
+    connectionId: string,
+    name: string,
+    fallbacks: Record<ModelTier, ModelFallback>,
+  ): Promise<PublicModelConnection> {
+    const id = connectionIdSchema.parse(connectionId);
+    const connection = this.connections.find((item) => item.id === id);
+    if (!connection) throw new HammerCodeError("找不到这条模型连接", "MODEL_CONNECTION_NOT_FOUND", true);
+    connection.name = nameSchema.parse(name);
+    await this.persist();
+    return this.toPublic(connection, fallbacks);
+  }
+
+  async delete(connectionId: string): Promise<void> {
+    const id = connectionIdSchema.parse(connectionId);
+    const connection = this.connections.find((item) => item.id === id);
+    if (!connection) throw new HammerCodeError("找不到这条模型连接", "MODEL_CONNECTION_NOT_FOUND", true);
+    if (connection.kind === "default") {
+      throw new HammerCodeError("Fast/Strong 默认连接不能删除", "DEFAULT_MODEL_CONNECTION_REQUIRED", true);
     }
+    this.connections = this.connections.filter((item) => item.id !== id);
+    await this.persist();
+  }
+
+  private async probe(apiBaseUrl: string, apiKey: string): Promise<{
+    apiBaseUrl: string;
+    models: string[];
+    latencyMs: number;
+  }> {
+    if (!apiKey.trim()) throw new HammerCodeError("请输入 API Key", "API_KEY_REQUIRED", true);
     const startedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(
@@ -281,15 +398,12 @@ export class ModelCredentialStore {
       if (!models.success) {
         throw new HammerCodeError("服务端 /models 响应不符合 OpenAI-compatible 格式", "API_PROBE_INCOMPATIBLE", true);
       }
-      if (!models.data.data.some((item) => item.id === model)) {
-        throw new HammerCodeError(`服务端没有返回当前固定模型 ${model}`, "MODEL_NOT_AVAILABLE", true);
-      }
       return {
-        tier,
         apiBaseUrl,
-        model,
+        models: [...new Set(models.data.data.map((item) => item.id))]
+          .sort((left, right) => left.localeCompare(right))
+          .slice(0, MAX_MODELS),
         latencyMs: Date.now() - startedAt,
-        status: "connected",
       };
     } catch (error) {
       if (controller.signal.aborted) {
@@ -306,13 +420,32 @@ export class ModelCredentialStore {
     }
   }
 
-  private async readLegacy(): Promise<Array<z.infer<typeof legacyStoreSchema>["connections"][number]>> {
-    try {
-      const parsed = legacyStoreSchema.safeParse(JSON.parse(await readFile(this.legacyFilePath, "utf8")) as unknown);
-      return parsed.success ? parsed.data.connections : [];
-    } catch {
-      return [];
-    }
+  private toPublic(
+    connection: StoredConnection,
+    fallbacks: Record<ModelTier, ModelFallback>,
+  ): PublicModelConnection {
+    const resolved = this.resolve(connectionModelRef(connection.id), fallbacks)!;
+    return {
+      id: connection.id,
+      ref: connectionModelRef(connection.id),
+      kind: connection.kind,
+      name: connection.name,
+      tier: connection.tier,
+      provider: connection.tier === "fast" ? "deepseek" : "zhipu",
+      model: connection.model,
+      apiBaseUrl: connection.apiBaseUrl,
+      hasApiKey: Boolean(resolved.apiKey),
+      connectionStatus: resolved.status,
+      connectionMessage: resolved.error,
+      lastCheckedAt: resolved.lastCheckedAt,
+    };
+  }
+
+  private sortedConnections(connections: StoredConnection[]): StoredConnection[] {
+    return [...connections].sort((left, right) => {
+      const priority = (value: StoredConnection): number => value.id === "builtin:fast" ? 0 : value.id === "builtin:strong" ? 1 : 2;
+      return priority(left) - priority(right) || left.name.localeCompare(right.name);
+    });
   }
 
   private async persist(): Promise<void> {
@@ -320,7 +453,8 @@ export class ModelCredentialStore {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const temp = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
     try {
-      await writeFile(temp, `${JSON.stringify({ version: 1, credentials: this.credentials }, null, 2)}\n`, {
+      const checked = storeSchema.parse({ version: 2, connections: this.connections });
+      await writeFile(temp, `${JSON.stringify(checked, null, 2)}\n`, {
         encoding: "utf8",
         mode: 0o600,
       });

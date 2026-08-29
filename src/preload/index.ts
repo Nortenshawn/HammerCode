@@ -14,6 +14,10 @@ const api: HammerCodeApi = {
     ipcRenderer.invoke("hammercode:test-model-connection", input),
   saveModelConnection: (input) =>
     ipcRenderer.invoke("hammercode:save-model-connection", input),
+  renameModelConnection: (connectionId, name) =>
+    ipcRenderer.invoke("hammercode:rename-model-connection", connectionId, name),
+  deleteModelConnection: (connectionId) =>
+    ipcRenderer.invoke("hammercode:delete-model-connection", connectionId),
   compressContext: () => ipcRenderer.invoke("hammercode:compress-context"),
   openSideChat: () => ipcRenderer.invoke("hammercode:open-side-chat"),
   sendSideChat: (sideChatId, content) =>
@@ -25,6 +29,10 @@ const api: HammerCodeApi = {
   searchWorkspaceEntries: (query) =>
     ipcRenderer.invoke("hammercode:search-workspace-entries", query),
   listProjectMemory: () => ipcRenderer.invoke("hammercode:list-project-memory"),
+  updateProjectMemorySettings: (settings) =>
+    ipcRenderer.invoke("hammercode:update-project-memory-settings", settings),
+  exportProjectMemory: () => ipcRenderer.invoke("hammercode:export-project-memory"),
+  importProjectMemory: () => ipcRenderer.invoke("hammercode:import-project-memory"),
   deleteProjectMemory: (memoryId) => ipcRenderer.invoke("hammercode:delete-project-memory", memoryId),
   startTask: (request) => ipcRenderer.invoke("hammercode:start-task", request),
   requestUndo: (changeId) => ipcRenderer.invoke("hammercode:request-undo", changeId),
