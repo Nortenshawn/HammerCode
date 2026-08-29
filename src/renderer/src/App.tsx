@@ -12,6 +12,7 @@ import type {
   ModelTier,
   PermissionMode,
   PublicModelConnection,
+  PublicSkill,
   RendererEvent,
   SessionStatus,
   SessionSummary,
@@ -278,9 +279,26 @@ function TurnMetrics({ turn }: { turn: AgentTurn }) {
       <span>工具 <b>{metrics.toolCalls}/{metrics.maxToolCalls}</b></span>
       <span>输出 <b>{formatCompactNumber(metrics.completionTokens)}</b> / 单次 {formatCompactNumber(metrics.maxOutputTokensPerRequest)}</span>
       <span>上下文 <b>{formatCompactNumber(metrics.currentContextTokens)}/{formatCompactNumber(metrics.contextTokenBudget)}</b> · 压缩 {metrics.contextCompactions}</span>
+      {metrics.skillCount > 0 && <span>Skill <b>{metrics.skillCount}</b> · 约 {formatCompactNumber(metrics.skillTokens)} tokens</span>}
       <span>累计输入 <b>{formatCompactNumber(metrics.promptTokens)}</b>{metrics.tokenUsageEstimated ? " 约" : ""}</span>
       <span>时限 <b>{formatDurationLimit(metrics.maxRunTimeMs)}</b></span>
     </div>
+  );
+}
+
+function SkillUsageView({ turn }: { turn: AgentTurn }) {
+  if (!turn.skills?.length) return null;
+  return (
+    <section className="turn-skills" aria-label="本轮 Skills">
+      <header><strong>Skills</strong><span>{turn.skills.length} 个 · 约 {formatCompactNumber(turn.skills.reduce((sum, skill) => sum + skill.resources.reduce((resourceSum, resource) => resourceSum + resource.tokens, 0), 0))} tokens</span></header>
+      {turn.skills.map((skill) => (
+        <article key={`${turn.id}-${skill.source}-${skill.id}-${skill.version}`}>
+          <div><strong>${skill.id}</strong><span>{skill.trigger === "explicit" ? "用户指定" : "自动匹配"} · {skill.source === "builtin" ? "内置" : skill.source === "user" ? "用户" : "项目"}</span></div>
+          <p>{skill.reason}</p>
+          <small>版本 {skill.version} · 已读取 {skill.resources.length} 项资源{skill.scripts.length > 0 ? ` · 脚本 ${skill.scripts.length} 次` : ""}</small>
+        </article>
+      ))}
+    </section>
   );
 }
 
@@ -335,6 +353,7 @@ function WorkProcess({ session, turn, finalMessageId }: { session: AgentSession;
       <div className="process-timeline">
         <TurnPlanView turn={turn}/>
         <TurnMetrics turn={turn}/>
+        <SkillUsageView turn={turn}/>
         <SubagentTasksView session={session} turn={turn}/>
         {!hasContent && <div className="process-placeholder">正在理解这轮请求…</div>}
         {processMessages.map((message) => {
@@ -630,6 +649,8 @@ function SettingsView({
   const [deletingMemory, setDeletingMemory] = useState<string | null>(null);
   const [savingMemory, setSavingMemory] = useState(false);
   const [transferringMemory, setTransferringMemory] = useState<"import" | "export" | null>(null);
+  const [skillBusy, setSkillBusy] = useState<string | null>(null);
+  const [pendingSkillTrust, setPendingSkillTrust] = useState<PublicSkill | null>(null);
 
   const deleteMemory = async (memoryId: string) => {
     if (deletingMemory) return;
@@ -678,12 +699,98 @@ function SettingsView({
     }
   };
 
+  const updateSkillAutoMatch = async (enabled: boolean) => {
+    if (skillBusy) return;
+    setSkillBusy("settings");
+    try {
+      await window.hammerCode.updateSkillSettings({ autoMatchEnabled: enabled });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setSkillBusy(null);
+    }
+  };
+
+  const setSkillEnabled = async (skill: PublicSkill, enabled: boolean, trustProject = false) => {
+    if (skillBusy) return;
+    if (enabled && skill.source === "project" && !skill.trusted && !trustProject) {
+      setPendingSkillTrust(skill);
+      return;
+    }
+    setSkillBusy(skill.key);
+    try {
+      await window.hammerCode.setSkillEnabled(skill.key, enabled, trustProject);
+      setPendingSkillTrust(null);
+      onNotice({ level: "info", text: `${skill.name} 已${enabled ? "启用" : "禁用"}；只影响下一轮。` });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setSkillBusy(null);
+    }
+  };
+
+  const importSkill = async () => {
+    if (skillBusy) return;
+    setSkillBusy("import");
+    try {
+      const result = await window.hammerCode.importSkill();
+      if (result.status !== "cancelled") onNotice({ level: "info", text: `已导入 $${result.skillId ?? "skill"}。` });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setSkillBusy(null);
+    }
+  };
+
+  const exportSkill = async (skill: PublicSkill) => {
+    if (skillBusy) return;
+    setSkillBusy(`export:${skill.key}`);
+    try {
+      const result = await window.hammerCode.exportSkill(skill.key);
+      if (result.status !== "cancelled") onNotice({ level: "info", text: `已导出 ${result.fileName ?? skill.name}。` });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setSkillBusy(null);
+    }
+  };
+
+  const uninstallSkill = async (skill: PublicSkill) => {
+    if (skillBusy || !window.confirm(`卸载 ${skill.name}？Skill 文件会移入 HammerCode 的可恢复移除目录。`)) return;
+    setSkillBusy(`remove:${skill.key}`);
+    try {
+      await window.hammerCode.uninstallSkill(skill.key);
+      onNotice({ level: "info", text: `${skill.name} 已卸载。` });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setSkillBusy(null);
+    }
+  };
+
   return (
     <section className="settings-view">
       <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>Fast 与 Strong 是默认连接，也可以重命名。你还可以添加其他 OpenAI-compatible 接口；API Key 只在主进程中加密保存，不会回显。</p></header>
       <div className="settings-section-heading"><div><h2>模型连接</h2><p>检测 URL 后选择服务端返回的模型。</p></div><button className="secondary-action" disabled={connectionBusy || showNewConnection} onClick={() => setShowNewConnection(true)}>新增连接</button></div>
       {bootstrap.config.connections.map((connection) => <ModelConnectionEditor key={connection.id} connection={connection} busy={connectionBusy} onBusyChange={setConnectionBusy} onNotice={onNotice}/>)}
       {showNewConnection && <div className="new-connection-wrap"><ModelConnectionEditor busy={connectionBusy} onBusyChange={setConnectionBusy} onSaved={() => setShowNewConnection(false)} onNotice={onNotice}/><button className="cancel-new-connection" disabled={connectionBusy} onClick={() => setShowNewConnection(false)}>取消新增</button></div>}
+      <section className="settings-card skill-settings-card" id="skill-settings">
+        <div className="settings-card-title"><div><h2>Skills</h2><p>本地工作流按需加载，不会授予工具或权限。输入 $ 可显式选择；项目 Skill 来自当前工作区的 .agents/skills/。</p></div><span>{bootstrap.skills.skills.filter((skill) => skill.enabled && skill.valid).length} 个启用</span></div>
+        <div className="skill-controls">
+          <label className="setting-switch"><span><strong>自动匹配</strong><small>只根据 description 为每轮选择一个最相关 Skill</small></span><input type="checkbox" checked={bootstrap.skills.settings.autoMatchEnabled} disabled={Boolean(skillBusy)} onChange={(event) => void updateSkillAutoMatch(event.target.checked)}/><i aria-hidden="true"/></label>
+          <button className="secondary-action" disabled={Boolean(skillBusy)} onClick={() => void importSkill()}>{skillBusy === "import" ? "正在检查…" : "导入文件夹"}</button>
+        </div>
+        {bootstrap.skills.skills.length === 0 ? <p className="memory-empty">还没有发现本地 Skill。</p> : <div className="skill-list">
+          {bootstrap.skills.skills.map((skill) => <article className={`skill-item ${skill.valid ? "" : "invalid"}`} key={skill.key}>
+            <div className="skill-item-main"><div><strong>${skill.id}</strong><span>{skill.name} · {skill.source === "builtin" ? "内置" : skill.source === "user" ? "用户" : "当前项目"} · {skill.version}</span></div><label className="mini-switch" title={skill.valid ? (skill.enabled ? "禁用" : "启用") : "校验未通过"}><input type="checkbox" checked={skill.enabled} disabled={!skill.valid || Boolean(skillBusy)} onChange={(event) => void setSkillEnabled(skill, event.target.checked)}/><i aria-hidden="true"/></label></div>
+            <p>{skill.description}</p>
+            <div className="skill-capabilities"><span>声明工具 {skill.capabilities.tools.length} 项（不授权）</span><span>脚本 {skill.capabilities.scripts.length} 个</span>{skill.lastUsedAt && <span>最近使用 {new Date(skill.lastUsedAt).toLocaleString("zh-CN")}</span>}</div>
+            {skill.issues.length > 0 && <div className="skill-issues">{skill.issues.join("；")}</div>}
+            {pendingSkillTrust?.key === skill.key && <div className="skill-trust"><strong>信任当前项目 Skill？</strong><p>来源：当前工作区 .agents/skills/ · 声明工具 {skill.capabilities.tools.join("、") || "无"}（不会授权）· 脚本 {skill.capabilities.scripts.join("、") || "无"}。启用前会检查目录、指令和脚本；仍受工作区与审批保护。</p><div><button className="secondary-action" onClick={() => setPendingSkillTrust(null)}>取消</button><button className="primary-action" onClick={() => void setSkillEnabled(skill, true, true)}>检查并信任</button></div></div>}
+            <footer><button className="secondary-action" disabled={Boolean(skillBusy) || !skill.valid} onClick={() => void exportSkill(skill)}>导出</button>{skill.source !== "builtin" && <button className="danger-action" disabled={Boolean(skillBusy)} onClick={() => void uninstallSkill(skill)}>卸载</button>}</footer>
+          </article>)}
+        </div>}
+      </section>
       <section className="settings-card memory-settings-card">
         <div className="settings-card-title"><div><h2>项目记忆</h2><p>只在当前项目的聊天之间共享，不会跨项目使用。关闭后保留已有记录，但下一轮不再读取或生成。</p></div><span>{bootstrap.projectMemory?.records.filter((record) => record.status === "active").length ?? 0} 条有效</span></div>
         {bootstrap.workspaceRoot && bootstrap.projectMemory && <div className="memory-controls">
@@ -820,6 +927,9 @@ export function App() {
       }
       if (event.type === "project_memory_updated") {
         setBootstrap((current) => current ? { ...current, projectMemory: event.memory } : current);
+      }
+      if (event.type === "skills_updated") {
+        setBootstrap((current) => current ? { ...current, skills: event.skills } : current);
       }
       if (event.type === "notification") setNotice({ level: event.level, text: event.message });
     });
@@ -1021,12 +1131,23 @@ export function App() {
       void compressContext();
       return;
     }
+    if (id === "skills") {
+      setPaletteMode(null);
+      setView("settings");
+      window.requestAnimationFrame(() => document.getElementById("skill-settings")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      return;
+    }
     setPaletteMode(id);
   };
 
   const selectMention = (entry: WorkspaceEntry) => {
     replaceActiveToken(`${formatWorkspaceMention(entry.path)} `);
     setMentionEntries([]);
+    setPaletteMode(null);
+  };
+
+  const selectSkill = (skill: PublicSkill) => {
+    replaceActiveToken(`$${skill.id} `);
     setPaletteMode(null);
   };
 
@@ -1126,12 +1247,20 @@ export function App() {
 
   const slashCommands = filterComposerCommands(composerToken?.query ?? "").map((command) => ({
     ...command,
-    disabled: command.id === "side_chat" ? !session : command.id === "models" ? isBusy : !session || isBusy,
+    disabled: command.id === "skills" ? false : command.id === "side_chat" ? !session : command.id === "models" ? isBusy : !session || isBusy,
   }));
+  const skillOptions = composerToken?.kind === "skill"
+    ? bootstrap.skills.skills.filter((skill) =>
+        skill.valid && skill.enabled && skill.trusted &&
+        `${skill.id} ${skill.name} ${skill.description}`.toLocaleLowerCase("zh-CN").includes(composerToken.query.toLocaleLowerCase("zh-CN")),
+      )
+    : [];
   const paletteCount = paletteMode === "models"
       ? bootstrap.config.availableModels.length
       : composerToken?.kind === "mention"
         ? mentionEntries.length
+        : composerToken?.kind === "skill"
+          ? skillOptions.length
         : composerToken?.kind === "slash"
           ? slashCommands.length
           : 0;
@@ -1146,6 +1275,11 @@ export function App() {
     if (composerToken?.kind === "mention") {
       const entry = mentionEntries[index];
       if (entry) selectMention(entry);
+      return;
+    }
+    if (composerToken?.kind === "skill") {
+      const skill = skillOptions[index];
+      if (skill) selectSkill(skill);
       return;
     }
     if (composerToken?.kind === "slash") {
@@ -1249,12 +1383,13 @@ export function App() {
         {view === "chat" && <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${composerLocked ? "disabled" : ""}`}>
-            {paletteOpen && !busy && !session?.pendingUndo && <div className="composer-palette" role="listbox" aria-label={paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : "命令"} onMouseDown={(event) => event.preventDefault()}>
-              <header><strong>{paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : "命令"}</strong></header>
+            {paletteOpen && !busy && !session?.pendingUndo && <div className="composer-palette" role="listbox" aria-label={paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : composerToken?.kind === "skill" ? "Skills" : "命令"} onMouseDown={(event) => event.preventDefault()}>
+              <header><strong>{paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : composerToken?.kind === "skill" ? "选择 Skill" : "命令"}</strong></header>
               <div className="palette-list">
                 {paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
                     : composerToken?.kind === "mention" ? (mentionEntries.length > 0 ? mentionEntries.map((entry, index) => <button key={entry.path} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={entry.kind === "directory" ? "folder" : "file"} size={15}/><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>) : <p>没有匹配的工作区条目</p>)
-                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={`command-palette-row ${index === paletteIndex ? "active" : ""}`} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" ? "gear" : "chevron"} size={15}/><strong>{command.label}</strong></button>)}
+                    : composerToken?.kind === "skill" ? (skillOptions.length > 0 ? skillOptions.map((skill, index) => <button key={skill.key} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name="square" size={15}/><span><strong>${skill.id}</strong><small>{skill.description}</small></span></button>) : <p>没有匹配且已启用的 Skill</p>)
+                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={`command-palette-row ${index === paletteIndex ? "active" : ""}`} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" || command.id === "skills" ? "gear" : "chevron"} size={15}/><strong>{command.label}</strong></button>)}
               </div>
             </div>}
             <div className="composer-row">

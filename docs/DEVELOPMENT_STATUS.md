@@ -1,10 +1,10 @@
 # HammerCode 迭代开发状态
 
-最后更新：2026-08-29
+最后更新：2026-08-30
 
 ## 当前结论
 
-HammerCode 已完成 Phase 10 可控项目记忆与开放模型连接。跨聊天记忆按工作区隔离并默认关闭，读取和生成可分别控制；召回有明确记录、字符与 token 预算，支持带版本和校验的导入导出。Fast/Strong 保留稳定默认引用但可重命名，其他 OpenAI-compatible 连接可从统一入口新增。核心闭环仍完全由项目自行实现，不依赖 agent 框架或服务端托管工具。
+HammerCode 已完成 Phase 11 可控、本地、渐进加载的 Skill 系统。外部兼容标准 `SKILL.md`、`scripts/`、`references/` 与 `assets/` 目录，内部发现、触发、上下文注入、权限和审计均由 HammerCode 自行实现。Skill 支持 `$skill-name`、`/skills` 和 description 自动匹配，项目来源固定在当前工作区 `.agents/skills/` 且首次启用需要信任；`allowed-tools` 永不授权，脚本只能通过现有工作区、审批和硬安全边界运行。核心闭环仍不依赖 agent 框架或服务端托管工具。
 
 ## 版本演进
 
@@ -35,7 +35,7 @@ HammerCode 已完成 Phase 10 可控项目记忆与开放模型连接。跨聊�
 ## 当前质量状态
 
 - TypeScript 主进程、渲染进程和测试配置均采用严格类型检查。
-- 26 个测试文件共 150 项自动测试通过，覆盖状态转换、双 provider 与连接凭据迁移、SSE/tool call 组装、路径边界、Plan 门槛和检查点、三层命令策略及包装器绕过、专用 Git 工具、有界重试、独立终止原因、轮次/工具/时间预算、模型驱动的持久化与自动上下文压缩、连续 turn、中断恢复、重复副作用阻断、累计 diff、安全撤销、精确文本替换、多工作区迁移、紧凑命令、`/`/`@` token、工作区检索、Diff 元数据过滤、PDF/Python 工具、比例布局、侧边聊天隔离/取消、项目记忆开关/预算/隔离/迁移/冲突/失效、连接新增/重命名/删除、受限子 Agent 权限/预算/取消/结构化汇总、写入租约与不落盘补丁提案。
+- 27 个测试文件共 159 项自动测试通过，除既有状态机、双 provider、工作区工具、Plan、长任务、记忆、BTW、多工作区、连接和受限子 Agent 外，新增覆盖 Skill 三层发现、显式/自动触发、项目信任与隔离、标准名称与目录约束、任意非隐藏附加资源迁移、渐进资源读取、版本冻结、脚本审批与沙箱、提示注入/路径/符号链接阻断、标准包导入导出卸载、turn 审计持久化和历史不重放。
 - 本阶段 `npm run typecheck`、`npm test`、`npm run build`、`npm run package:mac` 均通过；macOS 目录包未签名，符合当前本地演示阶段预期。
 
 ### 阶段三：真实在线闭环与可靠性
@@ -117,5 +117,14 @@ HammerCode 已完成 Phase 10 可控项目记忆与开放模型连接。跨聊�
 - 模型凭据存储升级为 v2。Fast/Strong 是不可删除但可重命名的默认槽；统一新增连接入口支持 URL、Key、运行档位和服务端模型发现，自定义连接使用稳定 `connection:<id>` 并能跨重启恢复。
 - 上下文圆环改为应用内悬浮提示，不再依赖不稳定的系统 `title`；打包产物迁到稳定的 `release/`，普通构建不会再删除 macOS 已登记的应用。项目记忆导出不再打开不稳定的访达保存面板，而是在当前项目中原子创建不覆盖旧文件的便携 JSON。
 - 真实 Fast/Strong `/models` 检测、记忆关闭/开启对照、0 工具跨聊天召回、导出与重复导入、正式 arm64 包启动均通过。完整证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
+
+### 阶段十一：可控、本地、渐进加载的 Skill 系统
+
+- 状态：已完成（2026-08-30）。
+- 对外兼容 Agent Skills 标准 `SKILL.md` 目录；内置与用户 Skill 由应用管理，项目 Skill 固定在当前工作区 `.agents/skills/`，不跨项目共享。外部格式事实与 HammerCode 自主设计分别记录在 [SKILL_SYSTEM_RESEARCH.md](SKILL_SYSTEM_RESEARCH.md)。
+- 输入 `$` 可补全并插入 `$skill-name`，`/skills` 直达设置列表；显式指定优先，自动匹配只按 description 选择一个最高分 Skill且可关闭。启动只建立名称/描述索引，完整入口、references 与脚本按激活和工具请求渐进加载。
+- 每个 turn 固化 Skill ID、版本、来源、触发原因与包指纹，过程区显示上下文 token、按需资源和脚本审计；上下文压缩只保留使用摘要，重启不会重放 Skill 或工具。
+- `allowed-tools` 只展示声明且绝不授权。项目 Skill 首次启用显示来源、声明工具与脚本并完整检查；脚本经现有 `ask/full_access` 权限、工作区 cwd、超时、取消、输出上限和 macOS 无凭据/无网络/不可写沙箱运行，审批期间执行的是已校验的隔离代码快照而非可变包路径。
+- 内置提供“测试失败诊断”和“PDF 技术文档分析”两个真实 Skill；真实 Fast 显式项目 Skill、真实 Strong 自动匹配、请求批准脚本、完全访问自动批准、第二工作区隔离和重启无重放均通过。完整证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
 
 后续范围、实现顺序和退出标准不再写入本状态记录，统一见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。

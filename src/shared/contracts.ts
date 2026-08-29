@@ -181,6 +181,9 @@ export interface TurnRunMetrics {
   projectMemoryRecords: number;
   projectMemoryCharacters: number;
   projectMemoryTokens: number;
+  skillCount: number;
+  skillCharacters: number;
+  skillTokens: number;
   maxRunTimeMs: number;
 }
 
@@ -210,6 +213,48 @@ export interface AgentTurn {
   retryEvents?: ModelRetryEvent[];
   metrics?: TurnRunMetrics;
   projectMemorySettings?: ProjectMemorySettings;
+  skills?: SkillUseAudit[];
+}
+
+export type SkillSource = "builtin" | "user" | "project";
+export type SkillScope = "application" | "user" | "project";
+export type SkillTriggerMode = "explicit" | "automatic";
+export type SkillResourceKind = "entry" | "reference" | "script" | "asset";
+
+export interface SkillResourceAudit {
+  path: string;
+  kind: SkillResourceKind;
+  characters: number;
+  tokens: number;
+  sha256: string;
+  readAt: string;
+}
+
+export interface SkillScriptAudit {
+  path: string;
+  toolCallId: string;
+  status: "succeeded" | "failed" | "blocked" | "cancelled";
+  authorization?: ToolAuthorization;
+  durationMs?: number;
+  finishedAt: string;
+}
+
+export interface SkillUseAudit {
+  id: string;
+  name: string;
+  version: string;
+  source: SkillSource;
+  scope: SkillScope;
+  trigger: SkillTriggerMode;
+  reason: string;
+  packageFingerprint: string;
+  entryPath: string;
+  instructionCharacters: number;
+  instructionTokens: number;
+  availableResources: string[];
+  availableScripts: string[];
+  resources: SkillResourceAudit[];
+  scripts: SkillScriptAudit[];
 }
 
 export type FileChangeKind = "create" | "modify" | "delete";
@@ -508,6 +553,45 @@ export interface ProjectMemoryTransferResult {
   recordCount?: number;
 }
 
+export interface SkillSettings {
+  autoMatchEnabled: boolean;
+}
+
+export interface PublicSkillCapabilities {
+  tools: string[];
+  scripts: string[];
+}
+
+export interface PublicSkill {
+  key: string;
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  when: string;
+  source: SkillSource;
+  scope: SkillScope;
+  enabled: boolean;
+  trusted: boolean;
+  valid: boolean;
+  issues: string[];
+  capabilities: PublicSkillCapabilities;
+  lastUsedAt?: string;
+}
+
+export interface SkillInventorySnapshot {
+  workspaceRoot: string | null;
+  settings: SkillSettings;
+  skills: PublicSkill[];
+  updatedAt: string;
+}
+
+export interface SkillTransferResult {
+  status: "imported" | "exported" | "cancelled";
+  skillId?: string;
+  fileName?: string;
+}
+
 export interface PublicRuntimeConfig {
   models: Record<ModelTier, PublicModelConfig>;
   connections: PublicModelConnection[];
@@ -526,6 +610,7 @@ export interface AppBootstrap {
   workspaces: WorkspaceSummary[];
   workspaceRoot: string | null;
   projectMemory: ProjectMemorySnapshot | null;
+  skills: SkillInventorySnapshot;
   config: PublicRuntimeConfig;
 }
 
@@ -574,6 +659,7 @@ export type RendererEvent =
   | { type: "side_chat_snapshot"; sideChat: EphemeralSideChatState }
   | { type: "side_chat_closed" }
   | { type: "project_memory_updated"; memory: ProjectMemorySnapshot | null }
+  | { type: "skills_updated"; skills: SkillInventorySnapshot }
   | {
       type: "config_updated";
       config: PublicRuntimeConfig;
@@ -609,6 +695,11 @@ export interface HammerCodeApi {
   exportProjectMemory(): Promise<ProjectMemoryTransferResult>;
   importProjectMemory(): Promise<ProjectMemoryTransferResult>;
   deleteProjectMemory(memoryId: string): Promise<ProjectMemorySnapshot | null>;
+  updateSkillSettings(settings: SkillSettings): Promise<SkillInventorySnapshot>;
+  setSkillEnabled(skillKey: string, enabled: boolean, trustProject?: boolean): Promise<SkillInventorySnapshot>;
+  importSkill(): Promise<SkillTransferResult>;
+  exportSkill(skillKey: string): Promise<SkillTransferResult>;
+  uninstallSkill(skillKey: string): Promise<SkillInventorySnapshot>;
   startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;
   cancelTask(): Promise<void>;

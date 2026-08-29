@@ -1,5 +1,5 @@
 export interface ComposerToken {
-  kind: "slash" | "mention";
+  kind: "slash" | "mention" | "skill";
   query: string;
   start: number;
   end: number;
@@ -8,11 +8,11 @@ export interface ComposerToken {
 export function detectComposerToken(value: string, cursor: number): ComposerToken | null {
   if (cursor < 0) return null;
   const prefix = value.slice(0, cursor);
-  const match = /(^|\s)(\/[^\s\/@]*|@[^\s@]*)$/.exec(prefix);
+  const match = /(^|\s)(\/[^\s\/@$]*|@[^\s@$]*|\$[^\s$\/@]*)$/.exec(prefix);
   if (!match) return null;
   const token = match[2];
   return {
-    kind: token.startsWith("/") ? "slash" : "mention",
+    kind: token.startsWith("/") ? "slash" : token.startsWith("@") ? "mention" : "skill",
     query: token.slice(1),
     start: match.index + match[1].length,
     end: cursor,

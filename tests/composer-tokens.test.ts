@@ -25,4 +25,10 @@ describe("composer command and mention tokens", () => {
   it("honors an explicitly dismissed palette cursor", () => {
     expect(detectComposerToken("/模型", -1)).toBeNull();
   });
+
+  it("detects Skill mentions after whitespace", () => {
+    expect(detectComposerToken("$pdf", 4)).toMatchObject({ kind: "skill", query: "pdf", start: 0 });
+    expect(detectComposerToken("请分析 $test", 10)).toMatchObject({ kind: "skill", query: "test" });
+    expect(detectComposerToken("price$usd", 9)).toBeNull();
+  });
 });

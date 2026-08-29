@@ -401,3 +401,49 @@ Phase 8 的比例布局、分界边界、窄窗折叠/恢复、真实 BTW 多轮
 macOS 的旧 LaunchServices 记录曾指向会被普通构建清理的 `dist/mac-arm64/HammerCode.app`，系统因此弹出“找不到该文件”；另外相对保存路径会继承访达的失效位置。打包输出现已独立到 `release/`，工作区与导入面板使用存在的绝对默认路径，项目记忆导出改为在当前工作区用 `wx` 原子创建并自动使用 `-2/-3` 避免覆盖。最终从 `/Users/norten/Developer/HammerCode/release/mac-arm64/HammerCode.app` 启动成功，renderer URL 指向该包内的 `app.asar`，没有再次出现失效路径弹窗。
 
 最终 `npm run typecheck`、26 个测试文件共 150 项测试、生产构建和 Apple Silicon 目录包全部通过。HammerTest 根目录只保留最终便携文件；调试阶段的旧导出已移动到 `Phase10Memory`，不会污染演示列表。
+
+## HC-ONLINE-2026-08-30-01
+
+- 时间：2026-08-30 03:09–03:20（Asia/Shanghai）
+- 基线提交：`17a389f`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer 完整链路操作；最终重新构建 Apple Silicon 目录包
+- 模型：真实 `fast = deepseek-v4-flash`、真实 `strong = glm-5.3-flash`
+- 工作区：`/Users/norten/Developer/HammerTest`；隔离对照工作区为 `/Users/norten/Developer/leetcode/hot100`
+- 凭据：只由正式 main process 加密配置使用；界面、终端、测试输出和本报告均未展示、打印或复制 key
+
+### 标准格式、设置与项目信任
+
+HammerTest 新增标准项目 Skill `.agents/skills/phase11-online/`，仅包含 `SKILL.md`、一份 reference 和一份纯文本 Python 脚本。重启应用后设置页发现该 Skill，但保持“未启用、未信任”；点击启用后出现来源、声明工具、脚本清单和“不授权”说明，只有“检查并信任”后才启用，并明确提示只影响下一轮。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| `$` 补全 | 单独输入 `$` 显示两个内置 Skill；选择后写入 `$pdf-review ` | 通过 |
+| `/skills` | 输入 `/skills` 只显示 Skills 命令；选择后打开设置并滚动到 Skill 区 | 通过 |
+| 声明非授权 | 设置页对每个 Skill 显示“声明工具 n 项（不授权）” | 通过 |
+| 项目首次信任 | `phase11-online` 默认禁用/未信任；确认页显示 `.agents/skills/` 来源、3 项声明工具和 1 个脚本 | 通过 |
+| 工作区隔离 | 切换到 hot100 后设置页只剩两个内置 Skill，不出现 `phase11-online` | 通过 |
+
+### Fast 显式触发与请求批准
+
+真实 Fast 使用 `$phase11-online` 显式触发。过程区在首轮请求前显示项目来源、版本 1.0.0、用户显式指定和约 168 tokens；随后严格按顺序执行 `read_skill_resource`、`run_skill_script`、`read_file`。
+
+- reference 按需读取后上下文成本从约 168 增至 214 tokens，标记为 `PHASE11_REFERENCE_OK`。
+- `run_skill_script` 在 ask 模式弹出完整审批，展示脚本、参数、cwd 和“无 API 凭据、无网络、不可写、不可读取工作区”；用户批准后输出 `{"alpha": 2, "beta": 1}`。
+- `read_file` 读取 `Phase11/skill-fixture.txt`，标记为 `PHASE11_WORKSPACE_OK`。
+- 任务 28 秒完成，3 次工具调用，最终说明全程只读、未修改文件；过程区记录已读取 2 项 Skill 资源和 1 次脚本。
+
+### Strong 自动匹配与完全访问
+
+真实 Strong 的任务没有写 `$skill-name`，仅以“请诊断测试失败”描述任务。turn 启动时自动选择 `test-failure-diagnosis`，过程区显示匹配词“诊断测试失败、失败”、内置来源、版本 1.0.0 和约 323 tokens；模型按需读取 `references/triage-checklist.md`，资源成本增至约 421 tokens，并运行真实 Node 测试定位 `failing-contract.js` 返回 2、测试契约要求 3 的根因。最终 1 分 36 秒、14 次工具调用、0 文件修改。
+
+随后在同一 Strong 聊天的新 turn 显式选择 `phase11-online`，只运行 Skill 脚本。第一次模型调用因遗漏 `path` 在 prepare 阶段失败，补齐参数后成功；轨迹展开后明确显示“授权 完全访问自动批准”、目标包内脚本、参数、95ms 和 exit code 0，没有审批弹窗，也没有工作区副作用。错误调用没有被静默隐藏。
+
+在线过程中发现最终模型一度把 `allowed-tools` 描述成授权来源，而 UI 审计实际为 `full_access`。交付前已修复：runner 现在把真实 `authorization` 与 `approvalPolicy` 写入 tool result，系统提示也明确只有该元数据和过程区审计可作为授权来源；新增自动断言防止回归。
+
+### 重启、离线安全与交付
+
+- 退出并重启应用后，HammerTest 仍为 13 条聊天，两条 Phase 11 聊天保持 completed；没有运行指示、模型续跑、脚本或旧工具重放。
+- 自动测试覆盖标准无扩展 `SKILL.md`、目录名与 name 一致性、非法名称拒绝、任意非隐藏附加资源无损迁移、显式优先/自动单选/自动开关、项目首次信任与第二工作区隔离、包指纹冻结、reference 按需读取、符号链接/越界/提示注入阻断、安全脚本真实沙箱执行、危险脚本与参数阻断、二进制 asset 只迁移不注入，以及原子导入导出和可恢复卸载。
+- 最终 `npm run typecheck`、27 个测试文件共 159 项测试、`npm run build`、`npm run package:mac` 和生产依赖审计全部通过。安全脚本测试真实经过 macOS 沙箱，并验证审批等待期间包文件变化不会替换本轮已校验代码快照；`release/mac-arm64/HammerCode.app` 的 `app.asar` 已核对包含 `dist/main/skill-store.js`、两个内置 Skill 的 `SKILL.md`、references 和安全辅助脚本。
+
+测试产物保留在 HammerTest：`.agents/skills/phase11-online/`、`Phase11/skill-fixture.txt`、`Phase11/failing-contract.js` 与 `Phase11/failing-contract.test.js`，供人工复核。首版没有联网安装、市场、自动更新或依赖下载。

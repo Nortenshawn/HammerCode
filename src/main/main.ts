@@ -5,6 +5,7 @@ import { loadRuntimeConfig } from "./config";
 import { ModelCredentialStore } from "./model-credential-store";
 import { ProjectMemoryStore } from "./project-memory-store";
 import { SessionStore } from "./session-store";
+import { SkillStore } from "./skill-store";
 import { systemClock, uuidGenerator } from "../core/utils";
 
 let mainWindow: BrowserWindow | null = null;
@@ -51,7 +52,18 @@ async function createWindow(): Promise<void> {
     uuidGenerator,
     (snapshot) => controller?.handleProjectMemoryChange(snapshot),
   );
-  controller = new AppController(mainWindow, config, store, modelCredentials, projectMemory);
+  const skillStore = new SkillStore(
+    {
+      builtinRoot: path.join(app.getAppPath(), "skills", "builtin"),
+      userRoot: path.join(app.getPath("userData"), "skills", "packages"),
+      settingsFile: path.join(app.getPath("userData"), "settings", "skill-settings.json"),
+      trashRoot: path.join(app.getPath("userData"), "skills", "removed"),
+    },
+    systemClock,
+    uuidGenerator,
+    (snapshot) => controller?.handleSkillChange(snapshot),
+  );
+  controller = new AppController(mainWindow, config, store, modelCredentials, projectMemory, skillStore);
   await controller.initialize();
   registerIpc(controller);
 
@@ -121,6 +133,15 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:delete-project-memory", (memoryId: unknown) =>
     appController.deleteProjectMemory(memoryId),
   );
+  handle("hammercode:update-skill-settings", (settings: unknown) =>
+    appController.updateSkillSettings(settings),
+  );
+  handle("hammercode:set-skill-enabled", (skillKey: unknown, enabled: unknown, trustProject: unknown) =>
+    appController.setSkillEnabled(skillKey, enabled, trustProject),
+  );
+  handle("hammercode:import-skill", () => appController.importSkill());
+  handle("hammercode:export-skill", (skillKey: unknown) => appController.exportSkill(skillKey));
+  handle("hammercode:uninstall-skill", (skillKey: unknown) => appController.uninstallSkill(skillKey));
   handle("hammercode:start-task", (request: unknown) => appController.startTask(request));
   handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));
   handle("hammercode:cancel-task", () =>

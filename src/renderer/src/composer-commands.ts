@@ -1,4 +1,4 @@
-export type ComposerCommandId = "side_chat" | "models" | "compress";
+export type ComposerCommandId = "side_chat" | "models" | "compress" | "skills";
 
 export interface ComposerCommandDefinition {
   id: ComposerCommandId;
@@ -10,6 +10,7 @@ export const COMPOSER_COMMANDS: readonly ComposerCommandDefinition[] = [
   { id: "side_chat", label: "侧边聊天", keywords: ["btw", "临时聊天"] },
   { id: "models", label: "模型", keywords: ["api", "fast", "strong"] },
   { id: "compress", label: "压缩上下文", keywords: ["压缩", "上下文", "记忆"] },
+  { id: "skills", label: "Skills", keywords: ["skill", "技能", "工作流"] },
 ];
 
 export function filterComposerCommands(query: string): readonly ComposerCommandDefinition[] {

@@ -34,6 +34,12 @@ const api: HammerCodeApi = {
   exportProjectMemory: () => ipcRenderer.invoke("hammercode:export-project-memory"),
   importProjectMemory: () => ipcRenderer.invoke("hammercode:import-project-memory"),
   deleteProjectMemory: (memoryId) => ipcRenderer.invoke("hammercode:delete-project-memory", memoryId),
+  updateSkillSettings: (settings) => ipcRenderer.invoke("hammercode:update-skill-settings", settings),
+  setSkillEnabled: (skillKey, enabled, trustProject) =>
+    ipcRenderer.invoke("hammercode:set-skill-enabled", skillKey, enabled, trustProject),
+  importSkill: () => ipcRenderer.invoke("hammercode:import-skill"),
+  exportSkill: (skillKey) => ipcRenderer.invoke("hammercode:export-skill", skillKey),
+  uninstallSkill: (skillKey) => ipcRenderer.invoke("hammercode:uninstall-skill", skillKey),
   startTask: (request) => ipcRenderer.invoke("hammercode:start-task", request),
   requestUndo: (changeId) => ipcRenderer.invoke("hammercode:request-undo", changeId),
   cancelTask: () => ipcRenderer.invoke("hammercode:cancel-task"),

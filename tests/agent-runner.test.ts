@@ -359,6 +359,12 @@ describe("agent runner", () => {
       status: "succeeded",
       authorization: "full_access",
     });
+    const toolMessage = result.messages.find(
+      (message) => message.role === "tool" && message.toolCallId === "call_auto",
+    );
+    expect(JSON.parse(toolMessage?.content ?? "{}")).toMatchObject({
+      metadata: { authorization: "full_access", approvalPolicy: "permission_mode" },
+    });
     expect(await readFile(path.join(workspace, "auto.txt"), "utf8")).toBe("approved by mode\n");
   });
 

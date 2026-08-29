@@ -12,6 +12,7 @@ export interface CommandRunOptions {
 export interface ProcessRunOptions extends Omit<CommandRunOptions, "command"> {
   executable: string;
   args: string[];
+  env?: NodeJS.ProcessEnv;
 }
 
 function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
@@ -49,7 +50,7 @@ export function runProcess(options: ProcessRunOptions): Promise<ToolResult> {
     const child = spawn(options.executable, options.args, {
       cwd: options.cwd,
       detached: true,
-      env: process.env,
+      env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 

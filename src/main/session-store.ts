@@ -128,6 +128,9 @@ const metricsSchema = z.object({
   projectMemoryRecords: z.number().int().nonnegative().default(0),
   projectMemoryCharacters: z.number().int().nonnegative().default(0),
   projectMemoryTokens: z.number().int().nonnegative().default(0),
+  skillCount: z.number().int().nonnegative().default(0),
+  skillCharacters: z.number().int().nonnegative().default(0),
+  skillTokens: z.number().int().nonnegative().default(0),
   maxRunTimeMs: z.number().int().positive(),
 });
 const projectMemorySettingsSchema = z.object({
@@ -148,6 +151,39 @@ const contextMemorySchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
 });
+const skillResourceAuditSchema = z.object({
+  path: z.string(),
+  kind: z.enum(["entry", "reference", "script", "asset"]),
+  characters: z.number().int().nonnegative(),
+  tokens: z.number().int().nonnegative(),
+  sha256: z.string(),
+  readAt: z.string(),
+});
+const skillScriptAuditSchema = z.object({
+  path: z.string(),
+  toolCallId: z.string(),
+  status: z.enum(["succeeded", "failed", "blocked", "cancelled"]),
+  authorization: z.enum(["not_required", "user_approved", "user_rejected", "full_access", "safety_blocked"]).optional(),
+  durationMs: z.number().nonnegative().optional(),
+  finishedAt: z.string(),
+});
+const skillUseAuditSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  version: z.string(),
+  source: z.enum(["builtin", "user", "project"]),
+  scope: z.enum(["application", "user", "project"]),
+  trigger: z.enum(["explicit", "automatic"]),
+  reason: z.string(),
+  packageFingerprint: z.string(),
+  entryPath: z.string(),
+  instructionCharacters: z.number().int().nonnegative(),
+  instructionTokens: z.number().int().nonnegative(),
+  availableResources: z.array(z.string()).max(100),
+  availableScripts: z.array(z.string()).max(20),
+  resources: z.array(skillResourceAuditSchema).max(200),
+  scripts: z.array(skillScriptAuditSchema).max(100),
+});
 const turnSchema = z.object({
   id: z.string(),
   userMessageId: z.string(),
@@ -166,6 +202,7 @@ const turnSchema = z.object({
   retryEvents: z.array(retryEventSchema).optional(),
   metrics: metricsSchema.optional(),
   projectMemorySettings: projectMemorySettingsSchema.optional(),
+  skills: z.array(skillUseAuditSchema).max(2).optional(),
 });
 const fileChangeSchema = z.object({
   id: z.string(),
@@ -402,6 +439,9 @@ function normalizeSessionShape(parsed: ParsedSession): AgentSession {
       metrics: turn.metrics ? {
         ...turn.metrics,
         currentContextTokens: turn.metrics.currentContextTokens ?? 0,
+        skillCount: turn.metrics.skillCount ?? 0,
+        skillCharacters: turn.metrics.skillCharacters ?? 0,
+        skillTokens: turn.metrics.skillTokens ?? 0,
       } : undefined,
     })) ?? [];
 

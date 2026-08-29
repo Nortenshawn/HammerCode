@@ -86,6 +86,7 @@ describe("context management", () => {
       verificationResults: ["npm test: 成功 · 72 tests passed"],
       unresolvedErrors: ["server_error: 上次服务端失败"],
       currentPlan: ["[in_progress] 完成长上下文测试"],
+      skillsUsed: ["pdf-review@1.0.0（显式）· 用户显式指定 $pdf-review"],
     });
     const serialized = JSON.stringify(result.messages);
     expect(result.compacted).toBe(true);
@@ -94,6 +95,7 @@ describe("context management", () => {
     expect(serialized).toContain("abc123");
     expect(serialized).toContain("72 tests passed");
     expect(serialized).toContain("完成长上下文测试");
+    expect(serialized).toContain("pdf-review@1.0.0");
     expect(estimateMessageTokens(result.messages)).toBeLessThanOrEqual(3_000);
   });
 

@@ -300,8 +300,35 @@ describe("session persistence", () => {
       projectMemoryRecords: 0,
       projectMemoryCharacters: 0,
       projectMemoryTokens: 0,
+      skillCount: 0,
+      skillCharacters: 0,
+      skillTokens: 0,
       maxRunTimeMs: 1800000,
     };
+    turn.skills = [{
+      id: "pdf-review",
+      name: "pdf-review",
+      version: "1.0.0",
+      source: "builtin",
+      scope: "application",
+      trigger: "explicit",
+      reason: "用户显式指定 $pdf-review",
+      packageFingerprint: "a".repeat(64),
+      entryPath: "SKILL.md",
+      instructionCharacters: 420,
+      instructionTokens: 120,
+      availableResources: ["references/analysis-checklist.md"],
+      availableScripts: [],
+      resources: [{
+        path: "SKILL.md",
+        kind: "entry",
+        characters: 420,
+        tokens: 120,
+        sha256: "b".repeat(64),
+        readAt: session.updatedAt,
+      }],
+      scripts: [],
+    }];
     session.contextMemory = {
       version: 1,
       summary: "当前聊天的压缩记忆",
@@ -321,6 +348,7 @@ describe("session persistence", () => {
       modelRef: "builtin:fast",
       plan: { revision: 1 },
       metrics: { retryCount: 1, currentContextTokens: 2400, contextCompactions: 1 },
+      skills: [expect.objectContaining({ id: "pdf-review", trigger: "explicit", instructionTokens: 120 })],
     });
     expect(restored?.contextMemory).toMatchObject({ summary: "当前聊天的压缩记忆", mode: "explicit", compactionCount: 1 });
     expect(restored?.turns[0].planCheckpoints?.[0]).toMatchObject({ id: "checkpoint_1" });

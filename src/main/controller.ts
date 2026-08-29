@@ -32,6 +32,9 @@ import {
   type RendererEvent,
   type SessionSettings,
   type SessionSummary,
+  type SkillInventorySnapshot,
+  type SkillSettings,
+  type SkillTransferResult,
   type WorkspaceSummary,
 } from "../shared/contracts";
 import { PendingApprovalGateway } from "./approval-gateway";
@@ -40,6 +43,7 @@ import { toPublicConfig } from "./config";
 import { connectionModelRef, ModelCredentialStore } from "./model-credential-store";
 import { ProjectMemoryStore } from "./project-memory-store";
 import { SessionStore } from "./session-store";
+import { SkillStore } from "./skill-store";
 import { searchWorkspace } from "./workspace-search";
 
 const startTaskSchema = z
@@ -104,6 +108,12 @@ export class AppController {
   private workspaces: WorkspaceSummary[] = [];
   private currentSession: AgentSession | null = null;
   private currentProjectMemory: ProjectMemorySnapshot | null = null;
+  private currentSkills: SkillInventorySnapshot = {
+    workspaceRoot: null,
+    settings: { autoMatchEnabled: true },
+    skills: [],
+    updatedAt: new Date(0).toISOString(),
+  };
   private sessions: SessionSummary[] = [];
   private runner: AgentRunner | null = null;
   private approvals: PendingApprovalGateway | null = null;
@@ -121,10 +131,12 @@ export class AppController {
     private readonly store: SessionStore,
     private readonly modelCredentials: ModelCredentialStore,
     private readonly projectMemory: ProjectMemoryStore,
+    private readonly skills: SkillStore,
   ) {}
 
   async initialize(): Promise<void> {
     await this.modelCredentials.load(this.config.models);
+    await this.skills.load();
     await this.refreshNavigation();
     await this.reconcileInterruptedUndo();
   }
@@ -136,6 +148,7 @@ export class AppController {
       workspaces: this.workspaces,
       workspaceRoot: this.workspaceRoot,
       projectMemory: this.currentProjectMemory,
+      skills: this.currentSkills,
       config: this.publicConfig(),
     };
   }
@@ -270,6 +283,7 @@ export class AppController {
         clock: systemClock,
         ids: uuidGenerator,
         projectMemory: this.projectMemory,
+        skills: this.skills,
         subagents,
         writeLeases,
         onSessionChange: async (session) => {
@@ -550,10 +564,72 @@ export class AppController {
     return this.currentProjectMemory;
   }
 
+  async updateSkillSettings(input: unknown): Promise<SkillInventorySnapshot> {
+    const settings = input as SkillSettings;
+    this.currentSkills = await this.skills.updateSettings(settings, this.workspaceRoot);
+    return this.currentSkills;
+  }
+
+  async setSkillEnabled(
+    skillKey: unknown,
+    enabled: unknown,
+    trustProject: unknown,
+  ): Promise<SkillInventorySnapshot> {
+    if (typeof enabled !== "boolean" || (trustProject !== undefined && typeof trustProject !== "boolean")) {
+      throw new HammerCodeError("Skill 启用参数无效", "INVALID_SKILL_SETTINGS", true);
+    }
+    this.currentSkills = await this.skills.setEnabled(
+      skillKey,
+      enabled,
+      trustProject === true,
+      this.workspaceRoot,
+    );
+    return this.currentSkills;
+  }
+
+  async importSkill(): Promise<SkillTransferResult> {
+    const result = await dialog.showOpenDialog(this.window, {
+      title: "导入本地 Skill 文件夹",
+      defaultPath: this.workspaceRoot ?? app.getPath("documents"),
+      properties: ["openDirectory"],
+      buttonLabel: "检查并导入",
+    });
+    if (result.canceled || !result.filePaths[0]) return { status: "cancelled" };
+    const imported = await this.skills.importFolder(result.filePaths[0], this.workspaceRoot);
+    this.currentSkills = await this.skills.inventory(this.workspaceRoot);
+    return { status: "imported", skillId: imported.id, fileName: path.basename(result.filePaths[0]) };
+  }
+
+  async exportSkill(skillKey: unknown): Promise<SkillTransferResult> {
+    const result = await dialog.showOpenDialog(this.window, {
+      title: "选择 Skill 导出位置",
+      defaultPath: this.workspaceRoot ?? app.getPath("documents"),
+      properties: ["openDirectory", "createDirectory"],
+      buttonLabel: "导出到这里",
+    });
+    if (result.canceled || !result.filePaths[0]) return { status: "cancelled" };
+    const fileName = await this.skills.exportPackage(skillKey, this.workspaceRoot, result.filePaths[0]);
+    return { status: "exported", fileName };
+  }
+
+  async uninstallSkill(skillKey: unknown): Promise<SkillInventorySnapshot> {
+    if (this.runningSessionId) {
+      throw new HammerCodeError("任务运行时不能卸载 Skill；禁用仍可安全影响下一轮", "SESSION_BUSY", true);
+    }
+    this.currentSkills = await this.skills.uninstall(skillKey, this.workspaceRoot);
+    return this.currentSkills;
+  }
+
   handleProjectMemoryChange(snapshot: ProjectMemorySnapshot): void {
     if (snapshot.workspaceRoot !== this.workspaceRoot) return;
     this.currentProjectMemory = snapshot;
     this.emit({ type: "project_memory_updated", memory: snapshot });
+  }
+
+  handleSkillChange(snapshot: SkillInventorySnapshot): void {
+    if (snapshot.workspaceRoot !== this.workspaceRoot) return;
+    this.currentSkills = snapshot;
+    this.emit({ type: "skills_updated", skills: snapshot });
   }
 
   cancelTask(detail = "任务已由用户取消"): void {
@@ -891,6 +967,7 @@ export class AppController {
     this.currentProjectMemory = this.workspaceRoot
       ? await this.projectMemory.snapshot(this.workspaceRoot)
       : null;
+    this.currentSkills = await this.skills.inventory(this.workspaceRoot);
   }
 
   private emitWorkspaceChanged(): void {
@@ -902,6 +979,7 @@ export class AppController {
       session: this.currentSession,
     });
     this.emit({ type: "project_memory_updated", memory: this.currentProjectMemory });
+    this.emit({ type: "skills_updated", skills: this.currentSkills });
   }
 
   private emit(event: RendererEvent): void {

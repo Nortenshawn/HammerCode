@@ -12,6 +12,7 @@ export interface ContextFacts {
   verificationResults: string[];
   unresolvedErrors: string[];
   currentPlan: string[];
+  skillsUsed: string[];
 }
 
 export function estimateTokens(value: string): number {
@@ -106,6 +107,10 @@ export function buildContextFacts(session: AgentSession): ContextFacts {
       .slice(-5)
       .map((turn) => `${turn.terminationReason ?? "error"}: ${turn.error!.slice(0, 500)}`),
     currentPlan: planTurn?.plan?.steps.map((step) => `[${step.status}] ${step.title}`) ?? [],
+    skillsUsed: session.turns
+      .flatMap((turn) => turn.skills ?? [])
+      .slice(-8)
+      .map((skill) => `${skill.id}@${skill.version}（${skill.trigger === "explicit" ? "显式" : "自动"}）· ${skill.reason}`),
   };
 }
 
@@ -120,6 +125,7 @@ export function renderContextFacts(facts: ContextFacts | undefined): string {
   for (const item of facts.verificationResults) lines.push(`- 工具/验证记录：${item}`);
   for (const item of facts.unresolvedErrors) lines.push(`- 历史失败：${item}`);
   for (const item of facts.currentPlan) lines.push(`- 当前计划：${item}`);
+  for (const item of facts.skillsUsed) lines.push(`- 已使用 Skill：${item}`);
   return lines.join("\n").slice(0, FACTS_LIMIT);
 }
 

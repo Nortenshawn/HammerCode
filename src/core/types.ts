@@ -10,6 +10,7 @@ import type {
   ProjectMemoryRecall,
   ProjectMemoryRecord,
   ProjectMemorySettings,
+  SkillUseAudit,
   SubagentMode,
   SubagentRole,
   SubagentTask,
@@ -93,10 +94,27 @@ export interface AgentDependencies {
   clock: Clock;
   ids: IdGenerator;
   projectMemory?: ProjectMemoryPort;
+  skills?: SkillPort;
   subagents?: SubagentCoordinatorPort;
   writeLeases?: WorkspaceWriteLeasePort;
   wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   onSessionChange?: (session: AgentSession) => void | Promise<void>;
+}
+
+export interface SkillSelection {
+  usages: SkillUseAudit[];
+  rendered: string;
+}
+
+export interface SkillPort {
+  select(workspaceRoot: string, task: string, now: Date): Promise<SkillSelection>;
+  definitions(usages: SkillUseAudit[]): ModelToolDefinition[];
+  prepare(
+    call: ToolCall,
+    usages: SkillUseAudit[],
+    workspaceRoot: string,
+    now: Date,
+  ): Promise<PreparedToolCall>;
 }
 
 export interface ProjectMemoryPort {
