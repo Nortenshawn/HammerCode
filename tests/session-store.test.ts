@@ -253,7 +253,7 @@ describe("session persistence", () => {
       turns: [expect.objectContaining({ modelTier: "fast", modelRef: "builtin:fast", permissionMode: "ask" })],
     });
     const migratedIndex = JSON.parse(await readFile(path.join(directory, "session-index.json"), "utf8")) as { version: number; workspaces: unknown[] };
-    expect(migratedIndex.version).toBe(3);
+    expect(migratedIndex.version).toBe(4);
     expect(migratedIndex.workspaces).toHaveLength(1);
   });
 
@@ -282,7 +282,46 @@ describe("session persistence", () => {
       version: number;
       workspaces: Array<{ archivedSessionIds: string[] }>;
     };
-    expect(migrated).toMatchObject({ version: 3, workspaces: [{ archivedSessionIds: [] }] });
+    expect(migrated).toMatchObject({
+      version: 4,
+      workspaces: [{
+        archivedSessionIds: [],
+        displayName: "workspace",
+        pinned: false,
+        status: "active",
+        memoryExport: { mode: "project" },
+      }],
+    });
+  });
+
+  it("migrates the v3 archive index to project metadata defaults", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const session = createSession("session_v3", "迁移项目元数据", "2026-08-30T02:30:00.000Z", "/tmp/project-v3");
+    await mkdir(path.join(directory, "chats"), { recursive: true });
+    await writeFile(path.join(directory, "chats", `${session.id}.json`), JSON.stringify(session), "utf8");
+    await writeFile(path.join(directory, "session-index.json"), JSON.stringify({
+      version: 3,
+      activeWorkspaceRoot: session.workspaceRoot,
+      workspaces: [{
+        root: session.workspaceRoot,
+        activeSessionId: session.id,
+        sessionIds: [session.id],
+        archivedSessionIds: [],
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      }],
+    }), "utf8");
+
+    const state = await new SessionStore(directory).loadState();
+    expect(state.workspaces[0]).toMatchObject({
+      root: session.workspaceRoot,
+      name: "project-v3",
+      pinned: false,
+      memoryExport: { mode: "project" },
+    });
+    const migrated = JSON.parse(await readFile(path.join(directory, "session-index.json"), "utf8")) as { version: number };
+    expect(migrated.version).toBe(4);
   });
 
   it("archives and restores chats without deleting chat files or the project", async () => {
@@ -300,13 +339,13 @@ describe("session persistence", () => {
     expect(state.archivedWorkspaces[0].sessions.map((item) => item.id)).toEqual(["session_archive_2"]);
     expect(JSON.parse(await readFile(path.join(directory, "chats", "session_archive_2.json"), "utf8"))).toMatchObject({ id: "session_archive_2" });
 
-    await store.archiveWorkspace(root);
+    await store.archiveWorkspaceChats(root);
     state = await store.loadState();
     expect(state.workspaces).toEqual([expect.objectContaining({ root, sessionCount: 0, sessions: [] })]);
     expect(state.archivedWorkspaces[0].sessions.map((item) => item.id)).toEqual(["session_archive_2", "session_archive_1"]);
 
     await store.restoreSession("session_archive_1");
-    await store.restoreWorkspace(root);
+    await store.restoreWorkspaceChats(root);
     state = await store.loadState();
     expect(state.workspaces[0].sessions.map((item) => item.id)).toEqual(["session_archive_2", "session_archive_1"]);
     expect(state.archivedWorkspaces[0]).toMatchObject({ sessionCount: 0, sessions: [] });
@@ -326,10 +365,90 @@ describe("session persistence", () => {
     running.turns[0].finishedAt = undefined;
     await store.save(running);
 
-    await expect(store.archiveWorkspace(root)).rejects.toThrow("不能归档");
+    await expect(store.archiveWorkspaceChats(root)).rejects.toThrow("不能归档");
     const state = await store.loadState({ liveSessionIds: [running.id] });
     expect(state.workspaces[0].sessions.map((item) => item.id)).toEqual([running.id, "session_archive_done"]);
     expect(state.archivedWorkspaces[0].sessions).toEqual([]);
+  });
+
+  it("persists project names, pin order, archive state and export preferences without moving chats", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const firstRoot = "/tmp/project-first";
+    const secondRoot = "/tmp/project-second";
+    await store.save(createSession("session_project_first", "第一项目", "2026-08-30T03:00:00.000Z", firstRoot));
+    await store.save(createSession("session_project_second", "第二项目", "2026-08-30T04:00:00.000Z", secondRoot));
+
+    await store.renameProject(firstRoot, "置顶项目");
+    await store.setProjectPinned(firstRoot, true);
+    await store.updateProjectMemoryExport(firstRoot, { mode: "custom", customDirectory: "/tmp/exports" });
+    let state = await store.loadState();
+    expect(state.workspaceRoot).toBe(secondRoot);
+    expect(state.workspaces.map((item) => item.root)).toEqual([firstRoot, secondRoot]);
+    expect(state.workspaces[0]).toMatchObject({
+      name: "置顶项目",
+      pinned: true,
+      memoryExport: { mode: "custom", customDirectory: "/tmp/exports" },
+    });
+
+    await store.archiveProject(firstRoot);
+    state = await store.loadState();
+    expect(state.workspaceRoot).toBe(secondRoot);
+    expect(state.workspaces.map((item) => item.root)).toEqual([secondRoot]);
+    expect(state.archivedProjects[0]).toMatchObject({
+      root: firstRoot,
+      name: "置顶项目",
+      sessionCount: 1,
+      archivedSessionCount: 0,
+      memoryExport: { mode: "custom", customDirectory: "/tmp/exports" },
+    });
+    expect(JSON.parse(await readFile(path.join(directory, "chats", "session_project_first.json"), "utf8"))).toMatchObject({ id: "session_project_first" });
+
+    await store.restoreProject(firstRoot);
+    state = await store.loadState();
+    expect(state.workspaceRoot).toBe(secondRoot);
+    expect(state.workspaces.find((item) => item.root === firstRoot)).toMatchObject({ name: "置顶项目", pinned: false, sessionCount: 1 });
+  });
+
+  it("removes a project from navigation and restores its chats when the folder is opened again", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const root = "/tmp/project-reopen";
+    await store.save(createSession("session_project_reopen", "保留聊天", "2026-08-30T05:00:00.000Z", root));
+
+    await store.removeProject(root);
+    let state = await store.loadState();
+    expect(state.workspaceRoot).toBeNull();
+    expect(state.workspaces).toEqual([]);
+    expect(state.archivedProjects).toEqual([]);
+    expect(JSON.parse(await readFile(path.join(directory, "chats", "session_project_reopen.json"), "utf8"))).toMatchObject({ id: "session_project_reopen" });
+
+    await store.setWorkspaceRoot(root);
+    state = await store.loadState();
+    expect(state.workspaceRoot).toBe(root);
+    expect(state.workspaces[0]).toMatchObject({ root, sessionCount: 1, activeSessionId: "session_project_reopen" });
+  });
+
+  it("rejects project archive and removal while a contained chat is active", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const root = "/tmp/project-active-lifecycle";
+    const running = createSession("session_project_active", "运行", "2026-08-30T06:00:00.000Z", root);
+    running.status = "executing_tool";
+    running.turns[0].status = "executing_tool";
+    running.terminationReason = undefined;
+    running.turns[0].terminationReason = undefined;
+    running.turns[0].finishedAt = undefined;
+    await store.save(running);
+
+    await expect(store.archiveProject(root)).rejects.toThrow("不能归档");
+    await expect(store.removeProject(root)).rejects.toThrow("不能归档");
+    const state = await store.loadState({ liveSessionIds: [running.id] });
+    expect(state.workspaces[0]).toMatchObject({ root, sessionCount: 1 });
+    expect(state.archivedProjects).toEqual([]);
   });
 
   it("persists plans, metrics and context memory while migrating custom model references", async () => {

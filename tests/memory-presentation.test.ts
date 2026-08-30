@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ArchivedWorkspaceSummary, ProjectMemoryRecord, WorkspaceSummary } from "../src/shared/contracts";
+import type { ArchivedProjectSummary, ArchivedWorkspaceSummary, ProjectMemoryRecord, WorkspaceSummary } from "../src/shared/contracts";
 import {
   cleanMemorySourceLabel,
   memoryDescription,
@@ -61,6 +61,30 @@ describe("project memory presentation", () => {
     expect(source).toBe("工具 edit_file · 修复登录状态");
     expect(source).not.toContain("session_abc");
     expect(source).not.toContain("turn_def");
+  });
+
+  it("resolves source titles inside an archived project", () => {
+    const projects: ArchivedProjectSummary[] = [{
+      root: "/tmp/project",
+      name: "project",
+      sessionCount: 1,
+      archivedSessionCount: 0,
+      sessions: [{
+        id: "session_abc",
+        workspaceRoot: "/tmp/project",
+        title: "归档项目中的来源聊天",
+        status: "completed",
+        turnCount: 1,
+        changedFileCount: 0,
+        createdAt: "2026-08-30T00:00:00.000Z",
+        updatedAt: "2026-08-30T00:10:00.000Z",
+      }],
+      archivedSessions: [],
+      memoryExport: { mode: "project" },
+      updatedAt: "2026-08-30T00:10:00.000Z",
+    }];
+
+    expect(memorySourceTitle(record(), [], [], projects)).toBe("工具 edit_file · 归档项目中的来源聊天");
   });
 
   it("uses concise verification titles", () => {

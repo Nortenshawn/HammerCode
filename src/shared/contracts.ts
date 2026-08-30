@@ -407,6 +407,8 @@ export interface SessionSummary {
 export interface WorkspaceSummary {
   root: string;
   name: string;
+  pinned: boolean;
+  memoryExport: ProjectMemoryExportPreference;
   sessionCount: number;
   sessions: SessionSummary[];
   activeSessionId: string | null;
@@ -418,6 +420,17 @@ export interface ArchivedWorkspaceSummary {
   name: string;
   sessionCount: number;
   sessions: SessionSummary[];
+  updatedAt: string;
+}
+
+export interface ArchivedProjectSummary {
+  root: string;
+  name: string;
+  sessionCount: number;
+  archivedSessionCount: number;
+  sessions: SessionSummary[];
+  archivedSessions: SessionSummary[];
+  memoryExport: ProjectMemoryExportPreference;
   updatedAt: string;
 }
 
@@ -562,6 +575,16 @@ export interface ProjectMemoryTransferResult {
   recordCount?: number;
 }
 
+export interface ProjectMemoryExportPreference {
+  mode: "project" | "custom";
+  customDirectory?: string;
+}
+
+export interface ProjectMemoryExportPreferenceResult {
+  status: "updated" | "cancelled";
+  preference: ProjectMemoryExportPreference;
+}
+
 export interface SkillSettings {
   modelActivationEnabled: boolean;
 }
@@ -634,6 +657,7 @@ export interface AppBootstrap {
   sessions: SessionSummary[];
   workspaces: WorkspaceSummary[];
   archivedWorkspaces: ArchivedWorkspaceSummary[];
+  archivedProjects: ArchivedProjectSummary[];
   workspaceRoot: string | null;
   projectMemory: ProjectMemorySnapshot | null;
   skills: SkillInventorySnapshot;
@@ -695,6 +719,7 @@ export type RendererEvent =
       workspaceRoot: string | null;
       workspaces: WorkspaceSummary[];
       archivedWorkspaces: ArchivedWorkspaceSummary[];
+      archivedProjects: ArchivedProjectSummary[];
       sessions: SessionSummary[];
       session: AgentSession | null;
     }
@@ -708,8 +733,13 @@ export interface HammerCodeApi {
   selectSession(sessionId: string): Promise<void>;
   archiveSession(sessionId: string): Promise<void>;
   restoreSession(sessionId: string): Promise<void>;
-  archiveWorkspace(workspaceRoot: string): Promise<void>;
-  restoreWorkspace(workspaceRoot: string): Promise<void>;
+  archiveWorkspaceChats(workspaceRoot: string): Promise<void>;
+  restoreWorkspaceChats(workspaceRoot: string): Promise<void>;
+  setProjectPinned(workspaceRoot: string, pinned: boolean): Promise<void>;
+  renameProject(workspaceRoot: string, name: string): Promise<void>;
+  archiveProject(workspaceRoot: string): Promise<void>;
+  restoreProject(workspaceRoot: string): Promise<void>;
+  removeProject(workspaceRoot: string): Promise<void>;
   updateSessionSettings(settings: SessionSettings): Promise<void>;
   testModelConnection(input: ModelConnectionProbeInput): Promise<ModelConnectionTestResult>;
   saveModelConnection(input: ModelConnectionSaveInput): Promise<PublicModelConnection>;
@@ -723,11 +753,12 @@ export interface HammerCodeApi {
   searchWorkspaceEntries(query: string): Promise<WorkspaceEntry[]>;
   previewWorkspaceEntry(path: string): Promise<ReferencePreview>;
   previewSkill(skillKey: string): Promise<ReferencePreview>;
-  listProjectMemory(): Promise<ProjectMemorySnapshot | null>;
-  updateProjectMemorySettings(settings: ProjectMemorySettings): Promise<ProjectMemorySnapshot | null>;
-  exportProjectMemory(): Promise<ProjectMemoryTransferResult>;
-  importProjectMemory(): Promise<ProjectMemoryTransferResult>;
-  deleteProjectMemory(memoryId: string): Promise<ProjectMemorySnapshot | null>;
+  listProjectMemory(workspaceRoot: string): Promise<ProjectMemorySnapshot>;
+  updateProjectMemorySettings(workspaceRoot: string, settings: ProjectMemorySettings): Promise<ProjectMemorySnapshot>;
+  configureProjectMemoryExport(workspaceRoot: string, mode: ProjectMemoryExportPreference["mode"]): Promise<ProjectMemoryExportPreferenceResult>;
+  exportProjectMemory(workspaceRoot: string): Promise<ProjectMemoryTransferResult>;
+  importProjectMemory(workspaceRoot: string): Promise<ProjectMemoryTransferResult>;
+  deleteProjectMemory(workspaceRoot: string, memoryId: string): Promise<ProjectMemorySnapshot>;
   updateSkillSettings(settings: SkillSettings): Promise<SkillInventorySnapshot>;
   setSkillEnabled(skillKey: string, enabled: boolean, trustProject?: boolean): Promise<SkillInventorySnapshot>;
   importSkill(): Promise<SkillTransferResult>;

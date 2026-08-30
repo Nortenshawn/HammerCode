@@ -1,5 +1,5 @@
 import path from "node:path";
-import { chmod, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { app, dialog, type BrowserWindow } from "electron";
 import { z } from "zod";
 import { AgentRunner } from "../core/agent-runner";
@@ -22,12 +22,15 @@ import {
   PERMISSION_MODES,
   type AgentSession,
   type AppBootstrap,
+  type ArchivedProjectSummary,
   type ArchivedWorkspaceSummary,
   type EphemeralSideChatState,
   type ModelConnectionProbeInput,
   type ModelConnectionSaveInput,
   type ModelRef,
   type ProjectMemorySnapshot,
+  type ProjectMemoryExportPreference,
+  type ProjectMemoryExportPreferenceResult,
   type ProjectMemorySettings,
   type ProjectMemoryTransferResult,
   type ReferencePreview,
@@ -81,6 +84,9 @@ const modelConnectionNameSchema = z.string().trim().min(1).max(60);
 const sideChatIdSchema = z.string().regex(/^btw_[a-zA-Z0-9_-]{1,200}$/);
 const sideChatContentSchema = z.string().trim().min(1).max(20_000);
 const projectMemoryIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
+const projectDisplayNameSchema = z.string().trim().min(1).max(80);
+const projectPinnedSchema = z.boolean();
+const projectMemoryExportModeSchema = z.enum(["project", "custom"]);
 const projectMemorySettingsSchema = z.object({
   enabled: z.boolean(),
   useMemories: z.boolean(),
@@ -110,6 +116,7 @@ export class AppController {
   private workspaceRoot: string | null = null;
   private workspaces: WorkspaceSummary[] = [];
   private archivedWorkspaces: ArchivedWorkspaceSummary[] = [];
+  private archivedProjects: ArchivedProjectSummary[] = [];
   private currentSession: AgentSession | null = null;
   private currentProjectMemory: ProjectMemorySnapshot | null = null;
   private currentSkills: SkillInventorySnapshot = {
@@ -151,6 +158,7 @@ export class AppController {
       sessions: this.sessions,
       workspaces: this.workspaces,
       archivedWorkspaces: this.archivedWorkspaces,
+      archivedProjects: this.archivedProjects,
       workspaceRoot: this.workspaceRoot,
       projectMemory: this.currentProjectMemory,
       skills: this.currentSkills,
@@ -249,7 +257,7 @@ export class AppController {
     this.emitWorkspaceChanged();
   }
 
-  async archiveWorkspace(rootInput: unknown): Promise<void> {
+  async archiveWorkspaceChats(rootInput: unknown): Promise<void> {
     if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能批量归档", "SESSION_BUSY", true);
     const root = workspaceRootSchema.parse(rootInput);
     const workspace = this.workspaces.find((item) => item.root === root);
@@ -257,19 +265,80 @@ export class AppController {
     if (workspace.sessionCount === 0) return;
     if (this.currentSession?.workspaceRoot === root) this.destroySideChat();
     this.navigationRevision += 1;
-    await this.store.archiveWorkspace(root);
+    await this.store.archiveWorkspaceChats(root);
     await this.refreshNavigation();
     this.emitWorkspaceChanged();
   }
 
-  async restoreWorkspace(rootInput: unknown): Promise<void> {
+  async restoreWorkspaceChats(rootInput: unknown): Promise<void> {
     if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能批量恢复", "SESSION_BUSY", true);
     const root = workspaceRootSchema.parse(rootInput);
     const workspace = this.archivedWorkspaces.find((item) => item.root === root);
     if (!workspace) throw new HammerCodeError("找不到已归档项目记录", "WORKSPACE_NOT_FOUND", true);
     if (workspace.sessionCount === 0) return;
     this.navigationRevision += 1;
-    await this.store.restoreWorkspace(root);
+    await this.store.restoreWorkspaceChats(root);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async setProjectPinned(rootInput: unknown, pinnedInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能调整项目", "SESSION_BUSY", true);
+    const root = workspaceRootSchema.parse(rootInput);
+    const pinned = projectPinnedSchema.parse(pinnedInput);
+    if (!this.workspaces.some((item) => item.root === root)) {
+      throw new HammerCodeError("找不到这个项目", "WORKSPACE_NOT_FOUND", true);
+    }
+    await this.store.setProjectPinned(root, pinned);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async renameProject(rootInput: unknown, nameInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能重命名项目", "SESSION_BUSY", true);
+    const root = workspaceRootSchema.parse(rootInput);
+    const name = projectDisplayNameSchema.parse(nameInput);
+    if (![...this.workspaces, ...this.archivedProjects].some((item) => item.root === root)) {
+      throw new HammerCodeError("找不到这个项目", "WORKSPACE_NOT_FOUND", true);
+    }
+    await this.store.renameProject(root, name);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async archiveProject(rootInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能归档项目", "SESSION_BUSY", true);
+    const root = workspaceRootSchema.parse(rootInput);
+    if (!this.workspaces.some((item) => item.root === root)) {
+      throw new HammerCodeError("找不到这个项目", "WORKSPACE_NOT_FOUND", true);
+    }
+    await this.store.archiveProject(root);
+    if (this.workspaceRoot === root) this.destroySideChat();
+    this.navigationRevision += 1;
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async restoreProject(rootInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能恢复项目", "SESSION_BUSY", true);
+    const root = workspaceRootSchema.parse(rootInput);
+    if (!this.archivedProjects.some((item) => item.root === root)) {
+      throw new HammerCodeError("找不到已归档项目", "WORKSPACE_NOT_FOUND", true);
+    }
+    await this.store.restoreProject(root);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async removeProject(rootInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能移除项目", "SESSION_BUSY", true);
+    const root = workspaceRootSchema.parse(rootInput);
+    if (!this.workspaces.some((item) => item.root === root)) {
+      throw new HammerCodeError("找不到这个项目", "WORKSPACE_NOT_FOUND", true);
+    }
+    await this.store.removeProject(root);
+    if (this.workspaceRoot === root) this.destroySideChat();
+    this.navigationRevision += 1;
     await this.refreshNavigation();
     this.emitWorkspaceChanged();
   }
@@ -604,67 +673,100 @@ export class AppController {
     return this.skills.previewPackage(skillKey, this.workspaceRoot);
   }
 
-  async listProjectMemory(): Promise<ProjectMemorySnapshot | null> {
-    if (!this.workspaceRoot) return null;
-    this.currentProjectMemory = await this.projectMemory.snapshot(this.workspaceRoot);
-    return this.currentProjectMemory;
+  async listProjectMemory(rootInput: unknown): Promise<ProjectMemorySnapshot> {
+    const root = this.knownProjectRoot(rootInput);
+    const snapshot = await this.projectMemory.snapshot(root);
+    if (root === this.workspaceRoot) this.currentProjectMemory = snapshot;
+    return snapshot;
   }
 
-  async updateProjectMemorySettings(input: unknown): Promise<ProjectMemorySnapshot | null> {
-    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+  async updateProjectMemorySettings(rootInput: unknown, input: unknown): Promise<ProjectMemorySnapshot> {
+    const root = this.knownProjectRoot(rootInput);
     const settings: ProjectMemorySettings = projectMemorySettingsSchema.parse(input);
-    this.currentProjectMemory = await this.projectMemory.updateSettings(this.workspaceRoot, settings);
-    return this.currentProjectMemory;
+    const snapshot = await this.projectMemory.updateSettings(root, settings);
+    if (root === this.workspaceRoot) this.currentProjectMemory = snapshot;
+    return snapshot;
   }
 
-  async exportProjectMemory(): Promise<ProjectMemoryTransferResult> {
-    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
-    const snapshot = await this.projectMemory.snapshot(this.workspaceRoot);
-    const stem = `${path.basename(this.workspaceRoot)}-hammercode-memory`;
-    const data = await this.projectMemory.exportData(this.workspaceRoot);
-    let filePath: string | null = null;
-    for (let attempt = 1; attempt <= 100; attempt += 1) {
-      const suffix = attempt === 1 ? "" : `-${attempt}`;
-      const candidate = path.join(this.workspaceRoot, `${stem}${suffix}.json`);
-      try {
-        await writeFile(candidate, data, {
-          encoding: "utf8",
-          mode: 0o600,
-          flag: "wx",
-        });
-        await chmod(candidate, 0o600);
-        filePath = candidate;
-        break;
-      } catch (error) {
-        if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") continue;
-        throw error;
+  async configureProjectMemoryExport(
+    rootInput: unknown,
+    modeInput: unknown,
+  ): Promise<ProjectMemoryExportPreferenceResult> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能调整导出位置", "SESSION_BUSY", true);
+    const root = this.knownProjectRoot(rootInput);
+    const mode = projectMemoryExportModeSchema.parse(modeInput);
+    const current = await this.store.projectMemoryExport(root);
+    let preference: ProjectMemoryExportPreference;
+    if (mode === "project") {
+      preference = { mode: "project", customDirectory: current.customDirectory };
+    } else {
+      const defaultPath = await this.existingDirectory(current.customDirectory) ?? app.getPath("documents");
+      const result = await dialog.showOpenDialog(this.window, {
+        title: "选择项目记忆默认导出目录",
+        defaultPath,
+        properties: ["openDirectory", "createDirectory"],
+        buttonLabel: "设为默认位置",
+      });
+      if (result.canceled || !result.filePaths[0]) {
+        return { status: "cancelled", preference: current };
       }
+      preference = { mode: "custom", customDirectory: result.filePaths[0] };
     }
-    if (!filePath) {
-      throw new HammerCodeError("项目目录中已有过多同名导出文件，请整理后重试", "PROJECT_MEMORY_EXPORT_NAME_EXHAUSTED", true);
+    await this.store.updateProjectMemoryExport(root, preference);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+    return { status: "updated", preference };
+  }
+
+  async exportProjectMemory(rootInput: unknown): Promise<ProjectMemoryTransferResult> {
+    const root = this.knownProjectRoot(rootInput);
+    const project = [...this.workspaces, ...this.archivedProjects].find((item) => item.root === root)!;
+    const snapshot = await this.projectMemory.snapshot(root);
+    const safeName = project.name.replace(/[\\/:*?"<>|]/g, "-").trim() || path.basename(root) || "project";
+    const preference = await this.store.projectMemoryExport(root);
+    const preferredDirectory = preference.mode === "custom" ? preference.customDirectory : root;
+    const defaultDirectory = await this.existingDirectory(preferredDirectory) ?? app.getPath("documents");
+    const result = await dialog.showSaveDialog(this.window, {
+      title: "导出项目记忆",
+      defaultPath: path.join(defaultDirectory, `${safeName}-hammercode-memory.json`),
+      buttonLabel: "确认导出",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePath) return { status: "cancelled" };
+    const data = await this.projectMemory.exportData(root);
+    const temporary = path.join(
+      path.dirname(result.filePath),
+      `.${path.basename(result.filePath)}.${process.pid}.${uuidGenerator.next("export")}.tmp`,
+    );
+    try {
+      await writeFile(temporary, data, { encoding: "utf8", mode: 0o600 });
+      await rename(temporary, result.filePath);
+      await chmod(result.filePath, 0o600);
+    } finally {
+      await rm(temporary, { force: true });
     }
     return {
       status: "exported",
-      fileName: path.basename(filePath),
+      fileName: path.basename(result.filePath),
       recordCount: snapshot.records.length,
     };
   }
 
-  async importProjectMemory(): Promise<ProjectMemoryTransferResult> {
-    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+  async importProjectMemory(rootInput: unknown): Promise<ProjectMemoryTransferResult> {
+    const root = this.knownProjectRoot(rootInput);
     const result = await dialog.showOpenDialog(this.window, {
       title: "导入项目记忆",
-      defaultPath: this.workspaceRoot,
+      defaultPath: await this.existingDirectory(root) ?? app.getPath("documents"),
       properties: ["openFile"],
-      buttonLabel: "导入到当前项目",
+      buttonLabel: "导入到所选项目",
     });
     if (result.canceled || !result.filePaths[0]) return { status: "cancelled" };
     const filePath = result.filePaths[0];
     if ((await stat(filePath)).size > 2_000_000) {
       throw new HammerCodeError("项目记忆文件超过 2 MB 上限", "PROJECT_MEMORY_IMPORT_TOO_LARGE", true);
     }
-    const imported = await this.projectMemory.importData(this.workspaceRoot, await readFile(filePath, "utf8"));
-    this.currentProjectMemory = imported.snapshot;
+    const imported = await this.projectMemory.importData(root, await readFile(filePath, "utf8"));
+    if (root === this.workspaceRoot) this.currentProjectMemory = imported.snapshot;
     return {
       status: "imported",
       fileName: path.basename(filePath),
@@ -674,11 +776,12 @@ export class AppController {
     };
   }
 
-  async deleteProjectMemory(idInput: unknown): Promise<ProjectMemorySnapshot | null> {
-    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+  async deleteProjectMemory(rootInput: unknown, idInput: unknown): Promise<ProjectMemorySnapshot> {
+    const root = this.knownProjectRoot(rootInput);
     const id = projectMemoryIdSchema.parse(idInput);
-    this.currentProjectMemory = await this.projectMemory.delete(this.workspaceRoot, id);
-    return this.currentProjectMemory;
+    const snapshot = await this.projectMemory.delete(root, id);
+    if (root === this.workspaceRoot) this.currentProjectMemory = snapshot;
+    return snapshot;
   }
 
   async updateSkillSettings(input: unknown): Promise<SkillInventorySnapshot> {
@@ -836,7 +939,9 @@ export class AppController {
         ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     const summary: WorkspaceSummary = {
       root: session.workspaceRoot,
-      name: path.basename(session.workspaceRoot) || session.workspaceRoot,
+      name: existing?.name ?? (path.basename(session.workspaceRoot) || session.workspaceRoot),
+      pinned: existing?.pinned ?? false,
+      memoryExport: existing?.memoryExport ?? { mode: "project" },
       sessionCount: sessions.length,
       sessions,
       activeSessionId: activate ? session.id : existing?.activeSessionId ?? null,
@@ -861,6 +966,23 @@ export class AppController {
 
   private isBusy(): boolean {
     return this.isRunning() || this.isUndoBusy() || this.contextCompactionAbort !== null;
+  }
+
+  private knownProjectRoot(input: unknown): string {
+    const root = workspaceRootSchema.parse(input);
+    if (![...this.workspaces, ...this.archivedProjects].some((project) => project.root === root)) {
+      throw new HammerCodeError("找不到这个项目", "WORKSPACE_NOT_FOUND", true);
+    }
+    return root;
+  }
+
+  private async existingDirectory(candidate: string | undefined): Promise<string | null> {
+    if (!candidate) return null;
+    try {
+      return (await stat(candidate)).isDirectory() ? candidate : null;
+    } catch {
+      return null;
+    }
   }
 
   shutdown(): void {
@@ -1081,6 +1203,7 @@ export class AppController {
     this.sessions = state.sessions;
     this.workspaces = state.workspaces;
     this.archivedWorkspaces = state.archivedWorkspaces;
+    this.archivedProjects = state.archivedProjects;
     this.workspaceRoot = state.workspaceRoot;
     this.currentProjectMemory = this.workspaceRoot
       ? await this.projectMemory.snapshot(this.workspaceRoot)
@@ -1094,6 +1217,7 @@ export class AppController {
       workspaceRoot: this.workspaceRoot,
       workspaces: this.workspaces,
       archivedWorkspaces: this.archivedWorkspaces,
+      archivedProjects: this.archivedProjects,
       sessions: this.sessions,
       session: this.currentSession,
     });

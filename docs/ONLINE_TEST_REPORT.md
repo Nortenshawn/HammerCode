@@ -507,3 +507,38 @@ HammerTest 验收开始时有 14 条活动聊天。先归档一条聊天并从�
 - 会话索引 v1/v2 → v3、空项目保留、单条和整项目归档恢复、运行态原子阻断、后台保存不意外取消归档，以及聊天文件保留由自动测试覆盖。
 - 项目记忆的旧内部标签清理、文件/验证标题和活动/归档来源聊天标题解析由自动测试覆盖。
 - 最终 `npm run typecheck`、29 个测试文件共 172 项测试、`npm run build` 与 `npm run package:mac` 全部通过；目录包位于 `release/mac-arm64/HammerCode.app`。当前包未签名，符合本地 Apple Silicon 演示阶段预期。
+
+## HC-ONLINE-2026-08-30-04
+
+- 时间：2026-08-30 15:57–16:27（Asia/Shanghai）
+- 基线提交：`0bc8410`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer、系统目录选择器和 macOS 保存面板完成操作；退出并重启后复核持久化
+- 模型：本轮为项目导航、设置和本地持久化验收，没有发起模型请求
+- 工作区：`/Users/norten/Developer/HammerTest`、`/Users/norten/Developer/HammerTest/Phase4FastAsk` 与 `/Users/norten/Developer/leetcode/hot100`
+- 凭据：本轮不读取、不检测也不传输模型凭据；界面、终端、测试输出和本报告均未展示、打印或复制 key
+
+### 项目菜单、生命周期与聊天恢复
+
+项目行右侧分别显示方框书写入口和悬停三点菜单。菜单实际包含“置顶项目、重命名、归档项目、移除项目”，运行态禁用策略和提示由正式 controller 处理。HammerTest 临时重命名后确认磁盘目录未变，置顶后移动到首位；验收结束前已恢复名称并取消置顶，原稳定顺序恢复。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 项目归档 | 当前空项目 Phase4FastAsk 从左栏消失；设置“已归档项目”显示名称、完整路径及 0/0 聊天计数 | 通过 |
+| 恢复隔离 | 在设置恢复 Phase4FastAsk 后项目回到左栏，但没有抢占当时的主聊天位置 | 通过 |
+| 无损移除 | 移除 Phase4FastAsk 后重新选择同一目录，项目重新绑定；工作区文件未删除 | 通过 |
+| 历史聊天恢复 | 将含 1 条聊天的 hot100 移除后重新打开 `/Users/norten/Developer/leetcode/hot100`，原聊天标题、Markdown 内容和工具过程完整恢复 | 通过 |
+| 重启持久化 | 退出并重启 Electron 后，hot100 仍为 1 条聊天、HammerTest 仍为 12 条活动聊天，Phase4FastAsk 仍是当前空项目；临时名称和置顶均已复原 | 通过 |
+
+### 跨项目记忆与导出保存面板
+
+设置的项目记忆页默认显示 Phase4FastAsk 名称、完整路径和“主聊天当前项目”。只在设置选择 HammerTest 后读取到 3 条项目记忆及其来源标题；返回聊天时主项目仍是 Phase4FastAsk，没有切换活动聊天或建立 BTW。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 自定义默认目录 | 通过系统目录面板选择 `/Users/norten/Developer/HammerTest/Phase13MemoryExports`，偏好按项目更新 | 通过 |
+| 每次最终确认 | 自定义模式和项目地址模式的每次导出都打开 macOS 保存面板，并分别预定位到配置目录和 HammerTest 根目录 | 通过 |
+| 取消零写入 | 首次自定义导出和项目地址导出均取消；对应目录没有生成额外文件 | 通过 |
+| 确认导出 | 保存为 `Phase13MemoryExports/phase13-memory-export.json`，文件模式 `0600`、大小 2270 字节、格式 `hammercode-project-memory` v1，共 3 条记录 | 通过 |
+| 偏好恢复 | 自定义模式切回项目地址；重启后界面仍显示项目地址选项，路径为当前查看项目完整路径 | 通过 |
+
+测试过程中没有运行模型、工具命令或工作区写入 Agent；唯一新增验收产物是 `/Users/norten/Developer/HammerTest/Phase13MemoryExports/phase13-memory-export.json`，按在线测试约定保留供人工复核。项目名称、置顶、归档/移除状态和当前主工作区均已复原。自动测试覆盖 v3 → v4 迁移、生命周期原子阻断、聊天文件保留、排序和导出偏好；最终交付检查记录在同阶段状态中。

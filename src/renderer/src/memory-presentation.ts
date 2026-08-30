@@ -1,4 +1,5 @@
 import type {
+  ArchivedProjectSummary,
   ArchivedWorkspaceSummary,
   ProjectMemoryRecord,
   WorkspaceSummary,
@@ -59,11 +60,15 @@ export function memorySourceTitle(
   record: ProjectMemoryRecord,
   workspaces: WorkspaceSummary[],
   archivedWorkspaces: ArchivedWorkspaceSummary[],
+  archivedProjects: ArchivedProjectSummary[] = [],
 ): string {
   const sessionId = record.source.sessionId;
   const session = sessionId
-    ? [...workspaces, ...archivedWorkspaces]
-      .flatMap((workspace) => workspace.sessions)
+    ? [
+      ...workspaces.flatMap((workspace) => workspace.sessions),
+      ...archivedWorkspaces.flatMap((workspace) => workspace.sessions),
+      ...archivedProjects.flatMap((workspace) => [...workspace.sessions, ...workspace.archivedSessions]),
+    ]
       .find((item) => item.id === sessionId)
     : undefined;
   return session

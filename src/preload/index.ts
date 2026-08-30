@@ -10,8 +10,13 @@ const api: HammerCodeApi = {
   selectSession: (sessionId) => ipcRenderer.invoke("hammercode:select-session", sessionId),
   archiveSession: (sessionId) => ipcRenderer.invoke("hammercode:archive-session", sessionId),
   restoreSession: (sessionId) => ipcRenderer.invoke("hammercode:restore-session", sessionId),
-  archiveWorkspace: (workspaceRoot) => ipcRenderer.invoke("hammercode:archive-workspace", workspaceRoot),
-  restoreWorkspace: (workspaceRoot) => ipcRenderer.invoke("hammercode:restore-workspace", workspaceRoot),
+  archiveWorkspaceChats: (workspaceRoot) => ipcRenderer.invoke("hammercode:archive-workspace-chats", workspaceRoot),
+  restoreWorkspaceChats: (workspaceRoot) => ipcRenderer.invoke("hammercode:restore-workspace-chats", workspaceRoot),
+  setProjectPinned: (workspaceRoot, pinned) => ipcRenderer.invoke("hammercode:set-project-pinned", workspaceRoot, pinned),
+  renameProject: (workspaceRoot, name) => ipcRenderer.invoke("hammercode:rename-project", workspaceRoot, name),
+  archiveProject: (workspaceRoot) => ipcRenderer.invoke("hammercode:archive-project", workspaceRoot),
+  restoreProject: (workspaceRoot) => ipcRenderer.invoke("hammercode:restore-project", workspaceRoot),
+  removeProject: (workspaceRoot) => ipcRenderer.invoke("hammercode:remove-project", workspaceRoot),
   updateSessionSettings: (settings) =>
     ipcRenderer.invoke("hammercode:update-session-settings", settings),
   testModelConnection: (input) =>
@@ -36,12 +41,14 @@ const api: HammerCodeApi = {
     ipcRenderer.invoke("hammercode:preview-workspace-entry", path),
   previewSkill: (skillKey) =>
     ipcRenderer.invoke("hammercode:preview-skill", skillKey),
-  listProjectMemory: () => ipcRenderer.invoke("hammercode:list-project-memory"),
-  updateProjectMemorySettings: (settings) =>
-    ipcRenderer.invoke("hammercode:update-project-memory-settings", settings),
-  exportProjectMemory: () => ipcRenderer.invoke("hammercode:export-project-memory"),
-  importProjectMemory: () => ipcRenderer.invoke("hammercode:import-project-memory"),
-  deleteProjectMemory: (memoryId) => ipcRenderer.invoke("hammercode:delete-project-memory", memoryId),
+  listProjectMemory: (workspaceRoot) => ipcRenderer.invoke("hammercode:list-project-memory", workspaceRoot),
+  updateProjectMemorySettings: (workspaceRoot, settings) =>
+    ipcRenderer.invoke("hammercode:update-project-memory-settings", workspaceRoot, settings),
+  configureProjectMemoryExport: (workspaceRoot, mode) =>
+    ipcRenderer.invoke("hammercode:configure-project-memory-export", workspaceRoot, mode),
+  exportProjectMemory: (workspaceRoot) => ipcRenderer.invoke("hammercode:export-project-memory", workspaceRoot),
+  importProjectMemory: (workspaceRoot) => ipcRenderer.invoke("hammercode:import-project-memory", workspaceRoot),
+  deleteProjectMemory: (workspaceRoot, memoryId) => ipcRenderer.invoke("hammercode:delete-project-memory", workspaceRoot, memoryId),
   updateSkillSettings: (settings) => ipcRenderer.invoke("hammercode:update-skill-settings", settings),
   setSkillEnabled: (skillKey, enabled, trustProject) =>
     ipcRenderer.invoke("hammercode:set-skill-enabled", skillKey, enabled, trustProject),

@@ -11,6 +11,7 @@ import {
   SUBAGENT_ROLES,
   type AgentSession,
   type AgentTurn,
+  type ArchivedProjectSummary,
   type ArchivedWorkspaceSummary,
   type ModelRef,
   type ConversationMessage,
@@ -385,18 +386,33 @@ const indexV2Schema = z.object({
   activeWorkspaceRoot: z.string().nullable(),
   workspaces: z.array(workspaceIndexV2Schema),
 });
-const workspaceIndexSchema = workspaceIndexV2Schema.extend({
+const workspaceIndexV3Schema = workspaceIndexV2Schema.extend({
   archivedSessionIds: z.array(z.string()),
 });
 const indexV3Schema = z.object({
   version: z.literal(3),
+  activeWorkspaceRoot: z.string().nullable(),
+  workspaces: z.array(workspaceIndexV3Schema),
+});
+const memoryExportPreferenceSchema = z.object({
+  mode: z.enum(["project", "custom"]),
+  customDirectory: z.string().min(1).max(4_096).optional(),
+});
+const workspaceIndexSchema = workspaceIndexV3Schema.extend({
+  displayName: z.string().min(1).max(80),
+  pinned: z.boolean(),
+  status: z.enum(["active", "archived", "removed"]),
+  memoryExport: memoryExportPreferenceSchema,
+});
+const indexV4Schema = z.object({
+  version: z.literal(4),
   activeWorkspaceRoot: z.string().nullable(),
   workspaces: z.array(workspaceIndexSchema),
 });
 
 type ParsedSession = z.infer<typeof sessionSchema>;
 type LegacyIndex = z.infer<typeof indexV1Schema>;
-type SessionIndex = z.infer<typeof indexV3Schema>;
+type SessionIndex = z.infer<typeof indexV4Schema>;
 type WorkspaceIndex = z.infer<typeof workspaceIndexSchema>;
 
 export interface SessionStoreState {
@@ -404,6 +420,7 @@ export interface SessionStoreState {
   sessions: SessionSummary[];
   workspaces: WorkspaceSummary[];
   archivedWorkspaces: ArchivedWorkspaceSummary[];
+  archivedProjects: ArchivedProjectSummary[];
   workspaceRoot: string | null;
 }
 
@@ -578,7 +595,9 @@ function toWorkspaceSummary(
 ): WorkspaceSummary {
   return {
     root: workspace.root,
-    name: workspaceName(workspace.root),
+    name: workspace.displayName,
+    pinned: workspace.pinned,
+    memoryExport: { ...workspace.memoryExport },
     sessionCount: sessions.length,
     sessions,
     activeSessionId: workspace.activeSessionId,
@@ -592,9 +611,26 @@ function toArchivedWorkspaceSummary(
 ): ArchivedWorkspaceSummary {
   return {
     root: workspace.root,
-    name: workspaceName(workspace.root),
+    name: workspace.displayName,
     sessionCount: sessions.length,
     sessions,
+    updatedAt: workspace.updatedAt,
+  };
+}
+
+function toArchivedProjectSummary(
+  workspace: WorkspaceIndex,
+  sessions: SessionSummary[],
+  archivedSessions: SessionSummary[],
+): ArchivedProjectSummary {
+  return {
+    root: workspace.root,
+    name: workspace.displayName,
+    sessionCount: sessions.length,
+    archivedSessionCount: archivedSessions.length,
+    sessions,
+    archivedSessions,
+    memoryExport: { ...workspace.memoryExport },
     updatedAt: workspace.updatedAt,
   };
 }
@@ -622,6 +658,7 @@ export class SessionStore {
     const liveSessionIds = new Set(options.liveSessionIds ?? []);
     const workspaceSummaries: WorkspaceSummary[] = [];
     const archivedWorkspaceSummaries: ArchivedWorkspaceSummary[] = [];
+    const archivedProjectSummaries: ArchivedProjectSummary[] = [];
     let activeSession: AgentSession | null = null;
     let activeSessions: SessionSummary[] = [];
     for (const workspace of index.workspaces) {
@@ -650,14 +687,18 @@ export class SessionStore {
       const selected =
         sessions.find((session) => session.id === workspace.activeSessionId) ?? null;
       if (!selected) workspace.activeSessionId = null;
-      workspaceSummaries.push(toWorkspaceSummary(workspace, summaries));
-      archivedWorkspaceSummaries.push(toArchivedWorkspaceSummary(workspace, archivedSummaries));
-      if (workspace.root === index.activeWorkspaceRoot) {
+      if (workspace.status === "active") {
+        workspaceSummaries.push(toWorkspaceSummary(workspace, summaries));
+        archivedWorkspaceSummaries.push(toArchivedWorkspaceSummary(workspace, archivedSummaries));
+      } else if (workspace.status === "archived") {
+        archivedProjectSummaries.push(toArchivedProjectSummary(workspace, summaries, archivedSummaries));
+      }
+      if (workspace.status === "active" && workspace.root === index.activeWorkspaceRoot) {
         activeSession = selected;
         activeSessions = summaries;
       }
     }
-    if (!index.workspaces.some((item) => item.root === index.activeWorkspaceRoot)) {
+    if (!index.workspaces.some((item) => item.root === index.activeWorkspaceRoot && item.status === "active")) {
       index.activeWorkspaceRoot = null;
     }
     await this.writeIndex(index);
@@ -666,8 +707,9 @@ export class SessionStore {
       sessions: activeSessions,
       // Keep the explicit insertion order from the index. Selecting a project or
       // chat must not make the sidebar jump by moving that project to the top.
-      workspaces: workspaceSummaries,
+      workspaces: workspaceSummaries.sort((left, right) => Number(right.pinned) - Number(left.pinned)),
       archivedWorkspaces: archivedWorkspaceSummaries,
+      archivedProjects: archivedProjectSummaries,
       workspaceRoot: index.activeWorkspaceRoot,
     };
   }
@@ -694,6 +736,10 @@ export class SessionStore {
         activeSessionId: null,
         sessionIds: [],
         archivedSessionIds: [],
+        displayName: workspaceName(normalized.workspaceRoot),
+        pinned: false,
+        status: "active",
+        memoryExport: { mode: "project" },
         createdAt: now,
         updatedAt: now,
       };
@@ -710,6 +756,7 @@ export class SessionStore {
     }
     workspace.updatedAt = now;
     if (options.activate !== false) {
+      workspace.status = "active";
       workspace.activeSessionId = normalized.id;
       index.activeWorkspaceRoot = workspace.root;
     }
@@ -726,11 +773,16 @@ export class SessionStore {
         activeSessionId: null,
         sessionIds: [],
         archivedSessionIds: [],
+        displayName: workspaceName(workspaceRoot),
+        pinned: false,
+        status: "active",
+        memoryExport: { mode: "project" },
         createdAt: now,
         updatedAt: now,
       };
       index.workspaces.push(workspace);
     }
+    workspace.status = "active";
     index.activeWorkspaceRoot = workspace.root;
     workspace.updatedAt = new Date().toISOString();
     await this.writeIndex(index);
@@ -739,7 +791,7 @@ export class SessionStore {
   async selectWorkspace(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot);
-    if (!workspace) throw new Error("找不到指定工作区");
+    if (!workspace || workspace.status !== "active") throw new Error("找不到指定工作区");
     index.activeWorkspaceRoot = workspace.root;
     workspace.updatedAt = new Date().toISOString();
     await this.writeIndex(index);
@@ -763,7 +815,7 @@ export class SessionStore {
   async archiveSession(sessionId: string): Promise<void> {
     this.assertSafeSessionId(sessionId);
     const index = await this.readIndex();
-    const workspace = index.workspaces.find((item) => item.sessionIds.includes(sessionId));
+    const workspace = index.workspaces.find((item) => item.status === "active" && item.sessionIds.includes(sessionId));
     if (!workspace) throw new Error("找不到可归档的聊天");
     const session = await this.readSession(sessionId, true);
     this.assertSessionCanBeArchived(session);
@@ -780,7 +832,7 @@ export class SessionStore {
   async restoreSession(sessionId: string): Promise<void> {
     this.assertSafeSessionId(sessionId);
     const index = await this.readIndex();
-    const workspace = index.workspaces.find((item) => item.archivedSessionIds.includes(sessionId));
+    const workspace = index.workspaces.find((item) => item.status === "active" && item.archivedSessionIds.includes(sessionId));
     if (!workspace) throw new Error("找不到已归档聊天");
     const session = await this.readSession(sessionId);
     if (!session || session.workspaceRoot !== workspace.root) throw new Error("归档聊天内容不可用");
@@ -790,9 +842,9 @@ export class SessionStore {
     await this.writeIndex(index);
   }
 
-  async archiveWorkspace(workspaceRoot: string): Promise<void> {
+  async archiveWorkspaceChats(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
-    const workspace = index.workspaces.find((item) => item.root === workspaceRoot);
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
     if (!workspace) throw new Error("找不到指定工作区");
     const sessions = await Promise.all(
       workspace.sessionIds.map((id) => this.readSession(id, true)),
@@ -808,9 +860,9 @@ export class SessionStore {
     await this.writeIndex(index);
   }
 
-  async restoreWorkspace(workspaceRoot: string): Promise<void> {
+  async restoreWorkspaceChats(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
-    const workspace = index.workspaces.find((item) => item.root === workspaceRoot);
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
     if (!workspace) throw new Error("找不到指定工作区");
     const sessions = await Promise.all(
       workspace.archivedSessionIds.map((id) => this.readSession(id)),
@@ -825,6 +877,82 @@ export class SessionStore {
     workspace.archivedSessionIds = [];
     workspace.updatedAt = new Date().toISOString();
     await this.writeIndex(index);
+  }
+
+  async setProjectPinned(workspaceRoot: string, pinned: boolean): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
+    if (!workspace) throw new Error("找不到活动项目");
+    workspace.pinned = pinned;
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async renameProject(workspaceRoot: string, displayName: string): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status !== "removed");
+    if (!workspace) throw new Error("找不到项目");
+    workspace.displayName = displayName;
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async archiveProject(workspaceRoot: string): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
+    if (!workspace) throw new Error("找不到活动项目");
+    const sessions = await Promise.all(
+      [...workspace.sessionIds, ...workspace.archivedSessionIds].map((id) => this.readSession(id, true)),
+    );
+    sessions.forEach((session) => this.assertSessionCanBeArchived(session));
+    workspace.status = "archived";
+    workspace.pinned = false;
+    if (index.activeWorkspaceRoot === workspaceRoot) index.activeWorkspaceRoot = null;
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async restoreProject(workspaceRoot: string): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "archived");
+    if (!workspace) throw new Error("找不到已归档项目");
+    workspace.status = "active";
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async removeProject(workspaceRoot: string): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
+    if (!workspace) throw new Error("找不到活动项目");
+    const sessions = await Promise.all(
+      [...workspace.sessionIds, ...workspace.archivedSessionIds].map((id) => this.readSession(id, true)),
+    );
+    sessions.forEach((session) => this.assertSessionCanBeArchived(session));
+    workspace.status = "removed";
+    workspace.pinned = false;
+    if (index.activeWorkspaceRoot === workspaceRoot) index.activeWorkspaceRoot = null;
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async updateProjectMemoryExport(
+    workspaceRoot: string,
+    preference: { mode: "project" | "custom"; customDirectory?: string },
+  ): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status !== "removed");
+    if (!workspace) throw new Error("找不到项目");
+    workspace.memoryExport = memoryExportPreferenceSchema.parse(preference);
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async projectMemoryExport(workspaceRoot: string): Promise<{ mode: "project" | "custom"; customDirectory?: string }> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status !== "removed");
+    if (!workspace) throw new Error("找不到项目");
+    return { ...workspace.memoryExport };
   }
 
   async clear(): Promise<void> {
@@ -846,8 +974,10 @@ export class SessionStore {
     if (raw !== null) {
       try {
         const value = JSON.parse(raw) as unknown;
-        const current = indexV3Schema.safeParse(value);
+        const current = indexV4Schema.safeParse(value);
         if (current.success) return current.data;
+        const previousV3 = indexV3Schema.safeParse(value);
+        if (previousV3.success) return this.migrateV3Index(previousV3.data);
         const previous = indexV2Schema.safeParse(value);
         if (previous.success) return this.migrateV2Index(previous.data);
         const legacy = indexV1Schema.safeParse(value);
@@ -869,11 +999,31 @@ export class SessionStore {
 
   private async migrateV2Index(previous: z.infer<typeof indexV2Schema>): Promise<SessionIndex> {
     const index: SessionIndex = {
-      version: 3,
+      version: 4,
       activeWorkspaceRoot: previous.activeWorkspaceRoot,
       workspaces: previous.workspaces.map((workspace) => ({
         ...workspace,
         archivedSessionIds: [],
+        displayName: workspaceName(workspace.root),
+        pinned: false,
+        status: "active",
+        memoryExport: { mode: "project" },
+      })),
+    };
+    await this.writeIndex(index);
+    return index;
+  }
+
+  private async migrateV3Index(previous: z.infer<typeof indexV3Schema>): Promise<SessionIndex> {
+    const index: SessionIndex = {
+      version: 4,
+      activeWorkspaceRoot: previous.activeWorkspaceRoot,
+      workspaces: previous.workspaces.map((workspace) => ({
+        ...workspace,
+        displayName: workspaceName(workspace.root),
+        pinned: false,
+        status: "active",
+        memoryExport: { mode: "project" },
       })),
     };
     await this.writeIndex(index);
@@ -904,6 +1054,10 @@ export class SessionStore {
           .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
           .map((session) => session.id),
         archivedSessionIds: [],
+        displayName: workspaceName(root),
+        pinned: false,
+        status: "active",
+        memoryExport: { mode: "project" },
         createdAt,
         updatedAt,
       };
@@ -914,7 +1068,7 @@ export class SessionStore {
       workspaces.find((workspace) => workspace.root === legacy.workspaceRoot)?.root ??
       workspaces[0]?.root ??
       null;
-    const index: SessionIndex = { version: 3, activeWorkspaceRoot, workspaces };
+    const index: SessionIndex = { version: 4, activeWorkspaceRoot, workspaces };
     await this.writeIndex(index);
     return index;
   }
@@ -929,7 +1083,7 @@ export class SessionStore {
       this.assertSafeSessionId(session.id);
       await this.writeSession(session);
       const index: SessionIndex = {
-        version: 3,
+        version: 4,
         activeWorkspaceRoot: session.workspaceRoot,
         workspaces: [
           {
@@ -937,6 +1091,10 @@ export class SessionStore {
             activeSessionId: session.id,
             sessionIds: [session.id],
             archivedSessionIds: [],
+            displayName: workspaceName(session.workspaceRoot),
+            pinned: false,
+            status: "active",
+            memoryExport: { mode: "project" },
             createdAt: session.createdAt,
             updatedAt: session.updatedAt,
           },
@@ -1033,6 +1191,6 @@ export class SessionStore {
   }
 
   private emptyIndex(): SessionIndex {
-    return { version: 3, activeWorkspaceRoot: null, workspaces: [] };
+    return { version: 4, activeWorkspaceRoot: null, workspaces: [] };
   }
 }

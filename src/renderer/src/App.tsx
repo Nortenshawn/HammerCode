@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import logoUrl from "../../../logos/logo.png";
@@ -6,12 +6,14 @@ import type {
   AgentSession,
   AgentTurn,
   AppBootstrap,
+  ArchivedProjectSummary,
   ArchivedWorkspaceSummary,
   AssistantMessage,
   EphemeralSideChatState,
   ModelRef,
   ModelTier,
   PermissionMode,
+  ProjectMemorySnapshot,
   PublicModelConnection,
   PublicSkill,
   ReferencePreview,
@@ -60,8 +62,12 @@ type IconName =
   | "file"
   | "folder"
   | "branch"
+  | "compose"
   | "gear"
+  | "more"
+  | "pin"
   | "plus"
+  | "remove"
   | "spark"
   | "square"
   | "stop"
@@ -77,8 +83,12 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></>,
     folder: <><path d="M3 6h6l2 2h10v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/><path d="M1 10h20"/></>,
     branch: <><circle cx="6" cy="5" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10"/><path d="M8 11h4a6 6 0 0 0 6-2"/></>,
+    compose: <><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L11 15l-4 1 1-4Z"/></>,
     gear: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.37.37.7.6 1 .3.32.68.46 1.1.46h.1v4h-.1A1.7 1.7 0 0 0 19.4 15Z"/></>,
+    more: <><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></>,
+    pin: <><path d="M12 17v5"/><path d="m5 17 2-5V4h10v8l2 5Z"/></>,
     plus: <><path d="M12 5v14"/><path d="M5 12h14"/></>,
+    remove: <><path d="M5 5l14 14"/><path d="M19 5 5 19"/></>,
     spark: <><path d="m12 3 1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6Z"/><path d="m18.5 14 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z"/></>,
     square: <rect x="4" y="4" width="16" height="16" rx="3"/>,
     stop: <rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor" stroke="none"/>,
@@ -212,6 +222,7 @@ function upsertWorkspaceSession(items: WorkspaceSummary[], session: AgentSession
 }
 
 type SettingsSection = "models" | "skills" | "memory" | "archived";
+type ProjectDialog = { mode: "rename" | "archive" | "remove"; root: string; name: string };
 
 function Markdown({ children }: { children: string }) {
   return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>;
@@ -715,12 +726,51 @@ function SettingsView({
   const [skillBusy, setSkillBusy] = useState<string | null>(null);
   const [pendingSkillTrust, setPendingSkillTrust] = useState<PublicSkill | null>(null);
   const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
+  const memoryProjects = useMemo(
+    () => [...bootstrap.workspaces, ...bootstrap.archivedProjects],
+    [bootstrap.workspaces, bootstrap.archivedProjects],
+  );
+  const [memoryWorkspaceRoot, setMemoryWorkspaceRoot] = useState(
+    bootstrap.workspaceRoot ?? memoryProjects[0]?.root ?? "",
+  );
+  const [viewedMemory, setViewedMemory] = useState<ProjectMemorySnapshot | null>(
+    bootstrap.projectMemory,
+  );
+  const [loadingMemory, setLoadingMemory] = useState(false);
+  const [exportPreferenceBusy, setExportPreferenceBusy] = useState(false);
+  const memoryProject = memoryProjects.find((project) => project.root === memoryWorkspaceRoot);
+  const memoryProjectRoots = memoryProjects.map((project) => project.root).join("\n");
+
+  useEffect(() => {
+    if (memoryWorkspaceRoot && memoryProjects.some((project) => project.root === memoryWorkspaceRoot)) return;
+    setMemoryWorkspaceRoot(bootstrap.workspaceRoot ?? memoryProjects[0]?.root ?? "");
+  }, [bootstrap.workspaceRoot, memoryProjectRoots, memoryWorkspaceRoot]);
+
+  useEffect(() => {
+    if (bootstrap.projectMemory?.workspaceRoot === memoryWorkspaceRoot) {
+      setViewedMemory(bootstrap.projectMemory);
+    }
+  }, [bootstrap.projectMemory, memoryWorkspaceRoot]);
+
+  useEffect(() => {
+    if (section !== "memory" || !memoryWorkspaceRoot) return;
+    let cancelled = false;
+    setLoadingMemory(true);
+    window.hammerCode.listProjectMemory(memoryWorkspaceRoot).then((snapshot) => {
+      if (!cancelled) setViewedMemory(snapshot);
+    }).catch((error) => {
+      if (!cancelled) onNotice({ level: "error", text: userFacingError(error) });
+    }).finally(() => {
+      if (!cancelled) setLoadingMemory(false);
+    });
+    return () => { cancelled = true; };
+  }, [memoryWorkspaceRoot, section]);
 
   const deleteMemory = async (memoryId: string) => {
-    if (deletingMemory) return;
+    if (deletingMemory || !memoryWorkspaceRoot) return;
     setDeletingMemory(memoryId);
     try {
-      await window.hammerCode.deleteProjectMemory(memoryId);
+      setViewedMemory(await window.hammerCode.deleteProjectMemory(memoryWorkspaceRoot, memoryId));
       onNotice({ level: "info", text: "项目记忆已删除。" });
     } catch (error) {
       onNotice({ level: "error", text: userFacingError(error) });
@@ -730,11 +780,11 @@ function SettingsView({
   };
 
   const updateMemorySettings = async (next: Partial<NonNullable<AppBootstrap["projectMemory"]>["settings"]>) => {
-    const current = bootstrap.projectMemory?.settings;
-    if (!current || savingMemory) return;
+    const current = viewedMemory?.settings;
+    if (!current || !memoryWorkspaceRoot || savingMemory) return;
     setSavingMemory(true);
     try {
-      await window.hammerCode.updateProjectMemorySettings({ ...current, ...next });
+      setViewedMemory(await window.hammerCode.updateProjectMemorySettings(memoryWorkspaceRoot, { ...current, ...next }));
     } catch (error) {
       onNotice({ level: "error", text: userFacingError(error) });
     } finally {
@@ -743,13 +793,14 @@ function SettingsView({
   };
 
   const transferMemory = async (mode: "import" | "export") => {
-    if (transferringMemory) return;
+    if (transferringMemory || !memoryWorkspaceRoot) return;
     setTransferringMemory(mode);
     try {
       const result = mode === "import"
-        ? await window.hammerCode.importProjectMemory()
-        : await window.hammerCode.exportProjectMemory();
+        ? await window.hammerCode.importProjectMemory(memoryWorkspaceRoot)
+        : await window.hammerCode.exportProjectMemory(memoryWorkspaceRoot);
       if (result.status === "cancelled") return;
+      if (mode === "import") setViewedMemory(await window.hammerCode.listProjectMemory(memoryWorkspaceRoot));
       onNotice({
         level: "info",
         text: result.status === "exported"
@@ -760,6 +811,26 @@ function SettingsView({
       onNotice({ level: "error", text: userFacingError(error) });
     } finally {
       setTransferringMemory(null);
+    }
+  };
+
+  const configureMemoryExport = async (mode: "project" | "custom") => {
+    if (!memoryWorkspaceRoot || exportPreferenceBusy || appBusy) return;
+    setExportPreferenceBusy(true);
+    try {
+      const result = await window.hammerCode.configureProjectMemoryExport(memoryWorkspaceRoot, mode);
+      if (result.status === "updated") {
+        onNotice({
+          level: "info",
+          text: result.preference.mode === "project"
+            ? "默认导出位置已设为项目地址；导出时仍会由访达确认。"
+            : "自定义默认目录已保存；导出时仍会由访达确认。",
+        });
+      }
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setExportPreferenceBusy(false);
     }
   };
 
@@ -836,9 +907,22 @@ function SettingsView({
     if (archiveBusy || appBusy) return;
     setArchiveBusy(`${mode}:${root}`);
     try {
-      if (mode === "archive") await window.hammerCode.archiveWorkspace(root);
-      else await window.hammerCode.restoreWorkspace(root);
+      if (mode === "archive") await window.hammerCode.archiveWorkspaceChats(root);
+      else await window.hammerCode.restoreWorkspaceChats(root);
       onNotice({ level: "info", text: mode === "archive" ? "项目中的聊天已归档，项目仍保留。" : "项目中的归档聊天已恢复。" });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setArchiveBusy(null);
+    }
+  };
+
+  const restoreArchivedProject = async (root: string) => {
+    if (archiveBusy || appBusy) return;
+    setArchiveBusy(`project:${root}`);
+    try {
+      await window.hammerCode.restoreProject(root);
+      onNotice({ level: "info", text: "项目已恢复到左侧导航，主聊天位置没有改变。" });
     } catch (error) {
       onNotice({ level: "error", text: userFacingError(error) });
     } finally {
@@ -863,7 +947,7 @@ function SettingsView({
     models: { title: "模型连接", description: "管理默认模型与 OpenAI-compatible 接口。API Key 只会在主进程中加密保存。" },
     skills: { title: "Skills", description: "管理本地工作流、项目级 Skill 和模型自动选择。Skill 不会绕过工具权限。" },
     memory: { title: "项目记忆", description: "记忆按项目隔离，并由你分别控制读取、生成、导入与导出。" },
-    archived: { title: "已归档", description: "归档只整理聊天列表，不会删除聊天内容或项目。" },
+    archived: { title: "已归档", description: "管理已归档的项目和聊天；归档不会删除任何内容。" },
   };
   const skillControlsDisabled = Boolean(skillBusy) || appBusy;
 
@@ -896,25 +980,37 @@ function SettingsView({
         </div>}
       </section>
       <section className={`settings-card memory-settings-card settings-section-panel ${section === "memory" ? "active" : ""}`}>
-        <div className="settings-card-title"><div><h2>项目记忆</h2><p>只在当前项目的聊天之间共享，不会跨项目使用。关闭后保留已有记录，但下一轮不再读取或生成。</p></div><span>{bootstrap.projectMemory?.records.filter((record) => record.status === "active").length ?? 0} 条有效</span></div>
-        {bootstrap.workspaceRoot && bootstrap.projectMemory && <div className="memory-controls">
-          <label className="setting-switch"><span><strong>启用项目记忆</strong><small>新项目默认关闭</small></span><input type="checkbox" checked={bootstrap.projectMemory.settings.enabled} disabled={savingMemory} onChange={(event) => void updateMemorySettings({ enabled: event.target.checked })}/><i aria-hidden="true"/></label>
-          <div className="memory-subcontrols">
-            <label className="setting-switch"><span><strong>读取记忆</strong><small>向新一轮注入相关记录</small></span><input type="checkbox" checked={bootstrap.projectMemory.settings.useMemories} disabled={!bootstrap.projectMemory.settings.enabled || savingMemory} onChange={(event) => void updateMemorySettings({ useMemories: event.target.checked })}/><i aria-hidden="true"/></label>
-            <label className="setting-switch"><span><strong>生成记忆</strong><small>记录文件变更、验证和明确决定</small></span><input type="checkbox" checked={bootstrap.projectMemory.settings.generateMemories} disabled={!bootstrap.projectMemory.settings.enabled || savingMemory} onChange={(event) => void updateMemorySettings({ generateMemories: event.target.checked })}/><i aria-hidden="true"/></label>
-          </div>
-          <div className="memory-budget"><span>每轮最多 {bootstrap.projectMemory.settings.maxRecallRecords} 条 · {bootstrap.projectMemory.settings.maxRecallCharacters.toLocaleString("zh-CN")} 字符</span><span>{bootstrap.session?.turns.at(-1)?.metrics ? `最近注入 ${bootstrap.session.turns.at(-1)!.metrics!.projectMemoryRecords} 条 · 约 ${bootstrap.session.turns.at(-1)!.metrics!.projectMemoryTokens} tokens` : "尚无召回记录"}</span></div>
-          <div className="memory-transfer-actions"><button className="secondary-action" disabled={Boolean(transferringMemory)} onClick={() => void transferMemory("import")}>{transferringMemory === "import" ? "正在导入…" : "导入"}</button><button className="secondary-action" disabled={Boolean(transferringMemory)} onClick={() => void transferMemory("export")}>{transferringMemory === "export" ? "正在导出…" : "导出"}</button></div>
+        <div className="settings-card-title"><div><h2>项目记忆</h2><p>默认跟随主聊天项目，也可以只在这里查看其他项目，不会切换主聊天。</p></div><span>{viewedMemory?.records.filter((record) => record.status === "active").length ?? 0} 条有效</span></div>
+        {memoryProjects.length > 0 && <div className="memory-project-picker">
+          <label><span>查看项目</span><select value={memoryWorkspaceRoot} disabled={loadingMemory || savingMemory || Boolean(transferringMemory)} onChange={(event) => setMemoryWorkspaceRoot(event.target.value)}>{memoryProjects.map((project) => <option key={project.root} value={project.root}>{project.name}{bootstrap.archivedProjects.some((item) => item.root === project.root) ? "（已归档）" : ""}</option>)}</select></label>
+          {memoryProject && <div><strong>{memoryProject.name}</strong><code>{memoryProject.root}</code>{memoryProject.root === bootstrap.workspaceRoot && <small>主聊天当前项目</small>}</div>}
         </div>}
-        {!bootstrap.workspaceRoot ? <p className="memory-empty">选择工作区后可查看项目记忆。</p> : !bootstrap.projectMemory?.records.length ? <p className="memory-empty">这个工作区还没有项目记忆。</p> : <div className="memory-list">
-          {bootstrap.projectMemory.records.map((record) => <article className={`memory-item memory-${record.status} memory-kind-${record.kind}`} key={record.id}>
+        {memoryProject && viewedMemory?.workspaceRoot === memoryWorkspaceRoot && <div className="memory-controls">
+          <label className="setting-switch"><span><strong>启用项目记忆</strong><small>新项目默认关闭</small></span><input type="checkbox" checked={viewedMemory.settings.enabled} disabled={savingMemory} onChange={(event) => void updateMemorySettings({ enabled: event.target.checked })}/><i aria-hidden="true"/></label>
+          <div className="memory-subcontrols">
+            <label className="setting-switch"><span><strong>读取记忆</strong><small>向新一轮注入相关记录</small></span><input type="checkbox" checked={viewedMemory.settings.useMemories} disabled={!viewedMemory.settings.enabled || savingMemory} onChange={(event) => void updateMemorySettings({ useMemories: event.target.checked })}/><i aria-hidden="true"/></label>
+            <label className="setting-switch"><span><strong>生成记忆</strong><small>记录文件变更、验证和明确决定</small></span><input type="checkbox" checked={viewedMemory.settings.generateMemories} disabled={!viewedMemory.settings.enabled || savingMemory} onChange={(event) => void updateMemorySettings({ generateMemories: event.target.checked })}/><i aria-hidden="true"/></label>
+          </div>
+          <div className="memory-budget"><span>每轮最多 {viewedMemory.settings.maxRecallRecords} 条 · {viewedMemory.settings.maxRecallCharacters.toLocaleString("zh-CN")} 字符</span><span>{memoryWorkspaceRoot === bootstrap.workspaceRoot && bootstrap.session?.turns.at(-1)?.metrics ? `最近注入 ${bootstrap.session.turns.at(-1)!.metrics!.projectMemoryRecords} 条 · 约 ${bootstrap.session.turns.at(-1)!.metrics!.projectMemoryTokens} tokens` : "此处查看不会切换主聊天"}</span></div>
+          <div className="memory-export-setting"><div><strong>默认导出位置</strong><small>每次导出仍会打开访达保存面板，由你确认文件名和最终位置。</small></div><div className="memory-export-options"><button className={memoryProject.memoryExport.mode === "project" ? "active" : ""} disabled={exportPreferenceBusy || appBusy} onClick={() => void configureMemoryExport("project")}>项目地址</button><button className={memoryProject.memoryExport.mode === "custom" ? "active" : ""} disabled={exportPreferenceBusy || appBusy} onClick={() => void configureMemoryExport("custom")}>自定义地址</button></div><code>{memoryProject.memoryExport.mode === "custom" ? memoryProject.memoryExport.customDirectory ?? "尚未选择" : memoryProject.root}</code></div>
+          <div className="memory-transfer-actions"><button className="secondary-action" disabled={Boolean(transferringMemory) || appBusy} onClick={() => void transferMemory("import")}>{transferringMemory === "import" ? "正在导入…" : "导入"}</button><button className="secondary-action" disabled={Boolean(transferringMemory) || appBusy} onClick={() => void transferMemory("export")}>{transferringMemory === "export" ? "等待访达确认…" : "导出"}</button></div>
+        </div>}
+        {loadingMemory ? <p className="memory-empty">正在读取项目记忆…</p> : !memoryProject ? <p className="memory-empty">添加项目后可查看项目记忆。</p> : viewedMemory?.workspaceRoot !== memoryWorkspaceRoot ? <p className="memory-empty">无法读取这个项目的记忆。</p> : !viewedMemory.records.length ? <p className="memory-empty">这个项目还没有项目记忆。</p> : <div className="memory-list">
+          {viewedMemory.records.map((record) => <article className={`memory-item memory-${record.status} memory-kind-${record.kind}`} key={record.id}>
             <div><strong>{memoryTitle(record)}</strong><span>{record.kind === "decision" ? "决定" : record.kind === "constraint" ? "约束" : record.kind === "verification" ? "验证" : "事实"} · {record.status === "active" ? "有效" : record.status === "conflicted" ? "冲突" : record.status === "invalidated" ? "已失效" : "已删除"}</span></div>
             <p>{memoryDescription(record)}</p>
-            <footer><span>{memorySourceTitle(record, bootstrap.workspaces, bootstrap.archivedWorkspaces)}</span>{record.status !== "deleted" && <button disabled={Boolean(deletingMemory) || appBusy} onClick={() => void deleteMemory(record.id)}>{deletingMemory === record.id ? "删除中…" : "删除"}</button>}</footer>
+            <footer><span>{memorySourceTitle(record, bootstrap.workspaces, bootstrap.archivedWorkspaces, bootstrap.archivedProjects)}</span>{record.status !== "deleted" && <button disabled={Boolean(deletingMemory) || appBusy} onClick={() => void deleteMemory(record.id)}>{deletingMemory === record.id ? "删除中…" : "删除"}</button>}</footer>
           </article>)}
         </div>}
       </section>
       <div className={`archive-settings settings-section-panel ${section === "archived" ? "active" : ""}`}>
+        {bootstrap.archivedProjects.length > 0 && <section className="settings-card archived-projects-card">
+          <div className="settings-card-title"><div><h2>已归档项目</h2><p>恢复项目只让它重新出现在左侧，不会切换当前主聊天。</p></div><span>{bootstrap.archivedProjects.length} 个项目</span></div>
+          <div className="archive-project-list">{bootstrap.archivedProjects.map((project) => <div className="archive-project-row" key={project.root}>
+            <div><Icon name="folder" size={17}/><span><strong>{project.name}</strong><small>{project.sessionCount} 条活动聊天 · {project.archivedSessionCount} 条归档聊天</small><code>{project.root}</code></span></div>
+            <button className="secondary-action" disabled={Boolean(archiveBusy) || appBusy} onClick={() => void restoreArchivedProject(project.root)}>{archiveBusy === `project:${project.root}` ? "恢复中…" : "恢复项目"}</button>
+          </div>)}</div>
+        </section>}
         <section className="settings-card archive-active-card">
           <div className="settings-card-title"><div><h2>批量整理</h2><p>归档一个项目中的全部聊天，项目本身会继续留在左侧。</p></div></div>
           <div className="archive-project-list">
@@ -925,7 +1021,7 @@ function SettingsView({
           </div>
         </section>
         {bootstrap.archivedWorkspaces.every((workspace) => workspace.sessionCount === 0)
-          ? <div className="archive-empty"><Icon name="archive" size={23}/><strong>还没有归档聊天</strong><p>归档后的聊天会按原项目显示在这里。</p></div>
+          ? bootstrap.archivedProjects.length === 0 && <div className="archive-empty"><Icon name="archive" size={23}/><strong>还没有归档内容</strong><p>归档后的项目和聊天会显示在这里。</p></div>
           : bootstrap.archivedWorkspaces.filter((workspace) => workspace.sessionCount > 0).map((workspace) => <section className="settings-card archived-group" key={workspace.root}>
             <div className="settings-card-title"><div><h2>{workspace.name}</h2><p>{workspace.sessionCount} 条已归档聊天</p></div><button className="secondary-action" disabled={Boolean(archiveBusy) || appBusy} onClick={() => void changeWorkspaceArchive(workspace.root, "restore")}>{archiveBusy === `restore:${workspace.root}` ? "恢复中…" : "全部恢复"}</button></div>
             <div className="archived-chat-list">{workspace.sessions.map((item) => <div className="archived-chat-row" key={item.id}><span><strong>{item.title}</strong><small>{new Date(item.updatedAt).toLocaleString("zh-CN")}</small></span><button disabled={Boolean(archiveBusy) || appBusy} onClick={() => void restoreArchivedSession(item.id)}>{archiveBusy === `restore:${item.id}` ? "恢复中…" : "恢复"}</button></div>)}</div>
@@ -960,7 +1056,7 @@ function SettingsShell({
     { id: "memory", label: "项目记忆", icon: "branch" },
     { id: "archived", label: "已归档", icon: "archive" },
   ];
-  const archivedCount = bootstrap.archivedWorkspaces.reduce((total, workspace) => total + workspace.sessionCount, 0);
+  const archivedCount = bootstrap.archivedProjects.length + bootstrap.archivedWorkspaces.reduce((total, workspace) => total + workspace.sessionCount, 0);
   return <div className="settings-shell">
     <aside className="settings-sidebar">
       <div className="settings-sidebar-drag"/>
@@ -1008,6 +1104,7 @@ export function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [archivedWorkspaces, setArchivedWorkspaces] = useState<ArchivedWorkspaceSummary[]>([]);
+  const [archivedProjects, setArchivedProjects] = useState<ArchivedProjectSummary[]>([]);
   const [expandedRoots, setExpandedRoots] = useState<Set<string>>(new Set());
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [modelTier, setModelTier] = useState<ModelTier>("fast");
@@ -1015,6 +1112,9 @@ export function App() {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("ask");
   const [view, setView] = useState<"chat" | "settings">("chat");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("models");
+  const [projectMenu, setProjectMenu] = useState<{ root: string; top: number; left: number } | null>(null);
+  const [projectDialog, setProjectDialog] = useState<ProjectDialog | null>(null);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const [task, setTask] = useState("");
   const [composerEntities, setComposerEntities] = useState<ComposerEntity[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1036,6 +1136,7 @@ export function App() {
   const conversationRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoScrollRef = useRef(true);
+  const navigationRef = useRef<{ workspaceRoot: string | null; sessionId: string | null }>({ workspaceRoot: null, sessionId: null });
 
   useEffect(() => {
     let mounted = true;
@@ -1046,6 +1147,8 @@ export function App() {
       setSessions(value.sessions);
       setWorkspaces(value.workspaces);
       setArchivedWorkspaces(value.archivedWorkspaces);
+      setArchivedProjects(value.archivedProjects);
+      navigationRef.current = { workspaceRoot: value.workspaceRoot, sessionId: value.session?.id ?? null };
       setExpandedRoots(new Set(value.workspaces.map((workspace) => workspace.root)));
       setWorkspaceRoot(value.workspaceRoot);
       setModelTier(value.session?.modelTier ?? "fast");
@@ -1054,6 +1157,7 @@ export function App() {
     }).catch((error: unknown) => setNotice({ level: "error", text: userFacingError(error) }));
     const unsubscribe = window.hammerCode.onEvent((event: RendererEvent) => {
       if (event.type === "session_snapshot") {
+        navigationRef.current.sessionId = event.session.id;
         setSession(event.session);
         setSessions((items) => upsertSessionSummary(items, event.session));
         setWorkspaces((items) => upsertWorkspaceSession(items, event.session));
@@ -1066,6 +1170,7 @@ export function App() {
         setWorkspaces((items) => upsertWorkspaceSession(items, event.session, false));
       }
       if (event.type === "session_cleared") {
+        navigationRef.current.sessionId = null;
         setSession(null);
         setModelTier("fast");
         setModelRef("builtin:fast");
@@ -1075,9 +1180,12 @@ export function App() {
       if (event.type === "side_chat_snapshot") setSideChat(event.sideChat);
       if (event.type === "side_chat_closed") setSideChat(null);
       if (event.type === "workspace_changed") {
+        const navigationChanged = navigationRef.current.workspaceRoot !== event.workspaceRoot || navigationRef.current.sessionId !== (event.session?.id ?? null);
+        navigationRef.current = { workspaceRoot: event.workspaceRoot, sessionId: event.session?.id ?? null };
         setWorkspaceRoot(event.workspaceRoot);
         setWorkspaces(event.workspaces);
         setArchivedWorkspaces(event.archivedWorkspaces);
+        setArchivedProjects(event.archivedProjects);
         setSessions(event.sessions);
         setSession(event.session);
         setExpandedRoots((roots) => {
@@ -1088,16 +1196,19 @@ export function App() {
         setModelTier(event.session?.modelTier ?? "fast");
         setModelRef(event.session?.modelRef ?? `builtin:${event.session?.modelTier ?? "fast"}`);
         setPermissionMode(event.session?.permissionMode ?? "ask");
-        setTask("");
-        setComposerEntities([]);
-        setReferencePreview(null);
-        setPanelMode(null);
+        if (navigationChanged) {
+          setTask("");
+          setComposerEntities([]);
+          setReferencePreview(null);
+          setPanelMode(null);
+        }
         setBootstrap((current) => current ? {
           ...current,
           session: event.session,
           sessions: event.sessions,
           workspaces: event.workspaces,
           archivedWorkspaces: event.archivedWorkspaces,
+          archivedProjects: event.archivedProjects,
           workspaceRoot: event.workspaceRoot,
         } : current);
       }
@@ -1274,6 +1385,60 @@ export function App() {
     try {
       await window.hammerCode.archiveSession(id);
       setNotice({ level: "info", text: "聊天已归档，可在设置的“已归档”中恢复。" });
+    } catch (error) {
+      setNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openProjectMenu = (event: ReactMouseEvent<HTMLButtonElement>, root: string) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 184;
+    setProjectMenu({
+      root,
+      top: Math.min(rect.bottom + 5, window.innerHeight - 174),
+      left: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)),
+    });
+  };
+
+  const pinProject = async (project: WorkspaceSummary) => {
+    if (busy || hasRunningSession) return;
+    setProjectMenu(null);
+    setBusy(true);
+    try {
+      await window.hammerCode.setProjectPinned(project.root, !project.pinned);
+      setNotice({ level: "info", text: project.pinned ? `${project.name} 已取消置顶。` : `${project.name} 已置顶。` });
+    } catch (error) {
+      setNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openProjectDialog = (project: WorkspaceSummary, mode: ProjectDialog["mode"]) => {
+    setProjectMenu(null);
+    setProjectNameDraft(project.name);
+    setProjectDialog({ mode, root: project.root, name: project.name });
+  };
+
+  const confirmProjectDialog = async () => {
+    if (!projectDialog || busy || hasRunningSession) return;
+    const nextName = projectNameDraft.trim();
+    if (projectDialog.mode === "rename" && !nextName) return;
+    setBusy(true);
+    try {
+      if (projectDialog.mode === "rename") {
+        await window.hammerCode.renameProject(projectDialog.root, nextName);
+        setNotice({ level: "info", text: `项目已重命名为 ${nextName}。磁盘文件夹名称没有改变。` });
+      } else if (projectDialog.mode === "archive") {
+        await window.hammerCode.archiveProject(projectDialog.root);
+        setNotice({ level: "info", text: `${projectDialog.name} 已归档，可在设置中恢复。` });
+      } else {
+        await window.hammerCode.removeProject(projectDialog.root);
+        setNotice({ level: "info", text: `${projectDialog.name} 已从导航移除。重新打开该文件夹可恢复原聊天。` });
+      }
+      setProjectDialog(null);
     } catch (error) {
       setNotice({ level: "error", text: userFacingError(error) });
     } finally {
@@ -1585,10 +1750,22 @@ export function App() {
     "--panel-column": `${workbenchLayout.panelWidth}px`,
   } as CSSProperties;
   const composerLocked = !workspaceRoot || anotherSessionIsRunning || busy || Boolean(session?.pendingUndo);
-  const settingsBootstrap: AppBootstrap = { ...bootstrap, session, sessions, workspaces, archivedWorkspaces, workspaceRoot };
+  const settingsBootstrap: AppBootstrap = { ...bootstrap, session, sessions, workspaces, archivedWorkspaces, archivedProjects, workspaceRoot };
+  const menuProject = projectMenu ? workspaces.find((project) => project.root === projectMenu.root) : undefined;
 
   return (
     <div className={`app-shell ${panelVisible ? "panel-open" : ""} ${panelOpen && workbenchLayout.panelCollapsed ? "panel-auto-collapsed" : ""}`} style={layoutStyle}>
+      {projectMenu && menuProject && <div className="project-menu-layer" onMouseDown={() => setProjectMenu(null)}><div className="project-menu" style={{ top: projectMenu.top, left: projectMenu.left }} role="menu" onMouseDown={(event) => event.stopPropagation()}>
+        <button role="menuitem" disabled={hasRunningSession || busy} onClick={() => void pinProject(menuProject)}><Icon name="pin" size={15}/>{menuProject.pinned ? "取消置顶" : "置顶项目"}</button>
+        <button role="menuitem" disabled={hasRunningSession || busy} onClick={() => openProjectDialog(menuProject, "rename")}><Icon name="compose" size={15}/>重命名</button>
+        <button role="menuitem" disabled={hasRunningSession || busy} onClick={() => openProjectDialog(menuProject, "archive")}><Icon name="archive" size={15}/>归档项目</button>
+        <button className="danger" role="menuitem" disabled={hasRunningSession || busy} onClick={() => openProjectDialog(menuProject, "remove")}><Icon name="remove" size={15}/>移除项目</button>
+      </div></div>}
+      {projectDialog && <div className="project-dialog-layer"><div className="project-dialog" role="dialog" aria-modal="true" aria-label={projectDialog.mode === "rename" ? "重命名项目" : projectDialog.mode === "archive" ? "归档项目" : "移除项目"}>
+        <h2>{projectDialog.mode === "rename" ? "重命名项目" : projectDialog.mode === "archive" ? `归档 ${projectDialog.name}？` : `移除 ${projectDialog.name}？`}</h2>
+        {projectDialog.mode === "rename" ? <><p>只改变 HammerCode 中的显示名称，不会重命名磁盘文件夹。</p><input autoFocus maxLength={80} value={projectNameDraft} onChange={(event) => setProjectNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void confirmProjectDialog(); }}/></> : <p>{projectDialog.mode === "archive" ? "项目会从左侧隐藏，并保留全部聊天和记忆；之后可在设置的“已归档”中恢复。" : "项目会从 HammerCode 导航中解除绑定，但不会删除项目文件、聊天或记忆。重新打开同一文件夹即可恢复。"}</p>}
+        <div><button className="secondary-action" disabled={busy} onClick={() => setProjectDialog(null)}>取消</button><button className={projectDialog.mode === "remove" ? "danger-action" : "primary-action"} disabled={busy || (projectDialog.mode === "rename" && !projectNameDraft.trim())} onClick={() => void confirmProjectDialog()}>{busy ? "处理中…" : projectDialog.mode === "rename" ? "保存名称" : projectDialog.mode === "archive" ? "归档项目" : "移除项目"}</button></div>
+      </div></div>}
       {view === "settings" && <SettingsShell bootstrap={settingsBootstrap} section={settingsSection} busy={hasRunningSession || isBusy || busy} notice={notice} onSectionChange={setSettingsSection} onBack={() => { setView("chat"); setNotice(null); }} onNotice={setNotice} onDismissNotice={() => setNotice(null)}/>}
       <aside className="sidebar" aria-hidden={view === "settings"}>
         <div className="sidebar-drag"/>
@@ -1599,7 +1776,7 @@ export function App() {
           <div className="project-list">
             {workspaces.map((workspace) => (
               <section className={`project-group ${workspace.root === workspaceRoot ? "active" : ""}`} key={workspace.root}>
-                <div className="project-row" title={workspace.root}><button className="project-toggle" onClick={() => toggleWorkspace(workspace.root)} aria-expanded={expandedRoots.has(workspace.root)}><span className={`project-chevron ${expandedRoots.has(workspace.root) ? "expanded" : ""}`}><Icon name="chevron" size={14}/></span><Icon name="folder" size={18}/><span>{workspace.name}</span><small>{workspace.sessionCount || ""}</small></button><button className="project-add-chat" onClick={() => void startChatInWorkspace(workspace.root)} disabled={busy || Boolean(session?.pendingUndo)} aria-label={`在 ${workspace.name} 中新建聊天`} title="新建聊天"><Icon name="plus" size={14}/></button></div>
+                <div className="project-row" title={workspace.root}><button className="project-toggle" onClick={() => toggleWorkspace(workspace.root)} aria-expanded={expandedRoots.has(workspace.root)}><span className={`project-chevron ${expandedRoots.has(workspace.root) ? "expanded" : ""}`}><Icon name="chevron" size={14}/></span><Icon name="folder" size={18}/><span className="project-name">{workspace.pinned && <Icon name="pin" size={12}/>}<span>{workspace.name}</span></span><small>{workspace.sessionCount || ""}</small></button><button className="project-add-chat" onClick={() => void startChatInWorkspace(workspace.root)} disabled={busy || Boolean(session?.pendingUndo)} aria-label={`在 ${workspace.name} 中新建聊天`} title="新建聊天"><Icon name="compose" size={15}/></button><button className="project-more" onClick={(event) => openProjectMenu(event, workspace.root)} disabled={busy} aria-label={`${workspace.name} 项目选项`} title="项目选项"><Icon name="more" size={16}/></button></div>
                 {expandedRoots.has(workspace.root) && (
                   workspace.sessions.length > 0
                     ? <ChatList sessions={workspace.sessions} activeId={session?.id} selectDisabled={busy || Boolean(session?.pendingUndo)} archiveDisabled={busy || hasRunningSession || isBusy} onSelect={(id) => void selectSession(id)} onArchive={(id) => void archiveSession(id)}/>

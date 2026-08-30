@@ -101,11 +101,26 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:restore-session", (sessionId: unknown) =>
     appController.restoreSession(sessionId),
   );
-  handle("hammercode:archive-workspace", (workspaceRoot: unknown) =>
-    appController.archiveWorkspace(workspaceRoot),
+  handle("hammercode:archive-workspace-chats", (workspaceRoot: unknown) =>
+    appController.archiveWorkspaceChats(workspaceRoot),
   );
-  handle("hammercode:restore-workspace", (workspaceRoot: unknown) =>
-    appController.restoreWorkspace(workspaceRoot),
+  handle("hammercode:restore-workspace-chats", (workspaceRoot: unknown) =>
+    appController.restoreWorkspaceChats(workspaceRoot),
+  );
+  handle("hammercode:set-project-pinned", (workspaceRoot: unknown, pinned: unknown) =>
+    appController.setProjectPinned(workspaceRoot, pinned),
+  );
+  handle("hammercode:rename-project", (workspaceRoot: unknown, name: unknown) =>
+    appController.renameProject(workspaceRoot, name),
+  );
+  handle("hammercode:archive-project", (workspaceRoot: unknown) =>
+    appController.archiveProject(workspaceRoot),
+  );
+  handle("hammercode:restore-project", (workspaceRoot: unknown) =>
+    appController.restoreProject(workspaceRoot),
+  );
+  handle("hammercode:remove-project", (workspaceRoot: unknown) =>
+    appController.removeProject(workspaceRoot),
   );
   handle("hammercode:update-session-settings", (settings: unknown) =>
     appController.updateSessionSettings(settings),
@@ -142,14 +157,17 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:preview-skill", (skillKey: unknown) =>
     appController.previewSkill(skillKey),
   );
-  handle("hammercode:list-project-memory", () => appController.listProjectMemory());
-  handle("hammercode:update-project-memory-settings", (settings: unknown) =>
-    appController.updateProjectMemorySettings(settings),
+  handle("hammercode:list-project-memory", (workspaceRoot: unknown) => appController.listProjectMemory(workspaceRoot));
+  handle("hammercode:update-project-memory-settings", (workspaceRoot: unknown, settings: unknown) =>
+    appController.updateProjectMemorySettings(workspaceRoot, settings),
   );
-  handle("hammercode:export-project-memory", () => appController.exportProjectMemory());
-  handle("hammercode:import-project-memory", () => appController.importProjectMemory());
-  handle("hammercode:delete-project-memory", (memoryId: unknown) =>
-    appController.deleteProjectMemory(memoryId),
+  handle("hammercode:configure-project-memory-export", (workspaceRoot: unknown, mode: unknown) =>
+    appController.configureProjectMemoryExport(workspaceRoot, mode),
+  );
+  handle("hammercode:export-project-memory", (workspaceRoot: unknown) => appController.exportProjectMemory(workspaceRoot));
+  handle("hammercode:import-project-memory", (workspaceRoot: unknown) => appController.importProjectMemory(workspaceRoot));
+  handle("hammercode:delete-project-memory", (workspaceRoot: unknown, memoryId: unknown) =>
+    appController.deleteProjectMemory(workspaceRoot, memoryId),
   );
   handle("hammercode:update-skill-settings", (settings: unknown) =>
     appController.updateSkillSettings(settings),
