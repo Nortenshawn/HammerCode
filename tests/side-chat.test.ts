@@ -41,9 +41,13 @@ describe("ephemeral BTW", () => {
 
   it("supports independent multi-turn text chat without exposing tools", async () => {
     const toolCounts: number[] = [];
+    const systemPrompts: string[] = [];
     const model: ModelClient = {
       async *stream(request) {
         toolCounts.push(request.tools.length);
+        const systemMessage = request.messages[0];
+        if (!systemMessage || systemMessage.role !== "system") throw new Error("missing system prompt");
+        systemPrompts.push(systemMessage.content);
         yield { reasoningContent: "只读分析" };
         yield { content: `回答 ${toolCounts.length}`, finishReason: "stop" };
       },
@@ -53,6 +57,7 @@ describe("ephemeral BTW", () => {
       model,
       modelTier: "fast",
       modelRef: "builtin:fast",
+      modelName: "deepseek-v4-flash",
       source: source(),
       clock: { now: () => new Date(at) },
       ids: { next: (prefix) => `${prefix}_${++sequence}` },
@@ -60,6 +65,14 @@ describe("ephemeral BTW", () => {
     await side.send("第一问");
     await side.send("第二问");
     expect(toolCounts).toEqual([0, 0]);
+    expect(systemPrompts).toHaveLength(2);
+    for (const prompt of systemPrompts) {
+      expect(prompt).toContain("你是 HammerCode，一个本地编程智能体");
+      expect(prompt).toContain("Fast · deepseek-v4-flash");
+      expect(prompt).toContain("关联工作区：/tmp/workspace");
+      expect(prompt).toContain("本次请求没有文件访问能力");
+      expect(prompt).toContain("实际工具：无");
+    }
     expect(side.snapshot.status).toBe("completed");
     expect(side.snapshot.messages.map((message) => message.role)).toEqual([
       "user", "assistant", "user", "assistant",

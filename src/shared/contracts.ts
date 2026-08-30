@@ -206,6 +206,7 @@ export interface AgentTurn {
   finishedAt?: string;
   modelTier: ModelTier;
   modelRef?: ModelRef;
+  modelName?: string;
   permissionMode: PermissionMode;
   planRequired?: boolean;
   plan?: TurnPlan;

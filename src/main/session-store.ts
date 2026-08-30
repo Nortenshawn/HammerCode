@@ -197,6 +197,7 @@ const turnSchema = z.object({
   finishedAt: z.string().optional(),
   modelTier: z.enum(MODEL_TIERS).optional(),
   modelRef: z.string().min(1).max(1_000).optional(),
+  modelName: z.string().min(1).max(1_000).optional(),
   permissionMode: z.enum(PERMISSION_MODES).optional(),
   planRequired: z.boolean().optional(),
   plan: planSchema.optional(),

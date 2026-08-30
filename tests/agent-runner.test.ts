@@ -847,7 +847,10 @@ describe("agent runner", () => {
     expect(retrieve).not.toHaveBeenCalled();
     expect(recordToolFact).not.toHaveBeenCalled();
     expect(model.requests[0].tools).toEqual([]);
-    expect(model.requests[0].messages[0]).toEqual({ role: "system", content: "system" });
+    expect(model.requests[0].messages[0]).toMatchObject({ role: "system" });
+    expect(model.requests[0].messages[0].content).toContain("<product_identity>");
+    expect(model.requests[0].messages[0].content).toContain("<runtime_context>");
+    expect(model.requests[0].messages[0].content).not.toContain("<project_memory>");
     expect(result.turns[0].projectMemorySettings).toMatchObject({ enabled: false });
     expect(result.turns[0].metrics).toMatchObject({
       projectMemoryRecords: 0,

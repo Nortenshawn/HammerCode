@@ -157,4 +157,14 @@ HammerCode 已完成 Phase 14 的统一添加菜单与宽松输入区。主输�
 - 工作区快捷候选最多显示 5 项，并固定提供“在访达中选择”。原生面板可选文件或文件夹，main process 对返回目标做 `realpath` 和绑定工作区校验，renderer 只接收相对路径与类型。
 - 正式 Electron 验收覆盖菜单顺序与滚动、文件和 Skill 原子块、访达选择、文件预览、取消零副作用以及三种直接文本补全。完整证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
 
+### 阶段十五：产品身份与本轮运行认知
+
+- 状态：已完成（2026-08-30）。
+- 每次主 Agent 请求都只注入一次稳定的 HammerCode 产品身份；DeepSeek、GLM 和自定义模型明确只是本轮推理引擎。身份约束禁止人类意识、情感、未提供能力和缺失运行事实的虚构。
+- 每轮 system message 从实际 turn 和请求快照注入模型档位/模型名、权限、绑定工作区、轮次/工具/时间与 token 预算，以及本次请求真正携带的工具。运行事实不读取环境变量、凭据或 renderer 私有状态。
+- 请求批准和完全访问的真实边界、工作区外不可访问、当前用户/项目记忆/Skill 以及磁盘/工具结果/历史摘要的优先级均显式说明；工具清单与发送给模型的 definitions 共用同一数组，避免认知与能力漂移。
+- 模型名随 turn 持久化；旧聊天缺失时明确显示未知。BTW 复用产品身份但如实声明零工具、零文件访问，隔离子 Agent 也由同一入口获得受限运行事实。
+- 压缩测试确认本地历史压缩后，首个 system message 仍保留 HammerCode 身份、绑定工作区、安全边界、实际工具和事实优先级。真实 Fast 在 Phase4FastAsk 以 0 次工具调用准确回答全部运行字段，验收聊天完成后已归档，工作区零修改。
+- 最终严格类型检查、31 个测试文件共 186 项测试、生产构建、Apple Silicon 目录包和生产依赖审计全部通过；包内已核对包含 runtime identity、agent runner 与 system prompt 产物。完整证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
+
 后续范围、实现顺序和退出标准不再写入本状态记录，统一见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。

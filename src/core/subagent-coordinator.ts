@@ -82,7 +82,7 @@ const resultSchema = z.object({
   risks: z.array(z.string().max(2_000)).max(50),
 }).strict();
 
-const SUBAGENT_SYSTEM_PROMPT = `你是 HammerCode 的隔离子 Agent。你只完成分配给你的单一调查任务。
+const SUBAGENT_SYSTEM_PROMPT = `你是当前主任务创建的隔离子 Agent。你只完成分配给你的单一调查任务。
 
 硬边界：
 - 只能使用提供的只读工具；如果有 propose_file_change，它也只生成候选 diff，绝不修改磁盘。
@@ -183,6 +183,7 @@ class RestrictedSubagentTools implements ToolExecutorPort {
 }
 
 export interface RestrictedSubagentCoordinatorOptions {
+  modelName?: string;
   maxRounds?: number;
   maxToolCalls?: number;
   maxRunTimeMs?: number;
@@ -284,6 +285,7 @@ export class RestrictedSubagentCoordinator implements SubagentCoordinatorPort {
         },
       },
       {
+        modelName: this.options.modelName,
         maxRounds: budget.maxRounds,
         maxToolCalls: budget.maxToolCalls,
         maxRunTimeMs: budget.maxRunTimeMs,

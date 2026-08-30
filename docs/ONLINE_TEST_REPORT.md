@@ -571,3 +571,24 @@ HammerTest 验收开始时有 14 条活动聊天。先归档一条聊天并从�
 ### 外部点击关闭补充验收
 
 2026-08-30 19:17–19:19 以提交 `ed5ab2e` 为基线补充验证统一面板关闭行为。点击面板内的 `/ 命令` 标题后面板保持打开；点击主输入区或聊天正文下方空白区域后立即收起；重新打开后点击加号自身仍能关闭。重新打包后又从 `release/mac-arm64/HammerCode.app` 复测一次打开与空白区关闭，结果一致。全程没有改变输入文本、创建聊天、发送模型请求或修改工作区文件。
+
+## HC-ONLINE-2026-08-30-06
+
+- 时间：2026-08-30 23:16–23:17（Asia/Shanghai）
+- 基线提交：`3a3c35f`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer 与正式 AgentRunner 请求链路完成
+- 模型：Fast · `deepseek-v4-flash`，请求批准模式，思考开启
+- 工作区：`/Users/norten/Developer/HammerTest/Phase4FastAsk`
+- 凭据：沿用正式应用配置加载和脱敏边界；界面、终端、测试输出和本报告均未读取、展示、打印或复制 key
+
+### 产品身份与运行事实
+
+在 Phase4FastAsk 新建临时聊天，明确要求模型不调用工具，只根据本轮系统事实回答身份、模型、审批原因、工作区边界、预算和可用工具。真实 Fast 用时 5 秒、0 次工具调用完成，实际回答确认：
+
+- 对外身份是 HammerCode 本地编程智能体，`deepseek-v4-flash` 只是 Fast 档位的本轮推理引擎。
+- 请求批准模式下，只读和明确安全操作可自动执行，文件写入、删除和一般命令需逐次确认，硬安全边界不可绕过。
+- 绑定工作区精确为 `/Users/norten/Developer/HammerTest/Phase4FastAsk`，不能访问工作区外路径。
+- 本轮预算精确为 1/20 轮、0/100 次工具、0/1800 秒、32768 tokens 单次输出和 120000 tokens 上下文。
+- 实际工具清单与请求一致，共 13 个：`update_plan`、`list_files`、`read_file`、`read_pdf`、`search_text`、`git_status`、`git_diff`、`write_file`、`edit_file`、`delete_file`、`run_python`、`run_command`、`spawn_subagents`。对于未提供的插件或模型权重细节，回答明确表示无法确认。
+
+验收没有触发任何工具、审批、文件修改或命令执行。临时聊天已归档，Phase4FastAsk 活动列表恢复为空；工作区文件零变化。离线测试进一步覆盖 Strong/GLM、完全访问、模型名持久化、工具调用后的剩余预算、BTW 零工具、缺失事实、凭据隔离和压缩保留。最终严格类型检查、31 个测试文件共 186 项测试、生产构建、Apple Silicon 目录包与生产依赖审计全部通过。

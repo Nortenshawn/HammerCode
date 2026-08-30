@@ -556,13 +556,17 @@ describe("session persistence", () => {
     const ref = "connection:00000000-0000-4000-8000-000000000001" as const;
     session.modelRef = ref;
     session.turns[0].modelRef = ref;
+    session.turns[0].modelName = "gateway-model-2026";
 
     const store = new SessionStore(directory);
     await store.save(session);
 
     const restored = await store.load();
     expect(restored?.modelRef).toBe(ref);
-    expect(restored?.turns[0].modelRef).toBe(ref);
+    expect(restored?.turns[0]).toMatchObject({
+      modelRef: ref,
+      modelName: "gateway-model-2026",
+    });
   });
 
   it("migrates the legacy active-session file without losing the chat", async () => {

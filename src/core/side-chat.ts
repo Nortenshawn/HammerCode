@@ -1,5 +1,6 @@
 import type { AgentSession, EphemeralSideChatState, ModelRef, ModelTier } from "../shared/contracts";
 import { fallbackChatTitle } from "../shared/chat-title";
+import { systemPromptWithRuntimeIdentity } from "./runtime-identity";
 import type { Clock, IdGenerator, ModelClient } from "./types";
 import { HammerCodeError } from "./types";
 import { cloneValue, isAbortError, toErrorMessage } from "./utils";
@@ -50,6 +51,7 @@ interface EphemeralSideChatOptions {
   model: ModelClient;
   modelTier: ModelTier;
   modelRef: ModelRef;
+  modelName?: string;
   source: AgentSession;
   clock: Clock;
   ids: IdGenerator;
@@ -62,6 +64,8 @@ export class EphemeralSideChat {
   private readonly ids: IdGenerator;
   private readonly onChange?: (state: EphemeralSideChatState) => void;
   private readonly sourceSnapshot: string;
+  private readonly sourceWorkspaceRoot: string;
+  private readonly modelName?: string;
   private state: EphemeralSideChatState;
   private abortController: AbortController | null = null;
 
@@ -71,6 +75,8 @@ export class EphemeralSideChat {
     this.ids = options.ids;
     this.onChange = options.onChange;
     this.sourceSnapshot = buildSideChatSnapshot(options.source);
+    this.sourceWorkspaceRoot = options.source.workspaceRoot;
+    this.modelName = options.modelName;
     const now = this.clock.now().toISOString();
     this.state = {
       id: this.ids.next("btw"),
@@ -125,14 +131,23 @@ export class EphemeralSideChat {
         messages: [
           {
             role: "system",
-            content: [
-              "你是主聊天的临时 BTW 只读分支。你只能基于创建分支时冻结的主线快照回答问题。",
-              "你没有任何工具，不能读取当前磁盘、修改文件、执行命令、审批操作，也不能向主聊天发送消息或改变其记忆。",
-              "不要声称你已经修改主线。若资料不足，请明确说明这是创建 BTW 时的快照。",
-              "<main_snapshot>",
-              this.sourceSnapshot,
-              "</main_snapshot>",
-            ].join("\n"),
+            content: systemPromptWithRuntimeIdentity(
+              [
+                "你是主聊天的临时 BTW 只读分支。你只能基于创建分支时冻结的主线快照回答问题。",
+                "你没有任何工具，不能读取当前磁盘、修改文件、执行命令、审批操作，也不能向主聊天发送消息或改变其记忆。",
+                "不要声称你已经修改主线。若资料不足，请明确说明这是创建 BTW 时的快照。",
+                "<main_snapshot>",
+                this.sourceSnapshot,
+                "</main_snapshot>",
+              ].join("\n"),
+              {
+                modelTier: this.state.modelTier,
+                modelName: this.modelName,
+                workspaceRoot: this.sourceWorkspaceRoot,
+                workspaceAccess: "none",
+                toolNames: [],
+              },
+            ),
           },
           ...ownHistory,
         ],

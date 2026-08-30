@@ -218,6 +218,7 @@ export interface ToolExecutorPort {
 }
 
 export interface AgentRunOptions {
+  modelName?: string;
   maxRounds: number;
   maxToolCalls?: number;
   maxRunTimeMs?: number;

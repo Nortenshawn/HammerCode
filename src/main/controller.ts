@@ -391,6 +391,7 @@ export class AppController {
       uuidGenerator,
       writeLeases,
       {
+        modelName: modelConfig.model,
         maxRounds: Math.min(8, this.config.maxAgentRounds),
         maxToolCalls: Math.min(30, this.config.maxToolCalls),
         maxRunTimeMs: Math.min(300_000, this.config.maxRunTimeMs),
@@ -434,6 +435,7 @@ export class AppController {
         },
       },
       {
+        modelName: modelConfig.model,
         maxRounds: this.config.maxAgentRounds,
         maxToolCalls: this.config.maxToolCalls,
         maxRunTimeMs: this.config.maxRunTimeMs,
@@ -578,6 +580,7 @@ export class AppController {
       model,
       modelTier: source.modelTier,
       modelRef: selected.modelRef,
+      modelName: modelConfig.model,
       source,
       clock: systemClock,
       ids: uuidGenerator,
