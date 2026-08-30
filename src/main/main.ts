@@ -151,6 +151,9 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:search-workspace-entries", (query: unknown) =>
     appController.searchWorkspaceEntries(query),
   );
+  handle("hammercode:choose-workspace-entry", () =>
+    appController.chooseWorkspaceEntry(),
+  );
   handle("hammercode:preview-workspace-entry", (path: unknown) =>
     appController.previewWorkspaceEntry(path),
   );

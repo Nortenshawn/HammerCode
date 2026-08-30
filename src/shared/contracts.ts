@@ -751,6 +751,7 @@ export interface HammerCodeApi {
   cancelSideChat(sideChatId: string): Promise<void>;
   closeSideChat(sideChatId: string): Promise<void>;
   searchWorkspaceEntries(query: string): Promise<WorkspaceEntry[]>;
+  chooseWorkspaceEntry(): Promise<WorkspaceEntry | null>;
   previewWorkspaceEntry(path: string): Promise<ReferencePreview>;
   previewSkill(skillKey: string): Promise<ReferencePreview>;
   listProjectMemory(workspaceRoot: string): Promise<ProjectMemorySnapshot>;

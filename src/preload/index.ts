@@ -37,6 +37,8 @@ const api: HammerCodeApi = {
     ipcRenderer.invoke("hammercode:close-side-chat", sideChatId),
   searchWorkspaceEntries: (query) =>
     ipcRenderer.invoke("hammercode:search-workspace-entries", query),
+  chooseWorkspaceEntry: () =>
+    ipcRenderer.invoke("hammercode:choose-workspace-entry"),
   previewWorkspaceEntry: (path) =>
     ipcRenderer.invoke("hammercode:preview-workspace-entry", path),
   previewSkill: (skillKey) =>

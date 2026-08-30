@@ -1,5 +1,5 @@
 import path from "node:path";
-import { chmod, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { app, dialog, type BrowserWindow } from "electron";
 import { z } from "zod";
 import { AgentRunner } from "../core/agent-runner";
@@ -612,6 +612,30 @@ export class AppController {
     if (!this.workspaceRoot) return [];
     const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
     return searchWorkspace(boundary, query);
+  }
+
+  async chooseWorkspaceEntry() {
+    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+    const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
+    const result = await dialog.showOpenDialog(this.window, {
+      title: "选择当前工作区中的文件或文件夹",
+      message: "只能添加当前工作区内的文件或文件夹引用。",
+      defaultPath: boundary.root,
+      properties: ["openFile", "openDirectory"],
+      buttonLabel: "添加引用",
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const selected = await realpath(result.filePaths[0]);
+    const relative = boundary.relative(selected);
+    const info = await stat(selected);
+    if (!info.isFile() && !info.isDirectory()) {
+      throw new HammerCodeError("当前类型不能添加到聊天", "WORKSPACE_ENTRY_UNSUPPORTED", true);
+    }
+    return {
+      path: relative,
+      name: relative === "." ? path.basename(boundary.root) : path.basename(selected),
+      kind: info.isDirectory() ? "directory" as const : "file" as const,
+    };
   }
 
   async previewWorkspaceEntry(input: unknown): Promise<ReferencePreview> {

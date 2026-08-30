@@ -29,6 +29,7 @@ import type {
 } from "../../shared/contracts";
 import { buildFileReviews, type FileReview } from "../../shared/file-reviews";
 import { fallbackChatTitle } from "../../shared/chat-title";
+import { buildComposerAddMenu } from "./composer-add-menu";
 import { filterComposerCommands, type ComposerCommandId } from "./composer-commands";
 import {
   appendComposerEntity,
@@ -1129,8 +1130,11 @@ export function App() {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [composerCursor, setComposerCursor] = useState(0);
-  const [paletteMode, setPaletteMode] = useState<"models" | null>(null);
+  const [paletteMode, setPaletteMode] = useState<"models" | "add" | null>(null);
   const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
+  const [addMenuEntries, setAddMenuEntries] = useState<WorkspaceEntry[]>([]);
+  const [addMenuLoading, setAddMenuLoading] = useState(false);
+  const [choosingWorkspaceEntry, setChoosingWorkspaceEntry] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [notice, setNotice] = useState<{ level: "info" | "error"; text: string } | null>(null);
   const conversationRef = useRef<HTMLElement>(null);
@@ -1292,6 +1296,8 @@ export function App() {
     setReferencePreview(null);
     setPanelMode(null);
     setComposerEntities([]);
+    setPaletteMode(null);
+    setAddMenuEntries([]);
     autoScrollRef.current = true;
     setShowJumpToLatest(false);
   }, [session?.id]);
@@ -1535,6 +1541,38 @@ export function App() {
     setPaletteMode(null);
   };
 
+  const toggleAddMenu = () => {
+    if (paletteMode === "add") {
+      setPaletteMode(null);
+      textareaRef.current?.focus();
+      return;
+    }
+    setPaletteMode("add");
+    setComposerCursor(-1);
+    setPaletteIndex(0);
+    setAddMenuLoading(true);
+    window.hammerCode.searchWorkspaceEntries("").then((entries) => {
+      setAddMenuEntries(entries);
+    }).catch((error) => {
+      setNotice({ level: "error", text: userFacingError(error) });
+    }).finally(() => {
+      setAddMenuLoading(false);
+    });
+  };
+
+  const chooseMentionInFinder = async () => {
+    if (!workspaceRoot || choosingWorkspaceEntry) return;
+    setChoosingWorkspaceEntry(true);
+    try {
+      const entry = await window.hammerCode.chooseWorkspaceEntry();
+      if (entry) selectMention(entry);
+    } catch (error) {
+      setNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setChoosingWorkspaceEntry(false);
+    }
+  };
+
   const removeComposerEntity = (key: string) => {
     setComposerEntities((items) => items.filter((item) => item.key !== key));
   };
@@ -1664,7 +1702,8 @@ export function App() {
 
   if (!bootstrap) return <main className="loading"><img className="loading-mark" src={logoUrl} alt=""/><p>正在打开 HammerCode…</p></main>;
 
-  const slashCommands = filterComposerCommands(composerToken?.query ?? "").map((command) => ({
+  const addMenu = buildComposerAddMenu(addMenuEntries, bootstrap.skills.skills);
+  const slashCommands = filterComposerCommands(paletteMode === "add" ? "" : composerToken?.query ?? "").map((command) => ({
     ...command,
     disabled: command.id === "skills" ? false : command.id === "side_chat" ? !session : command.id === "models" ? isBusy : !session || isBusy,
   }));
@@ -1676,6 +1715,8 @@ export function App() {
     : [];
   const paletteCount = paletteMode === "models"
       ? bootstrap.config.availableModels.length
+      : paletteMode === "add"
+        ? 0
       : composerToken?.kind === "mention"
         ? mentionEntries.length
         : composerToken?.kind === "skill"
@@ -1829,23 +1870,42 @@ export function App() {
         {view === "chat" && <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${composerLocked ? "disabled" : ""}`}>
-            {paletteOpen && !busy && !session?.pendingUndo && <div className="composer-palette" role="listbox" aria-label={paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : composerToken?.kind === "skill" ? "Skills" : "命令"} onMouseDown={(event) => event.preventDefault()}>
-              <header><strong>{paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : composerToken?.kind === "skill" ? "选择 Skill" : "命令"}</strong></header>
+            {paletteOpen && !busy && !session?.pendingUndo && <div className={`composer-palette ${paletteMode === "add" ? "add-menu" : ""}`} role="listbox" aria-label={paletteMode === "add" ? "添加" : paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : composerToken?.kind === "skill" ? "Skills" : "命令"} onMouseDown={(event) => event.preventDefault()}>
+              <header><strong>{paletteMode === "add" ? "添加" : paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : composerToken?.kind === "skill" ? "选择 Skill" : "命令"}</strong></header>
               <div className="palette-list">
-                {paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
+                {paletteMode === "add" ? addMenu.sectionOrder.map((section) => section === "commands" ? (
+                  <section className="add-menu-section" aria-labelledby="add-command-heading" key={section}>
+                    <h3 id="add-command-heading"><span>/</span>命令</h3>
+                    {slashCommands.map((command) => <button key={command.id} disabled={command.disabled} className="command-palette-row" onClick={() => selectSlashCommand(command.id)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" || command.id === "skills" ? "gear" : "chevron"} size={15}/><span><strong>{command.label}</strong></span></button>)}
+                  </section>
+                ) : section === "workspace" ? (
+                  <section className="add-menu-section" aria-labelledby="add-workspace-heading" key={section}>
+                    <h3 id="add-workspace-heading"><span>@</span>文件和文件夹</h3>
+                    {addMenuLoading ? <p>正在读取当前项目…</p> : addMenu.workspaceEntries.map((entry) => <button key={entry.path} onClick={() => selectMention(entry)}><Icon name={entry.kind === "directory" ? "folder" : "file"} size={15}/><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>)}
+                    <button className="finder-picker-row" disabled={!workspaceRoot || choosingWorkspaceEntry} onClick={() => void chooseMentionInFinder()}><Icon name="folder" size={16}/><span><strong>{choosingWorkspaceEntry ? "等待访达选择…" : "在访达中选择…"}</strong><small>浏览当前项目中的文件或文件夹</small></span><Icon name="chevron" size={14}/></button>
+                  </section>
+                ) : (
+                  <section className="add-menu-section" aria-labelledby="add-skill-heading" key={section}>
+                    <h3 id="add-skill-heading"><span>$</span>Skills</h3>
+                    {addMenu.skills.length > 0 ? addMenu.skills.map((skill) => <button key={skill.key} onClick={() => selectSkill(skill)}><Icon name="spark" size={15}/><span><strong>{skill.id}</strong><small>{skill.description}</small></span></button>) : <p>没有已启用且可信任的 Skill</p>}
+                  </section>
+                )) : paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
                     : composerToken?.kind === "mention" ? (mentionEntries.length > 0 ? mentionEntries.map((entry, index) => <button key={entry.path} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={entry.kind === "directory" ? "folder" : "file"} size={15}/><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>) : <p>没有匹配的工作区条目</p>)
-                    : composerToken?.kind === "skill" ? (skillOptions.length > 0 ? skillOptions.map((skill, index) => <button key={skill.key} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name="spark" size={15}/><span><strong>{skill.id}</strong><small>{skill.description}</small></span></button>) : <p>没有匹配且已启用的 Skill</p>)
-                      : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={`command-palette-row ${index === paletteIndex ? "active" : ""}`} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" || command.id === "skills" ? "gear" : "chevron"} size={15}/><strong>{command.label}</strong></button>)}
+                      : composerToken?.kind === "skill" ? (skillOptions.length > 0 ? skillOptions.map((skill, index) => <button key={skill.key} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name="spark" size={15}/><span><strong>{skill.id}</strong><small>{skill.description}</small></span></button>) : <p>没有匹配且已启用的 Skill</p>)
+                        : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={`command-palette-row ${index === paletteIndex ? "active" : ""}`} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" || command.id === "skills" ? "gear" : "chevron"} size={15}/><strong>{command.label}</strong></button>)}
               </div>
             </div>}
-            <div className="composer-row">
+            <div className="composer-input-area">
               <div className="composer-editor">
                 {composerEntities.map((entity) => <span className="composer-entity" data-kind={entity.kind} key={entity.key}>
                   <button className="composer-entity-open" type="button" onClick={() => void openEntityPreview(entity)} title={`预览 ${entity.detail}`}><Icon name={entity.kind === "skill" ? "spark" : entity.kind === "directory" ? "folder" : "file"} size={14}/><span>{entity.label}</span></button>
                   <button className="composer-entity-remove" type="button" onClick={() => removeComposerEntity(entity.key)} aria-label={`移除 ${entity.label}`}>×</button>
                 </span>)}
-                <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={composerEntities.length > 0 ? "继续输入" : workspaceRoot ? (contextCompacting ? "正在压缩上下文" : anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={1}/>
+                <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={composerEntities.length > 0 ? "继续输入" : workspaceRoot ? (contextCompacting ? "正在压缩上下文" : anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={2}/>
               </div>
+            </div>
+            <div className="composer-toolbar">
+              <button className={`composer-add ${paletteMode === "add" ? "active" : ""}`} type="button" onClick={toggleAddMenu} disabled={composerLocked} aria-label="添加命令、文件或 Skill" aria-expanded={paletteMode === "add"} title="添加"><Icon name="plus" size={18}/></button>
               <div className="composer-controls">
                 <ContextRing session={session} budget={bootstrap.config.contextTokenBudget} autoCompactRatio={bootstrap.config.autoCompactRatio} compacting={contextCompacting}/>
                 <select aria-label="模型" title="模型" value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelRef, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select>
