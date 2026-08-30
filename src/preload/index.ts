@@ -28,6 +28,10 @@ const api: HammerCodeApi = {
     ipcRenderer.invoke("hammercode:close-side-chat", sideChatId),
   searchWorkspaceEntries: (query) =>
     ipcRenderer.invoke("hammercode:search-workspace-entries", query),
+  previewWorkspaceEntry: (path) =>
+    ipcRenderer.invoke("hammercode:preview-workspace-entry", path),
+  previewSkill: (skillKey) =>
+    ipcRenderer.invoke("hammercode:preview-skill", skillKey),
   listProjectMemory: () => ipcRenderer.invoke("hammercode:list-project-memory"),
   updateProjectMemorySettings: (settings) =>
     ipcRenderer.invoke("hammercode:update-project-memory-settings", settings),

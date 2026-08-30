@@ -1,0 +1,3 @@
+# Compatibility report
+
+Status: {{status}}

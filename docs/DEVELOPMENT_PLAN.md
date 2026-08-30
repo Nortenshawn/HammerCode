@@ -324,16 +324,16 @@
 用户价值：
 
 1. Skill 是可迁移的本地工作流能力包。对外兼容 Agent Skills 标准目录：唯一必需文件是带 `name`、`description` frontmatter 的 `SKILL.md`，目录名与 `name` 一致；`references/`、`scripts/`、`assets/` 及其他非隐藏附加资源均可原样迁移。内部发现、激活、上下文注入、权限与审计全部自主实现，不另设会妨碍 GitHub 导入或向其他 Agent 导出的必需 manifest。
-2. 常驻索引只保存名称、`description`、版本、来源与声明能力。输入 `$` 打开 Skill 补全并插入 `$skill-name`，`/skills` 打开设置中的 Skill 列表；显式指定优先。未显式指定时只根据 `description` 选择一个最高置信 Skill，且可在设置中关闭。只有本轮命中后才读取完整 `SKILL.md`，其他资源继续按需读取。
-3. Skill 分为随应用发布的内置来源、HammerCode 用户数据目录中的用户来源，以及当前工作区 `.agents/skills/` 中的项目来源。项目 Skill 不跨工作区，首次启用前必须展示来源与能力并由用户显式信任。
-4. 设置页支持本地文件夹导入、启用/禁用、查看版本/来源/作用域/最近使用时间、结构与 manifest 检查、导出及卸载。首版不提供市场、网络安装、依赖下载、自我修改、递归调用或远程 Skill。
+2. 常驻索引只保存名称、`description`、版本、来源与兼容元数据。输入 `$` 打开 Skill 补全，选择后生成不带前缀噪音的原子输入块；`/skills` 打开设置中的 Skill 列表。显式 `$skill-name` 优先并直接加载。未显式指定时向模型提供最多 8,000 字符的有界元数据目录，由模型通过 `activate_skill` 选择最多一个明确匹配项，不再使用字符串命中或关键词计分冒充“自动选择”。
+3. Skill 分为随应用发布的内置来源、HammerCode 用户数据目录中的用户来源，以及当前工作区 `.agents/skills/` 中的项目来源。项目 Skill 不跨工作区，信任绑定由每个文件内容 SHA-256 形成的完整包指纹；任意文件增加、删除或修改后立即禁用并撤销信任，重新启用必须确认新指纹。
+4. 设置页支持本地文件夹导入、启用/禁用、查看版本、来源、License、兼容声明、兼容级别、最近使用时间、结构检查、导出及卸载。格式有效但含非 Python 脚本、额外依赖或未接入工具的包允许迁移并标记“部分不兼容”，不可执行项不会进入运行清单。当前仍不提供市场、网络安装、依赖下载、自我修改、递归调用或远程 Skill。
 
 架构与渐进加载：
 
 1. main process 的 `SkillStore` 负责索引、校验、信任状态、导入导出和按需资源读取。renderer 只接收脱敏的公开清单，不接收 Skill 绝对存储路径或任意文件访问能力。
-2. `AgentRunner` 在 turn 启动时固化 Skill ID、版本、来源、触发方式、包指纹和入口内容摘要；后续更新只影响下一轮。历史恢复只展示审计记录，不重新选择 Skill，不重放资源读取、脚本或其他工具。
+2. `AgentRunner` 在 turn 启动时固化显式 Skill，或固化可供模型选择的 ID、来源、版本和包指纹目录；`activate_skill` 成功后才把完整入口加入本轮消息链与审计。Skill 默认只对当前 turn 生效，后续更新和启停只影响下一轮；历史恢复不重新选择或重放任何工具。
 3. Skill 指令以明确的不可信低优先级区块注入，优先级固定为：系统安全边界 > `AGENTS.md` > 当前用户要求 > 当前 turn Plan > Skill 指令 > Skill references。Skill 内容不能覆盖安全策略，也不能把 references 伪装成事实。
-4. 本轮最多加载 2 个显式 Skill 或 1 个自动 Skill；入口、references、脚本输出分别设字符/token 上限。turn 指标记录 Skill 数量、入口与按需资源的字符数和估算 token。聊天压缩只保留使用过的 ID/版本、触发来源和关键结论，不保留完整说明书。
+4. 本轮最多加载 2 个显式 Skill 或由模型选择 1 个 Skill；目录、入口、references、脚本输出分别设字符/token 上限。turn 指标记录目录成本、实际使用数量、入口与按需资源的字符数和估算 token。聊天压缩只保留使用过的 ID/版本、触发来源和关键结论，不保留完整说明书。
 5. `read_skill_resource` 只能读取本轮已选择包内已校验的相对资源，拒绝绝对路径、`..`、符号链接、读取竞态和包指纹变化。`run_skill_script` 只能运行本轮已发现并固化在包内清单的文本脚本；审批前固化已校验代码快照，避免等待期间被替换，并经过静态高风险/凭据/网络检查，复用原有 `ask/full_access`、命令超时、输出上限、取消和授权审计。
 6. BTW 不执行 Skill 选择、不注入 `SKILL.md`、不暴露 Skill 资源或脚本工具；它只能单向读取创建时已存在的主线可见事实。
 
@@ -346,7 +346,9 @@
 
 离线测试：
 
-- 三层来源发现、项目隔离、重启恢复、自动匹配开关、显式优先、相似 Skill 单选、禁用/更新仅影响下一轮。
+- 三层来源发现、项目隔离、重启恢复、模型选择开关、显式优先、有界目录与 `activate_skill` 单选、禁用/更新仅影响下一轮。
+- 完整包内容 SHA-256 指纹、同大小同 mtime 篡改、文件增加/删除后的信任撤销与重新确认；运行中资源快照变化继续阻断。
+- 开放 Agent Skills 夹具的 `license`、`compatibility`、`agents/openai.yaml`、references、assets 与非 Python 脚本无损导入导出，以及“部分不兼容”降级。
 - 目录穿越、绝对路径、符号链接、重复 ID、缺失入口、超大/二进制/隐藏文件、提示注入和凭据诱导的阻断。
 - 入口渐进读取、reference 按需读取、上下文硬预算、turn 审计与压缩事实保留。
 - 脚本声明校验、请求批准/完全访问授权来源、高风险直接阻断、超时/取消/输出截断，以及重启后不重放。
@@ -354,13 +356,13 @@
 
 在线退出标准：
 
-- 随应用提供“测试失败诊断”和“PDF 技术文档分析”两个真实内置 Skill；正式设置页可查看、启停、导入、导出和卸载本地 Skill，并可关闭自动匹配；输入 `$` 可补全，`/skills` 可直达列表。
-- 在 `/Users/norten/Developer/HammerTest` 使用真实 Fast 显式触发一个 Skill，完成按需资源读取、正式工具调用和 turn 审计；再使用真实 Strong 自动匹配另一个 Skill，证明只加载命中入口且过程区说明名称和原因。
+- 随应用提供“测试失败诊断”和“PDF 技术文档分析”两个真实内置 Skill；正式设置页可查看、启停、导入、导出和卸载本地 Skill，并可关闭模型选择；输入 `$` 可补全，`/skills` 可直达列表。
+- 在 `/Users/norten/Developer/HammerTest` 使用真实 Fast 验证模型先看到有界目录、再调用 `activate_skill` 加载正文；下一轮无关问题必须为 0 Skill、0 工具。保留既有 Fast 显式项目 Skill、Strong 诊断与脚本权限证据。
 - 建立第二个临时工作区，证明项目 Skill 不会跨项目出现；新发现的项目 Skill 在信任前不触发，信任后仅对下一轮生效。
 - 在请求批准与完全访问模式分别运行一个安全 Skill 脚本，并验证远端/提权/越界脚本直接阻断。停止或重启后不重放脚本和工具。
 - `npm run typecheck`、`npm test`、`npm run build` 与 Apple Silicon 打包全部通过；证据同步写入状态和在线测试报告后提交并推送。
 
-完成证据：标准 `SKILL.md`、目录名/name 约束、任意非隐藏附加资源迁移、三层发现、`$` 补全、`/skills`、显式/自动选择、渐进读取、turn 审计、上下文成本、项目首次信任、跨工作区隔离、原子导入导出和可恢复卸载均已实现。真实 Fast 在 HammerTest 显式运行项目 Skill，以用户批准完成 reference、受限脚本和工作区文件三步只读闭环；真实 Strong 自动匹配内置测试诊断 Skill，读取检查清单并复现/定位契约失败，随后以完全访问运行同一项目脚本，轨迹明确显示“完全访问自动批准”。应用重启后 13 条 HammerTest 聊天保持完成状态，没有工具重放；hot100 设置页只显示两个内置 Skill。27 个测试文件共 159 项测试、严格类型检查、生产构建与 `release/mac-arm64/HammerCode.app` 均通过，打包内容包含 Skill runtime 和两个内置标准包。调研事实与自主设计边界见 [SKILL_SYSTEM_RESEARCH.md](SKILL_SYSTEM_RESEARCH.md)，在线证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
+完成证据：标准 `SKILL.md`、`license`/`compatibility`、可选 `agents/openai.yaml`、任意非隐藏附加资源迁移、三层发现、`$` 原子块、`/skills`、显式优先、模型受控激活、渐进读取、turn 隔离与审计均已实现。项目 Skill 信任绑定全包内容哈希，同大小同 mtime 篡改也会撤销；开放兼容夹具可无损导入导出，JavaScript 脚本与外部工具依赖显示为“部分不兼容”而不会获得执行权。真实 Fast 在 HammerTest 以 1 次 `activate_skill` 选择内置诊断 Skill，第二轮 0 Skill/0 工具；既有 Fast 显式项目 Skill、真实 Strong 诊断、请求批准/完全访问脚本和跨工作区隔离证据继续有效。28 个测试文件共 164 项测试、严格类型检查、生产构建、界面验收、Apple Silicon 目录包与生产依赖 0 漏洞审计均通过；`app.asar` 已核对包含新 Skill runtime 和两个内置标准包。调研事实与自主设计边界见 [SKILL_SYSTEM_RESEARCH.md](SKILL_SYSTEM_RESEARCH.md)，在线证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
 
 ## 后续能力池
 

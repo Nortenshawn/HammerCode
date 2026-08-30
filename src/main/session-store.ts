@@ -173,7 +173,7 @@ const skillUseAuditSchema = z.object({
   version: z.string(),
   source: z.enum(["builtin", "user", "project"]),
   scope: z.enum(["application", "user", "project"]),
-  trigger: z.enum(["explicit", "automatic"]),
+  trigger: z.enum(["explicit", "model", "automatic"]),
   reason: z.string(),
   packageFingerprint: z.string(),
   entryPath: z.string(),

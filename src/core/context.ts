@@ -110,7 +110,7 @@ export function buildContextFacts(session: AgentSession): ContextFacts {
     skillsUsed: session.turns
       .flatMap((turn) => turn.skills ?? [])
       .slice(-8)
-      .map((skill) => `${skill.id}@${skill.version}（${skill.trigger === "explicit" ? "显式" : "自动"}）· ${skill.reason}`),
+      .map((skill) => `${skill.id}@${skill.version}（${skill.trigger === "explicit" ? "显式" : skill.trigger === "model" ? "模型选择" : "旧版自动"}）· ${skill.reason}`),
   };
 }
 

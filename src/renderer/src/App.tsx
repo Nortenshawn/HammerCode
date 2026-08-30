@@ -13,6 +13,7 @@ import type {
   PermissionMode,
   PublicModelConnection,
   PublicSkill,
+  ReferencePreview,
   RendererEvent,
   SessionStatus,
   SessionSummary,
@@ -26,8 +27,15 @@ import type {
 import { buildFileReviews, type FileReview } from "../../shared/file-reviews";
 import { fallbackChatTitle } from "../../shared/chat-title";
 import { filterComposerCommands, type ComposerCommandId } from "./composer-commands";
+import {
+  appendComposerEntity,
+  serializeComposerTask,
+  skillComposerEntity,
+  workspaceComposerEntity,
+  type ComposerEntity,
+} from "./composer-entities";
 import { renderDiffLines } from "./diff-renderer";
-import { detectComposerToken, formatWorkspaceMention, replaceComposerToken } from "./composer-tokens";
+import { detectComposerToken, replaceComposerToken } from "./composer-tokens";
 import { computeWorkbenchLayout, DEFAULT_PANEL_RATIO, panelRatioFromDivider } from "./panel-layout";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
@@ -51,6 +59,7 @@ type IconName =
   | "branch"
   | "gear"
   | "plus"
+  | "spark"
   | "square"
   | "stop"
   | "terminal"
@@ -66,6 +75,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     branch: <><circle cx="6" cy="5" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10"/><path d="M8 11h4a6 6 0 0 0 6-2"/></>,
     gear: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.37.37.7.6 1 .3.32.68.46 1.1.46h.1v4h-.1A1.7 1.7 0 0 0 19.4 15Z"/></>,
     plus: <><path d="M12 5v14"/><path d="M5 12h14"/></>,
+    spark: <><path d="m12 3 1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6Z"/><path d="m18.5 14 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z"/></>,
     square: <rect x="4" y="4" width="16" height="16" rx="3"/>,
     stop: <rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor" stroke="none"/>,
     terminal: <><path d="m4 7 5 5-5 5"/><path d="M12 17h8"/></>,
@@ -293,7 +303,7 @@ function SkillUsageView({ turn }: { turn: AgentTurn }) {
       <header><strong>Skills</strong><span>{turn.skills.length} 个 · 约 {formatCompactNumber(turn.skills.reduce((sum, skill) => sum + skill.resources.reduce((resourceSum, resource) => resourceSum + resource.tokens, 0), 0))} tokens</span></header>
       {turn.skills.map((skill) => (
         <article key={`${turn.id}-${skill.source}-${skill.id}-${skill.version}`}>
-          <div><strong>${skill.id}</strong><span>{skill.trigger === "explicit" ? "用户指定" : "自动匹配"} · {skill.source === "builtin" ? "内置" : skill.source === "user" ? "用户" : "项目"}</span></div>
+          <div><strong>{skill.id}</strong><span>{skill.trigger === "explicit" ? "用户指定" : skill.trigger === "model" ? "模型选择" : "旧版自动匹配"} · {skill.source === "builtin" ? "内置" : skill.source === "user" ? "用户" : "项目"}</span></div>
           <p>{skill.reason}</p>
           <small>版本 {skill.version} · 已读取 {skill.resources.length} 项资源{skill.scripts.length > 0 ? ` · 脚本 ${skill.scripts.length} 次` : ""}</small>
         </article>
@@ -449,14 +459,55 @@ function DiffDrawer({ review, busy, undoing, onClose, onUndo, onResizeStart }: {
   );
 }
 
+function UtilityPanelNavigation({
+  active,
+  hasPreview,
+  hasSideChat,
+  onSelect,
+}: {
+  active: "preview" | "side_chat";
+  hasPreview: boolean;
+  hasSideChat: boolean;
+  onSelect: (mode: "preview" | "side_chat") => void;
+}) {
+  return <nav className="utility-panel-navigation" aria-label="右侧面板导航">
+    {hasPreview && <button className={active === "preview" ? "active" : ""} onClick={() => onSelect("preview")}><Icon name="file" size={14}/>预览</button>}
+    {hasSideChat && <button className={active === "side_chat" ? "active" : ""} onClick={() => onSelect("side_chat")}><Icon name="branch" size={14}/>侧边聊天</button>}
+  </nav>;
+}
+
+function ReferencePreviewPanel({
+  preview,
+  navigation,
+  onClose,
+  onResizeStart,
+}: {
+  preview: ReferencePreview;
+  navigation: ReactNode;
+  onClose: () => void;
+  onResizeStart: (clientX: number) => void;
+}) {
+  return <aside className="utility-panel reference-preview-panel" aria-label={`${preview.title} 预览`}>
+    <div className="panel-resize-handle" onPointerDown={(event) => { event.preventDefault(); onResizeStart(event.clientX); }} aria-hidden="true"/>
+    {navigation}
+    <header className="reference-preview-header"><div><small>{preview.kind === "skill" ? "Skill" : preview.kind === "directory" ? "文件夹" : "文件"}</small><strong>{preview.title}</strong><span>{preview.subtitle}</span></div><button className="panel-close" onClick={onClose} aria-label="关闭预览">×</button></header>
+    <div className="reference-preview-content">
+      {preview.kind === "skill" ? <Markdown>{preview.content}</Markdown> : <pre><code>{preview.content}</code></pre>}
+      {preview.truncated && <p className="preview-truncated">内容超过侧边预览上限，已截断</p>}
+    </div>
+  </aside>;
+}
+
 function SideChatPanel({
   sideChat,
+  navigation,
   onClose,
   onSend,
   onCancel,
   onResizeStart,
 }: {
   sideChat: EphemeralSideChatState;
+  navigation: ReactNode;
   onClose: () => void;
   onSend: (content: string) => Promise<void>;
   onCancel: () => void;
@@ -489,6 +540,7 @@ function SideChatPanel({
   return (
     <aside className="utility-panel side-chat-panel" aria-label="侧边聊天">
       <div className="panel-resize-handle" onPointerDown={(event) => { event.preventDefault(); onResizeStart(event.clientX); }} aria-hidden="true"/>
+      {navigation}
       <header className="side-chat-header">
         <div><Icon name="branch" size={15}/><strong>侧边聊天</strong></div>
         <button className="panel-close" onClick={onClose} aria-label="关闭侧边聊天">×</button>
@@ -699,11 +751,11 @@ function SettingsView({
     }
   };
 
-  const updateSkillAutoMatch = async (enabled: boolean) => {
+  const updateSkillModelActivation = async (enabled: boolean) => {
     if (skillBusy) return;
     setSkillBusy("settings");
     try {
-      await window.hammerCode.updateSkillSettings({ autoMatchEnabled: enabled });
+      await window.hammerCode.updateSkillSettings({ modelActivationEnabled: enabled });
     } catch (error) {
       onNotice({ level: "error", text: userFacingError(error) });
     } finally {
@@ -734,7 +786,7 @@ function SettingsView({
     setSkillBusy("import");
     try {
       const result = await window.hammerCode.importSkill();
-      if (result.status !== "cancelled") onNotice({ level: "info", text: `已导入 $${result.skillId ?? "skill"}。` });
+      if (result.status !== "cancelled") onNotice({ level: "info", text: `已导入 ${result.skillId ?? "Skill"}。` });
     } catch (error) {
       onNotice({ level: "error", text: userFacingError(error) });
     } finally {
@@ -775,18 +827,21 @@ function SettingsView({
       {bootstrap.config.connections.map((connection) => <ModelConnectionEditor key={connection.id} connection={connection} busy={connectionBusy} onBusyChange={setConnectionBusy} onNotice={onNotice}/>)}
       {showNewConnection && <div className="new-connection-wrap"><ModelConnectionEditor busy={connectionBusy} onBusyChange={setConnectionBusy} onSaved={() => setShowNewConnection(false)} onNotice={onNotice}/><button className="cancel-new-connection" disabled={connectionBusy} onClick={() => setShowNewConnection(false)}>取消新增</button></div>}
       <section className="settings-card skill-settings-card" id="skill-settings">
-        <div className="settings-card-title"><div><h2>Skills</h2><p>本地工作流按需加载，不会授予工具或权限。输入 $ 可显式选择；项目 Skill 来自当前工作区的 .agents/skills/。</p></div><span>{bootstrap.skills.skills.filter((skill) => skill.enabled && skill.valid).length} 个启用</span></div>
+        <div className="settings-card-title"><div><h2>Skills</h2><p>本地工作流按需加载且默认只对当前 turn 生效，不会授予工具或权限。输入 $ 可显式选择；项目 Skill 来自当前工作区的 .agents/skills/。</p></div><span>{bootstrap.skills.skills.filter((skill) => skill.enabled && skill.valid).length} 个启用</span></div>
         <div className="skill-controls">
-          <label className="setting-switch"><span><strong>自动匹配</strong><small>只根据 description 为每轮选择一个最相关 Skill</small></span><input type="checkbox" checked={bootstrap.skills.settings.autoMatchEnabled} disabled={Boolean(skillBusy)} onChange={(event) => void updateSkillAutoMatch(event.target.checked)}/><i aria-hidden="true"/></label>
+          <label className="setting-switch"><span><strong>允许模型选择</strong><small>向模型提供有界名称与 description 目录，正文仍需通过 activate_skill 加载</small></span><input type="checkbox" checked={bootstrap.skills.settings.modelActivationEnabled} disabled={Boolean(skillBusy)} onChange={(event) => void updateSkillModelActivation(event.target.checked)}/><i aria-hidden="true"/></label>
           <button className="secondary-action" disabled={Boolean(skillBusy)} onClick={() => void importSkill()}>{skillBusy === "import" ? "正在检查…" : "导入文件夹"}</button>
         </div>
         {bootstrap.skills.skills.length === 0 ? <p className="memory-empty">还没有发现本地 Skill。</p> : <div className="skill-list">
-          {bootstrap.skills.skills.map((skill) => <article className={`skill-item ${skill.valid ? "" : "invalid"}`} key={skill.key}>
-            <div className="skill-item-main"><div><strong>${skill.id}</strong><span>{skill.name} · {skill.source === "builtin" ? "内置" : skill.source === "user" ? "用户" : "当前项目"} · {skill.version}</span></div><label className="mini-switch" title={skill.valid ? (skill.enabled ? "禁用" : "启用") : "校验未通过"}><input type="checkbox" checked={skill.enabled} disabled={!skill.valid || Boolean(skillBusy)} onChange={(event) => void setSkillEnabled(skill, event.target.checked)}/><i aria-hidden="true"/></label></div>
+          {bootstrap.skills.skills.map((skill) => <article className={`skill-item ${skill.valid ? "" : "invalid"} compatibility-${skill.compatibilityStatus}`} key={skill.key}>
+            <div className="skill-item-main"><div><strong>{skill.id}</strong><span>{skill.name} · {skill.version}</span></div><label className="mini-switch" title={skill.valid ? (skill.enabled ? "禁用" : "启用") : "校验未通过"}><input type="checkbox" checked={skill.enabled} disabled={!skill.valid || Boolean(skillBusy)} onChange={(event) => void setSkillEnabled(skill, event.target.checked)}/><i aria-hidden="true"/></label></div>
             <p>{skill.description}</p>
-            <div className="skill-capabilities"><span>声明工具 {skill.capabilities.tools.length} 项（不授权）</span><span>脚本 {skill.capabilities.scripts.length} 个</span>{skill.lastUsedAt && <span>最近使用 {new Date(skill.lastUsedAt).toLocaleString("zh-CN")}</span>}</div>
+            <div className="skill-capabilities"><span>来源 {skill.source === "builtin" ? "内置" : skill.source === "user" ? "用户" : "当前项目"}</span><span>License {skill.license}</span><span className={`skill-compatibility compatibility-${skill.compatibilityStatus}`}>{skill.compatibilityStatus === "compatible" ? "完全兼容" : skill.compatibilityStatus === "partial" ? "可导入但部分不兼容" : "不可使用"}</span><span>声明工具 {skill.capabilities.tools.length} 项（不授权）</span><span>脚本 {skill.capabilities.scripts.length} 个</span>{skill.lastUsedAt && <span>最近使用 {new Date(skill.lastUsedAt).toLocaleString("zh-CN")}</span>}</div>
+            {skill.compatibility && <div className="skill-compatibility-note">兼容声明：{skill.compatibility}</div>}
+            {skill.compatibilityIssues.length > 0 && <div className="skill-compatibility-note partial">{skill.compatibilityIssues.join("；")}</div>}
+            {skill.trustInvalidated && <div className="skill-trust-invalidated">包内容已变化，先前信任已自动撤销；重新启用时需要再次确认完整内容指纹。</div>}
             {skill.issues.length > 0 && <div className="skill-issues">{skill.issues.join("；")}</div>}
-            {pendingSkillTrust?.key === skill.key && <div className="skill-trust"><strong>信任当前项目 Skill？</strong><p>来源：当前工作区 .agents/skills/ · 声明工具 {skill.capabilities.tools.join("、") || "无"}（不会授权）· 脚本 {skill.capabilities.scripts.join("、") || "无"}。启用前会检查目录、指令和脚本；仍受工作区与审批保护。</p><div><button className="secondary-action" onClick={() => setPendingSkillTrust(null)}>取消</button><button className="primary-action" onClick={() => void setSkillEnabled(skill, true, true)}>检查并信任</button></div></div>}
+            {pendingSkillTrust?.key === skill.key && <div className="skill-trust"><strong>信任当前项目 Skill？</strong><p>来源：当前工作区 .agents/skills/ · 内容指纹 {skill.packageFingerprint.slice(0, 16)}… · 声明工具 {skill.capabilities.tools.join("、") || "无"}（不会授权）· 脚本 {skill.capabilities.scripts.join("、") || "无"}。信任绑定完整包内容，任意文件变化后会自动撤销；操作仍受工作区与审批保护。</p><div><button className="secondary-action" onClick={() => setPendingSkillTrust(null)}>取消</button><button className="primary-action" onClick={() => void setSkillEnabled(skill, true, true)}>检查并信任此版本</button></div></div>}
             <footer><button className="secondary-action" disabled={Boolean(skillBusy) || !skill.valid} onClick={() => void exportSkill(skill)}>导出</button>{skill.source !== "builtin" && <button className="danger-action" disabled={Boolean(skillBusy)} onClick={() => void uninstallSkill(skill)}>卸载</button>}</footer>
           </article>)}
         </div>}
@@ -851,12 +906,15 @@ export function App() {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("ask");
   const [view, setView] = useState<"chat" | "settings">("chat");
   const [task, setTask] = useState("");
+  const [composerEntities, setComposerEntities] = useState<ComposerEntity[]>([]);
   const [busy, setBusy] = useState(false);
   const [contextCompacting, setContextCompacting] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [showFullAccessWarning, setShowFullAccessWarning] = useState(false);
   const [selectedReviewPath, setSelectedReviewPath] = useState<string | null>(null);
   const [sideChat, setSideChat] = useState<EphemeralSideChatState | null>(null);
+  const [referencePreview, setReferencePreview] = useState<ReferencePreview | null>(null);
+  const [panelMode, setPanelMode] = useState<"review" | "preview" | "side_chat" | null>(null);
   const [panelRatio, setPanelRatio] = useState(DEFAULT_PANEL_RATIO);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -918,6 +976,10 @@ export function App() {
         setModelTier(event.session?.modelTier ?? "fast");
         setModelRef(event.session?.modelRef ?? `builtin:${event.session?.modelTier ?? "fast"}`);
         setPermissionMode(event.session?.permissionMode ?? "ask");
+        setTask("");
+        setComposerEntities([]);
+        setReferencePreview(null);
+        setPanelMode(null);
       }
       if (event.type === "config_updated") {
         setBootstrap((current) => current ? {
@@ -954,7 +1016,11 @@ export function App() {
     [session?.fileChanges],
   );
   const selectedReview = fileReviews.find((review) => review.path === selectedReviewPath);
-  const panelOpen = Boolean(selectedReview || sideChat);
+  const panelOpen = Boolean(
+    (panelMode === "review" && selectedReview) ||
+    (panelMode === "preview" && referencePreview) ||
+    (panelMode === "side_chat" && sideChat),
+  );
   const workbenchLayout = useMemo(
     () => computeWorkbenchLayout(viewportWidth, panelRatio),
     [viewportWidth, panelRatio],
@@ -986,6 +1052,9 @@ export function App() {
   useEffect(() => {
     setSelectedReviewPath(null);
     setSideChat(null);
+    setReferencePreview(null);
+    setPanelMode(null);
+    setComposerEntities([]);
     autoScrollRef.current = true;
     setShowJumpToLatest(false);
   }, [session?.id]);
@@ -993,6 +1062,12 @@ export function App() {
   useEffect(() => {
     if (selectedReviewPath && !selectedReview) setSelectedReviewPath(null);
   }, [selectedReview, selectedReviewPath]);
+
+  useEffect(() => {
+    if (panelMode === "side_chat" && !sideChat) setPanelMode(referencePreview ? "preview" : null);
+    if (panelMode === "preview" && !referencePreview) setPanelMode(sideChat ? "side_chat" : null);
+    if (panelMode === "review" && !selectedReview) setPanelMode(null);
+  }, [panelMode, referencePreview, selectedReview, sideChat]);
 
   useEffect(() => {
     const conversation = conversationRef.current;
@@ -1044,6 +1119,7 @@ export function App() {
       await window.hammerCode.newChat();
       setView("chat");
       setTask("");
+      setComposerEntities([]);
       setNotice(null);
     } catch (error) {
       setNotice({ level: "error", text: userFacingError(error) });
@@ -1054,7 +1130,7 @@ export function App() {
 
   const newChat = async () => {
     if (busy) return;
-    try { await window.hammerCode.newChat(); setView("chat"); setTask(""); setNotice(null); }
+    try { await window.hammerCode.newChat(); setView("chat"); setTask(""); setComposerEntities([]); setNotice(null); }
     catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
   };
 
@@ -1105,6 +1181,7 @@ export function App() {
     try {
       setSelectedReviewPath(null);
       setSideChat(await window.hammerCode.openSideChat());
+      setPanelMode("side_chat");
       setNotice(null);
     } catch (error) {
       setNotice({ level: "error", text: userFacingError(error) });
@@ -1114,6 +1191,7 @@ export function App() {
   const closeSideChat = async () => {
     const current = sideChat;
     setSideChat(null);
+    setPanelMode(referencePreview ? "preview" : null);
     if (!current) return;
     try { await window.hammerCode.closeSideChat(current.id); }
     catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
@@ -1141,14 +1219,49 @@ export function App() {
   };
 
   const selectMention = (entry: WorkspaceEntry) => {
-    replaceActiveToken(`${formatWorkspaceMention(entry.path)} `);
+    replaceActiveToken("");
+    setComposerEntities((items) => appendComposerEntity(items, workspaceComposerEntity(entry)));
     setMentionEntries([]);
     setPaletteMode(null);
   };
 
   const selectSkill = (skill: PublicSkill) => {
-    replaceActiveToken(`$${skill.id} `);
+    replaceActiveToken("");
+    setComposerEntities((items) => appendComposerEntity(items, skillComposerEntity(skill)));
     setPaletteMode(null);
+  };
+
+  const removeComposerEntity = (key: string) => {
+    setComposerEntities((items) => items.filter((item) => item.key !== key));
+  };
+
+  const openEntityPreview = async (entity: ComposerEntity) => {
+    setSelectedReviewPath(null);
+    setPanelMode("preview");
+    setReferencePreview({
+      key: entity.key,
+      kind: entity.kind,
+      title: entity.label,
+      subtitle: entity.detail,
+      content: "正在读取预览…",
+      truncated: false,
+    });
+    try {
+      const preview = entity.kind === "skill"
+        ? await window.hammerCode.previewSkill(entity.value)
+        : await window.hammerCode.previewWorkspaceEntry(entity.value);
+      setReferencePreview(preview);
+      setNotice(null);
+    } catch (error) {
+      setReferencePreview(null);
+      setPanelMode(sideChat ? "side_chat" : null);
+      setNotice({ level: "error", text: userFacingError(error) });
+    }
+  };
+
+  const closeReferencePreview = () => {
+    setReferencePreview(null);
+    setPanelMode(sideChat ? "side_chat" : null);
   };
 
   const startPanelResize = (_clientX: number) => {
@@ -1220,14 +1333,16 @@ export function App() {
   };
 
   const submit = async () => {
-    if (!task.trim() || !workspaceRoot || isBusy || anotherSessionIsRunning || !selectedModel?.hasApiKey) return;
+    const serializedTask = serializeComposerTask(task, composerEntities);
+    if (!serializedTask || !workspaceRoot || isBusy || anotherSessionIsRunning || !selectedModel?.hasApiKey) return;
     setBusy(true);
     autoScrollRef.current = true;
     setShowJumpToLatest(false);
     setNotice(null);
     try {
-      await window.hammerCode.startTask({ task, modelTier, modelRef, permissionMode });
+      await window.hammerCode.startTask({ task: serializedTask, modelTier, modelRef, permissionMode });
       setTask("");
+      setComposerEntities([]);
     } catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
     finally { setBusy(false); }
   };
@@ -1306,6 +1421,17 @@ export function App() {
       selectPaletteItem(Math.min(paletteIndex, paletteCount - 1));
       return;
     }
+    if (
+      event.key === "Backspace" &&
+      !paletteOpen &&
+      event.currentTarget.selectionStart === 0 &&
+      event.currentTarget.selectionEnd === 0 &&
+      composerEntities.length > 0
+    ) {
+      event.preventDefault();
+      setComposerEntities((items) => items.slice(0, -1));
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       event.currentTarget.blur();
@@ -1370,7 +1496,9 @@ export function App() {
                   reviews={fileReviews}
                   onOpen={(review) => {
                     if (sideChat) void closeSideChat();
+                    setReferencePreview(null);
                     setSelectedReviewPath(review.path);
+                    setPanelMode("review");
                   }}
                 />
               )}
@@ -1388,12 +1516,18 @@ export function App() {
               <div className="palette-list">
                 {paletteMode === "models" ? bootstrap.config.availableModels.map((option, index) => <button key={option.ref} disabled={!option.hasApiKey} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><span className={`connection-dot ${option.connectionStatus === "missing" ? "missing" : option.connectionStatus === "error" ? "error" : "ready"}`}/><span><strong>{option.label}</strong><small>{option.apiBaseUrl}{option.hasApiKey ? "" : " · 未配置"}</small></span></button>)
                     : composerToken?.kind === "mention" ? (mentionEntries.length > 0 ? mentionEntries.map((entry, index) => <button key={entry.path} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={entry.kind === "directory" ? "folder" : "file"} size={15}/><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>) : <p>没有匹配的工作区条目</p>)
-                    : composerToken?.kind === "skill" ? (skillOptions.length > 0 ? skillOptions.map((skill, index) => <button key={skill.key} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name="square" size={15}/><span><strong>${skill.id}</strong><small>{skill.description}</small></span></button>) : <p>没有匹配且已启用的 Skill</p>)
+                    : composerToken?.kind === "skill" ? (skillOptions.length > 0 ? skillOptions.map((skill, index) => <button key={skill.key} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name="spark" size={15}/><span><strong>{skill.id}</strong><small>{skill.description}</small></span></button>) : <p>没有匹配且已启用的 Skill</p>)
                       : slashCommands.map((command, index) => <button key={command.id} disabled={command.disabled} className={`command-palette-row ${index === paletteIndex ? "active" : ""}`} onMouseEnter={() => setPaletteIndex(index)} onClick={() => selectPaletteItem(index)}><Icon name={command.id === "side_chat" ? "branch" : command.id === "models" || command.id === "skills" ? "gear" : "chevron"} size={15}/><strong>{command.label}</strong></button>)}
               </div>
             </div>}
             <div className="composer-row">
-              <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={workspaceRoot ? (contextCompacting ? "正在压缩上下文" : anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={1}/>
+              <div className="composer-editor">
+                {composerEntities.map((entity) => <span className="composer-entity" data-kind={entity.kind} key={entity.key}>
+                  <button className="composer-entity-open" type="button" onClick={() => void openEntityPreview(entity)} title={`预览 ${entity.detail}`}><Icon name={entity.kind === "skill" ? "spark" : entity.kind === "directory" ? "folder" : "file"} size={14}/><span>{entity.label}</span></button>
+                  <button className="composer-entity-remove" type="button" onClick={() => removeComposerEntity(entity.key)} aria-label={`移除 ${entity.label}`}>×</button>
+                </span>)}
+                <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={composerEntities.length > 0 ? "继续输入" : workspaceRoot ? (contextCompacting ? "正在压缩上下文" : anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={1}/>
+              </div>
               <div className="composer-controls">
                 <ContextRing session={session} budget={bootstrap.config.contextTokenBudget} autoCompactRatio={bootstrap.config.autoCompactRatio} compacting={contextCompacting}/>
                 <select aria-label="模型" title="模型" value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelRef, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select>
@@ -1401,26 +1535,36 @@ export function App() {
               </div>
               {isRunning || contextCompacting
                 ? <button key="stop" className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label={contextCompacting ? "停止上下文压缩" : "停止任务"}><Icon name="stop" size={15}/></button>
-                : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={!task.trim() || !workspaceRoot || isBusy || anotherSessionIsRunning || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
+                : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={(!task.trim() && composerEntities.length === 0) || !workspaceRoot || isBusy || anotherSessionIsRunning || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
             </div>
           </div>
         </section>}
       </main>
 
-      {view === "chat" && panelVisible && selectedReview && session && (
+      {view === "chat" && panelVisible && panelMode === "review" && selectedReview && session && (
         <DiffDrawer
           review={selectedReview}
           busy={isBusy}
           undoing={session.pendingUndo?.changeId === selectedReview.latestChangeId}
-          onClose={() => setSelectedReviewPath(null)}
+          onClose={() => { setSelectedReviewPath(null); setPanelMode(null); }}
           onUndo={() => void requestUndo(selectedReview.latestChangeId)}
           onResizeStart={startPanelResize}
         />
       )}
 
-      {view === "chat" && panelVisible && sideChat && (
+      {view === "chat" && panelVisible && panelMode === "preview" && referencePreview && (
+        <ReferencePreviewPanel
+          preview={referencePreview}
+          navigation={<UtilityPanelNavigation active="preview" hasPreview hasSideChat={Boolean(sideChat)} onSelect={setPanelMode}/>}
+          onClose={closeReferencePreview}
+          onResizeStart={startPanelResize}
+        />
+      )}
+
+      {view === "chat" && panelVisible && panelMode === "side_chat" && sideChat && (
         <SideChatPanel
           sideChat={sideChat}
+          navigation={<UtilityPanelNavigation active="side_chat" hasPreview={Boolean(referencePreview)} hasSideChat onSelect={setPanelMode}/>}
           onClose={() => void closeSideChat()}
           onSend={async (content) => {
             try { await window.hammerCode.sendSideChat(sideChat.id, content); }

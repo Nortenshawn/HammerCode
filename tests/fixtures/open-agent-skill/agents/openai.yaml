@@ -1,0 +1,10 @@
+interface:
+  display_name: "Open Agent Skill Fixture"
+  short_description: "Portable compatibility fixture"
+policy:
+  allow_implicit_invocation: false
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "exampleDocs"
+      description: "Optional documentation connector"

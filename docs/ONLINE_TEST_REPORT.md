@@ -432,9 +432,9 @@ HammerTest 新增标准项目 Skill `.agents/skills/phase11-online/`，仅包含
 - `read_file` 读取 `Phase11/skill-fixture.txt`，标记为 `PHASE11_WORKSPACE_OK`。
 - 任务 28 秒完成，3 次工具调用，最终说明全程只读、未修改文件；过程区记录已读取 2 项 Skill 资源和 1 次脚本。
 
-### Strong 自动匹配与完全访问
+### Strong 自动匹配与完全访问（Phase 11 旧基线）
 
-真实 Strong 的任务没有写 `$skill-name`，仅以“请诊断测试失败”描述任务。turn 启动时自动选择 `test-failure-diagnosis`，过程区显示匹配词“诊断测试失败、失败”、内置来源、版本 1.0.0 和约 323 tokens；模型按需读取 `references/triage-checklist.md`，资源成本增至约 421 tokens，并运行真实 Node 测试定位 `failing-contract.js` 返回 2、测试契约要求 3 的根因。最终 1 分 36 秒、14 次工具调用、0 文件修改。
+该次旧基线中，真实 Strong 的任务没有写 `$skill-name`，仅以“请诊断测试失败”描述任务；当时的本地匹配器在 turn 启动时选择了 `test-failure-diagnosis`，过程区显示匹配词、内置来源、版本 1.0.0 和约 323 tokens。模型按需读取 `references/triage-checklist.md`，资源成本增至约 421 tokens，并运行真实 Node 测试定位 `failing-contract.js` 返回 2、测试契约要求 3 的根因。最终 1 分 36 秒、14 次工具调用、0 文件修改。该选择机制已由下方 `HC-ONLINE-2026-08-30-02` 的模型受控 `activate_skill` 链路替代。
 
 随后在同一 Strong 聊天的新 turn 显式选择 `phase11-online`，只运行 Skill 脚本。第一次模型调用因遗漏 `path` 在 prepare 阶段失败，补齐参数后成功；轨迹展开后明确显示“授权 完全访问自动批准”、目标包内脚本、参数、95ms 和 exit code 0，没有审批弹窗，也没有工作区副作用。错误调用没有被静默隐藏。
 
@@ -447,3 +447,34 @@ HammerTest 新增标准项目 Skill `.agents/skills/phase11-online/`，仅包含
 - 最终 `npm run typecheck`、27 个测试文件共 159 项测试、`npm run build`、`npm run package:mac` 和生产依赖审计全部通过。安全脚本测试真实经过 macOS 沙箱，并验证审批等待期间包文件变化不会替换本轮已校验代码快照；`release/mac-arm64/HammerCode.app` 的 `app.asar` 已核对包含 `dist/main/skill-store.js`、两个内置 Skill 的 `SKILL.md`、references 和安全辅助脚本。
 
 测试产物保留在 HammerTest：`.agents/skills/phase11-online/`、`Phase11/skill-fixture.txt`、`Phase11/failing-contract.js` 与 `Phase11/failing-contract.test.js`，供人工复核。首版没有联网安装、市场、自动更新或依赖下载。
+
+## HC-ONLINE-2026-08-30-02
+
+- 时间：2026-08-30 12:42–12:48（Asia/Shanghai）
+- 基线提交：`c89d01d`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer 完整链路操作
+- 模型：真实 `fast = deepseek-v4-flash`
+- 工作区：`/Users/norten/Developer/HammerTest`
+- 凭据：只由正式 main process 的既有加密配置读取；界面、终端、测试输出和本报告均未展示、打印或复制 key
+
+### 模型受控激活与 turn 隔离
+
+新建 HammerTest 聊天时没有输入 `$skill-name`，只描述“已经出现的测试断言失败”，并明确禁止读取文件、运行命令和修改内容。首轮请求只向模型提供有界名称/description 目录和 `activate_skill`，没有提前注入 `SKILL.md` 正文或资源工具。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 模型选择 | Fast 根据 description 主动调用 `activate_skill({ skill_id: "test-failure-diagnosis" })`，没有字符串匹配器预选审计 | 通过 |
+| 渐进加载 | 首轮共 2 次模型请求、1 次工具调用；激活后才返回完整入口，并在下一请求提供资源工具 | 通过 |
+| 权限边界 | `activate_skill` 不需要审批且只加载低优先级流程；本轮 0 文件读取、0 命令、0 修改 | 通过 |
+| 审计与成本 | 过程区显示“模型选择 · 内置”、版本 1.0.0、1 项入口资源，Skill 总成本约 462 tokens；工具轨迹明确记录 `activate_skill` | 通过 |
+| 当前 turn 生效 | 同一聊天第二轮要求只回答 `2+2` 且不使用 Skill/工具；结果为 `4`，0 Skill、0 工具，首轮 Skill 没有延续 | 通过 |
+
+### 输入块、预览与设置页
+
+- 单独输入 `$` 时菜单显示简洁图标与无 `$` 前缀名称；选择后形成浅蓝原子块，无法编辑内部文本，点击移除会整体删除。
+- 输入 `@Phase11` 选择文件后形成同样的原子块；点击 Skill 或文件均在 BTW 共用位置打开并排右栏。顶部导航保留“预览/侧边聊天”切换位置，主聊天和输入框同步压缩。
+- 初次实测发现 Skill 原始 frontmatter 被 Markdown 当成大标题；交付前改为主进程剥离 YAML 头部，复测后右栏只渲染正文层级。
+- 设置页实际显示来源、License、兼容声明和兼容级别。既有项目 Skill 因旧信任没有完整内容指纹而自动变为禁用/未信任，并提示重新确认；这验证迁移不会把旧布尔信任静默升级为新版本信任。
+- 上下文圆环在同一轮界面验收中正常显示应用内悬浮提示，包含 9%、10.9k/120k、自动阈值和压缩次数。
+
+本轮没有修改 HammerTest 文件；唯一持久化副作用是新增一条两轮在线验收聊天。开放格式、同大小同 mtime 内容篡改、目录符号链接、部分兼容降级、原子输入序列化和下一轮不重放由 164 项自动测试覆盖。最终严格类型检查、28 个测试文件、生产构建、Apple Silicon 目录包和生产依赖审计均通过；`release/mac-arm64/HammerCode.app` 的 `app.asar` 已核对包含新 Skill runtime 与两个内置标准包。

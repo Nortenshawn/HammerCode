@@ -124,6 +124,12 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:search-workspace-entries", (query: unknown) =>
     appController.searchWorkspaceEntries(query),
   );
+  handle("hammercode:preview-workspace-entry", (path: unknown) =>
+    appController.previewWorkspaceEntry(path),
+  );
+  handle("hammercode:preview-skill", (skillKey: unknown) =>
+    appController.previewSkill(skillKey),
+  );
   handle("hammercode:list-project-memory", () => appController.listProjectMemory());
   handle("hammercode:update-project-memory-settings", (settings: unknown) =>
     appController.updateProjectMemorySettings(settings),

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { chmod, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { app, dialog, type BrowserWindow } from "electron";
 import { z } from "zod";
 import { AgentRunner } from "../core/agent-runner";
@@ -29,6 +29,7 @@ import {
   type ProjectMemorySnapshot,
   type ProjectMemorySettings,
   type ProjectMemoryTransferResult,
+  type ReferencePreview,
   type RendererEvent,
   type SessionSettings,
   type SessionSummary,
@@ -60,6 +61,7 @@ const sessionIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const changeIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const workspaceRootSchema = z.string().min(1).max(4096);
 const workspaceQuerySchema = z.string().max(240);
+const workspacePreviewPathSchema = z.string().min(1).max(4_096);
 const modelConnectionProbeSchema = z.object({
   connectionId: z.union([z.enum(["builtin:fast", "builtin:strong"]), z.string().uuid()]).optional(),
   apiBaseUrl: z.string().trim().min(1).max(2_048),
@@ -110,7 +112,7 @@ export class AppController {
   private currentProjectMemory: ProjectMemorySnapshot | null = null;
   private currentSkills: SkillInventorySnapshot = {
     workspaceRoot: null,
-    settings: { autoMatchEnabled: true },
+    settings: { modelActivationEnabled: true },
     skills: [],
     updatedAt: new Date(0).toISOString(),
   };
@@ -485,6 +487,65 @@ export class AppController {
     if (!this.workspaceRoot) return [];
     const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
     return searchWorkspace(boundary, query);
+  }
+
+  async previewWorkspaceEntry(input: unknown): Promise<ReferencePreview> {
+    const relativePath = workspacePreviewPathSchema.parse(input);
+    if (!this.workspaceRoot) throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
+    const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
+    const absolute = await boundary.resolveExisting(relativePath);
+    const info = await stat(absolute);
+    if (info.isDirectory()) {
+      const children = (await readdir(absolute, { withFileTypes: true }))
+        .filter((item) => !item.isSymbolicLink())
+        .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+      const visible = children.slice(0, 240);
+      return {
+        key: `workspace:${relativePath}`,
+        kind: "directory",
+        title: path.basename(absolute),
+        subtitle: relativePath,
+        content: visible.map((item) => `${item.isDirectory() ? "目录" : "文件"}\t${item.name}`).join("\n") || "（空文件夹）",
+        truncated: children.length > visible.length,
+      };
+    }
+    if (!info.isFile()) throw new HammerCodeError("当前类型无法预览", "PREVIEW_UNSUPPORTED", true);
+    const maxBytes = 96_000;
+    const handle = await open(absolute, "r");
+    let buffer: Buffer;
+    try {
+      const target = Buffer.alloc(Math.min(info.size, maxBytes + 1));
+      const { bytesRead } = await handle.read(target, 0, target.length, 0);
+      buffer = target.subarray(0, bytesRead);
+    } finally {
+      await handle.close();
+    }
+    const extension = path.extname(relativePath).toLowerCase();
+    if (buffer.includes(0) || [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".zip"].includes(extension)) {
+      return {
+        key: `workspace:${relativePath}`,
+        kind: "file",
+        title: path.basename(relativePath),
+        subtitle: relativePath,
+        content: `这是${extension === ".pdf" ? " PDF" : "二进制"}文件，当前侧边预览不展开其原始内容。Agent 仍可通过正式工具读取。`,
+        truncated: false,
+      };
+    }
+    const content = buffer.toString("utf8");
+    const language = extension.slice(1) || "text";
+    return {
+      key: `workspace:${relativePath}`,
+      kind: "file",
+      title: path.basename(relativePath),
+      subtitle: relativePath,
+      content: content.slice(0, maxBytes),
+      truncated: info.size > maxBytes || content.length > maxBytes,
+      language,
+    };
+  }
+
+  async previewSkill(skillKey: unknown): Promise<ReferencePreview> {
+    return this.skills.previewPackage(skillKey, this.workspaceRoot);
   }
 
   async listProjectMemory(): Promise<ProjectMemorySnapshot | null> {

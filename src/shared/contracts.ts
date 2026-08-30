@@ -218,8 +218,9 @@ export interface AgentTurn {
 
 export type SkillSource = "builtin" | "user" | "project";
 export type SkillScope = "application" | "user" | "project";
-export type SkillTriggerMode = "explicit" | "automatic";
+export type SkillTriggerMode = "explicit" | "model" | "automatic";
 export type SkillResourceKind = "entry" | "reference" | "script" | "asset";
+export type SkillCompatibilityStatus = "compatible" | "partial" | "incompatible";
 
 export interface SkillResourceAudit {
   path: string;
@@ -554,7 +555,7 @@ export interface ProjectMemoryTransferResult {
 }
 
 export interface SkillSettings {
-  autoMatchEnabled: boolean;
+  modelActivationEnabled: boolean;
 }
 
 export interface PublicSkillCapabilities {
@@ -569,12 +570,18 @@ export interface PublicSkill {
   version: string;
   description: string;
   when: string;
+  license: string;
+  compatibility: string;
+  compatibilityStatus: SkillCompatibilityStatus;
+  compatibilityIssues: string[];
   source: SkillSource;
   scope: SkillScope;
   enabled: boolean;
   trusted: boolean;
   valid: boolean;
   issues: string[];
+  trustInvalidated: boolean;
+  packageFingerprint: string;
   capabilities: PublicSkillCapabilities;
   lastUsedAt?: string;
 }
@@ -590,6 +597,16 @@ export interface SkillTransferResult {
   status: "imported" | "exported" | "cancelled";
   skillId?: string;
   fileName?: string;
+}
+
+export interface ReferencePreview {
+  key: string;
+  kind: "file" | "directory" | "skill";
+  title: string;
+  subtitle: string;
+  content: string;
+  truncated: boolean;
+  language?: string;
 }
 
 export interface PublicRuntimeConfig {
@@ -690,6 +707,8 @@ export interface HammerCodeApi {
   cancelSideChat(sideChatId: string): Promise<void>;
   closeSideChat(sideChatId: string): Promise<void>;
   searchWorkspaceEntries(query: string): Promise<WorkspaceEntry[]>;
+  previewWorkspaceEntry(path: string): Promise<ReferencePreview>;
+  previewSkill(skillKey: string): Promise<ReferencePreview>;
   listProjectMemory(): Promise<ProjectMemorySnapshot | null>;
   updateProjectMemorySettings(settings: ProjectMemorySettings): Promise<ProjectMemorySnapshot | null>;
   exportProjectMemory(): Promise<ProjectMemoryTransferResult>;

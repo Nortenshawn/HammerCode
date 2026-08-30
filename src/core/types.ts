@@ -104,14 +104,26 @@ export interface AgentDependencies {
 export interface SkillSelection {
   usages: SkillUseAudit[];
   rendered: string;
+  catalog: string;
+  catalogCharacters: number;
+  catalogTokens: number;
+  candidates: SkillCatalogCandidate[];
+}
+
+export interface SkillCatalogCandidate {
+  id: string;
+  version: string;
+  source: SkillUseAudit["source"];
+  packageFingerprint: string;
 }
 
 export interface SkillPort {
   select(workspaceRoot: string, task: string, now: Date): Promise<SkillSelection>;
-  definitions(usages: SkillUseAudit[]): ModelToolDefinition[];
+  definitions(usages: SkillUseAudit[], candidates: SkillCatalogCandidate[]): ModelToolDefinition[];
   prepare(
     call: ToolCall,
     usages: SkillUseAudit[],
+    candidates: SkillCatalogCandidate[],
     workspaceRoot: string,
     now: Date,
   ): Promise<PreparedToolCall>;
