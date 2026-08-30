@@ -11,6 +11,7 @@ import {
   SUBAGENT_ROLES,
   type AgentSession,
   type AgentTurn,
+  type ArchivedWorkspaceSummary,
   type ModelRef,
   type ConversationMessage,
   type SessionSummary,
@@ -372,7 +373,7 @@ const indexV1Schema = z.object({
   activeSessionId: z.string().nullable(),
   sessionIds: z.array(z.string()),
 });
-const workspaceIndexSchema = z.object({
+const workspaceIndexV2Schema = z.object({
   root: z.string(),
   activeSessionId: z.string().nullable(),
   sessionIds: z.array(z.string()),
@@ -382,18 +383,27 @@ const workspaceIndexSchema = z.object({
 const indexV2Schema = z.object({
   version: z.literal(2),
   activeWorkspaceRoot: z.string().nullable(),
+  workspaces: z.array(workspaceIndexV2Schema),
+});
+const workspaceIndexSchema = workspaceIndexV2Schema.extend({
+  archivedSessionIds: z.array(z.string()),
+});
+const indexV3Schema = z.object({
+  version: z.literal(3),
+  activeWorkspaceRoot: z.string().nullable(),
   workspaces: z.array(workspaceIndexSchema),
 });
 
 type ParsedSession = z.infer<typeof sessionSchema>;
 type LegacyIndex = z.infer<typeof indexV1Schema>;
-type SessionIndex = z.infer<typeof indexV2Schema>;
+type SessionIndex = z.infer<typeof indexV3Schema>;
 type WorkspaceIndex = z.infer<typeof workspaceIndexSchema>;
 
 export interface SessionStoreState {
   activeSession: AgentSession | null;
   sessions: SessionSummary[];
   workspaces: WorkspaceSummary[];
+  archivedWorkspaces: ArchivedWorkspaceSummary[];
   workspaceRoot: string | null;
 }
 
@@ -576,6 +586,19 @@ function toWorkspaceSummary(
   };
 }
 
+function toArchivedWorkspaceSummary(
+  workspace: WorkspaceIndex,
+  sessions: SessionSummary[],
+): ArchivedWorkspaceSummary {
+  return {
+    root: workspace.root,
+    name: workspaceName(workspace.root),
+    sessionCount: sessions.length,
+    sessions,
+    updatedAt: workspace.updatedAt,
+  };
+}
+
 function sortSummaries(items: SessionSummary[]): SessionSummary[] {
   return items.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
@@ -598,6 +621,7 @@ export class SessionStore {
     const index = await this.readIndex();
     const liveSessionIds = new Set(options.liveSessionIds ?? []);
     const workspaceSummaries: WorkspaceSummary[] = [];
+    const archivedWorkspaceSummaries: ArchivedWorkspaceSummary[] = [];
     let activeSession: AgentSession | null = null;
     let activeSessions: SessionSummary[] = [];
     for (const workspace of index.workspaces) {
@@ -611,10 +635,23 @@ export class SessionStore {
       }
       workspace.sessionIds = validIds;
       const summaries = sortSummaries(sessions.map(toSummary));
+      const archivedSessions: AgentSession[] = [];
+      const validArchivedIds: string[] = [];
+      const activeIds = new Set(validIds);
+      for (const id of workspace.archivedSessionIds) {
+        if (activeIds.has(id)) continue;
+        const session = await this.readSession(id);
+        if (!session || session.workspaceRoot !== workspace.root) continue;
+        validArchivedIds.push(id);
+        archivedSessions.push(session);
+      }
+      workspace.archivedSessionIds = validArchivedIds;
+      const archivedSummaries = sortSummaries(archivedSessions.map(toSummary));
       const selected =
         sessions.find((session) => session.id === workspace.activeSessionId) ?? null;
       if (!selected) workspace.activeSessionId = null;
       workspaceSummaries.push(toWorkspaceSummary(workspace, summaries));
+      archivedWorkspaceSummaries.push(toArchivedWorkspaceSummary(workspace, archivedSummaries));
       if (workspace.root === index.activeWorkspaceRoot) {
         activeSession = selected;
         activeSessions = summaries;
@@ -630,6 +667,7 @@ export class SessionStore {
       // Keep the explicit insertion order from the index. Selecting a project or
       // chat must not make the sidebar jump by moving that project to the top.
       workspaces: workspaceSummaries,
+      archivedWorkspaces: archivedWorkspaceSummaries,
       workspaceRoot: index.activeWorkspaceRoot,
     };
   }
@@ -655,16 +693,21 @@ export class SessionStore {
         root: normalized.workspaceRoot,
         activeSessionId: null,
         sessionIds: [],
+        archivedSessionIds: [],
         createdAt: now,
         updatedAt: now,
       };
       index.workspaces.push(workspace);
     }
     await this.writeSession(normalized);
-    workspace.sessionIds = [
-      normalized.id,
-      ...workspace.sessionIds.filter((id) => id !== normalized.id),
-    ];
+    const wasArchived = workspace.archivedSessionIds.includes(normalized.id);
+    if (!wasArchived || options.activate !== false) {
+      workspace.archivedSessionIds = workspace.archivedSessionIds.filter((id) => id !== normalized.id);
+      workspace.sessionIds = [
+        normalized.id,
+        ...workspace.sessionIds.filter((id) => id !== normalized.id),
+      ];
+    }
     workspace.updatedAt = now;
     if (options.activate !== false) {
       workspace.activeSessionId = normalized.id;
@@ -682,6 +725,7 @@ export class SessionStore {
         root: workspaceRoot,
         activeSessionId: null,
         sessionIds: [],
+        archivedSessionIds: [],
         createdAt: now,
         updatedAt: now,
       };
@@ -716,6 +760,73 @@ export class SessionStore {
     await this.writeIndex(index);
   }
 
+  async archiveSession(sessionId: string): Promise<void> {
+    this.assertSafeSessionId(sessionId);
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.sessionIds.includes(sessionId));
+    if (!workspace) throw new Error("找不到可归档的聊天");
+    const session = await this.readSession(sessionId, true);
+    this.assertSessionCanBeArchived(session);
+    workspace.sessionIds = workspace.sessionIds.filter((id) => id !== sessionId);
+    workspace.archivedSessionIds = [
+      sessionId,
+      ...workspace.archivedSessionIds.filter((id) => id !== sessionId),
+    ];
+    if (workspace.activeSessionId === sessionId) workspace.activeSessionId = null;
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async restoreSession(sessionId: string): Promise<void> {
+    this.assertSafeSessionId(sessionId);
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.archivedSessionIds.includes(sessionId));
+    if (!workspace) throw new Error("找不到已归档聊天");
+    const session = await this.readSession(sessionId);
+    if (!session || session.workspaceRoot !== workspace.root) throw new Error("归档聊天内容不可用");
+    workspace.archivedSessionIds = workspace.archivedSessionIds.filter((id) => id !== sessionId);
+    workspace.sessionIds = [sessionId, ...workspace.sessionIds.filter((id) => id !== sessionId)];
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async archiveWorkspace(workspaceRoot: string): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot);
+    if (!workspace) throw new Error("找不到指定工作区");
+    const sessions = await Promise.all(
+      workspace.sessionIds.map((id) => this.readSession(id, true)),
+    );
+    sessions.forEach((session) => this.assertSessionCanBeArchived(session));
+    workspace.archivedSessionIds = [
+      ...workspace.sessionIds,
+      ...workspace.archivedSessionIds.filter((id) => !workspace.sessionIds.includes(id)),
+    ];
+    workspace.sessionIds = [];
+    workspace.activeSessionId = null;
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
+  async restoreWorkspace(workspaceRoot: string): Promise<void> {
+    const index = await this.readIndex();
+    const workspace = index.workspaces.find((item) => item.root === workspaceRoot);
+    if (!workspace) throw new Error("找不到指定工作区");
+    const sessions = await Promise.all(
+      workspace.archivedSessionIds.map((id) => this.readSession(id)),
+    );
+    if (sessions.some((session) => !session || session.workspaceRoot !== workspace.root)) {
+      throw new Error("部分归档聊天内容不可用");
+    }
+    workspace.sessionIds = [
+      ...workspace.archivedSessionIds,
+      ...workspace.sessionIds.filter((id) => !workspace.archivedSessionIds.includes(id)),
+    ];
+    workspace.archivedSessionIds = [];
+    workspace.updatedAt = new Date().toISOString();
+    await this.writeIndex(index);
+  }
+
   async clear(): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find(
@@ -735,8 +846,10 @@ export class SessionStore {
     if (raw !== null) {
       try {
         const value = JSON.parse(raw) as unknown;
-        const current = indexV2Schema.safeParse(value);
+        const current = indexV3Schema.safeParse(value);
         if (current.success) return current.data;
+        const previous = indexV2Schema.safeParse(value);
+        if (previous.success) return this.migrateV2Index(previous.data);
         const legacy = indexV1Schema.safeParse(value);
         if (legacy.success) return this.migrateV1Index(legacy.data);
       } catch {
@@ -745,6 +858,26 @@ export class SessionStore {
       return this.emptyIndex();
     }
     return this.migrateLegacySession();
+  }
+
+  private assertSessionCanBeArchived(session: AgentSession | null): asserts session is AgentSession {
+    if (!session) throw new Error("聊天内容不可用");
+    if (ACTIVE_STATUSES.has(session.status) || session.pendingUndo) {
+      throw new Error("运行、审批或撤销中的聊天不能归档");
+    }
+  }
+
+  private async migrateV2Index(previous: z.infer<typeof indexV2Schema>): Promise<SessionIndex> {
+    const index: SessionIndex = {
+      version: 3,
+      activeWorkspaceRoot: previous.activeWorkspaceRoot,
+      workspaces: previous.workspaces.map((workspace) => ({
+        ...workspace,
+        archivedSessionIds: [],
+      })),
+    };
+    await this.writeIndex(index);
+    return index;
   }
 
   private async migrateV1Index(legacy: LegacyIndex): Promise<SessionIndex> {
@@ -770,6 +903,7 @@ export class SessionStore {
         sessionIds: sessions
           .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
           .map((session) => session.id),
+        archivedSessionIds: [],
         createdAt,
         updatedAt,
       };
@@ -780,7 +914,7 @@ export class SessionStore {
       workspaces.find((workspace) => workspace.root === legacy.workspaceRoot)?.root ??
       workspaces[0]?.root ??
       null;
-    const index: SessionIndex = { version: 2, activeWorkspaceRoot, workspaces };
+    const index: SessionIndex = { version: 3, activeWorkspaceRoot, workspaces };
     await this.writeIndex(index);
     return index;
   }
@@ -795,13 +929,14 @@ export class SessionStore {
       this.assertSafeSessionId(session.id);
       await this.writeSession(session);
       const index: SessionIndex = {
-        version: 2,
+        version: 3,
         activeWorkspaceRoot: session.workspaceRoot,
         workspaces: [
           {
             root: session.workspaceRoot,
             activeSessionId: session.id,
             sessionIds: [session.id],
+            archivedSessionIds: [],
             createdAt: session.createdAt,
             updatedAt: session.updatedAt,
           },
@@ -898,6 +1033,6 @@ export class SessionStore {
   }
 
   private emptyIndex(): SessionIndex {
-    return { version: 2, activeWorkspaceRoot: null, workspaces: [] };
+    return { version: 3, activeWorkspaceRoot: null, workspaces: [] };
   }
 }

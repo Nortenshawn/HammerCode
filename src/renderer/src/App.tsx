@@ -6,6 +6,7 @@ import type {
   AgentSession,
   AgentTurn,
   AppBootstrap,
+  ArchivedWorkspaceSummary,
   AssistantMessage,
   EphemeralSideChatState,
   ModelRef,
@@ -37,6 +38,7 @@ import {
 import { renderDiffLines } from "./diff-renderer";
 import { detectComposerToken, replaceComposerToken } from "./composer-tokens";
 import { computeWorkbenchLayout, DEFAULT_PANEL_RATIO, panelRatioFromDivider } from "./panel-layout";
+import { memoryDescription, memorySourceTitle, memoryTitle } from "./memory-presentation";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -52,6 +54,7 @@ const TERMINAL_STATUSES: SessionStatus[] = ["completed", "cancelled", "failed"];
 
 type IconName =
   | "arrow-up"
+  | "archive"
   | "check"
   | "chevron"
   | "file"
@@ -68,6 +71,7 @@ type IconName =
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
     "arrow-up": <><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></>,
+    archive: <><path d="M4 7h16v13H4Z"/><path d="M3 3h18v4H3Z"/><path d="M9 11h6"/></>,
     check: <path d="m5 12 4 4L19 6"/>,
     chevron: <path d="m9 18 6-6-6-6"/>,
     file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></>,
@@ -206,6 +210,8 @@ function upsertWorkspaceSession(items: WorkspaceSummary[], session: AgentSession
     };
   });
 }
+
+type SettingsSection = "models" | "skills" | "memory" | "archived";
 
 function Markdown({ children }: { children: string }) {
   return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>;
@@ -580,12 +586,13 @@ function SideChatPanel({
   );
 }
 
-function ChatList({ sessions, activeId, disabled, onSelect }: { sessions: SessionSummary[]; activeId?: string; disabled: boolean; onSelect: (id: string) => void }) {
+function ChatList({ sessions, activeId, selectDisabled, archiveDisabled, onSelect, onArchive }: { sessions: SessionSummary[]; activeId?: string; selectDisabled: boolean; archiveDisabled: boolean; onSelect: (id: string) => void; onArchive: (id: string) => void }) {
   if (sessions.length === 0) return <p className="empty-chat-list">还没有聊天</p>;
   return <div className="chat-list">{sessions.map((item) => (
-    <button className={`chat-item ${item.id === activeId ? "active" : ""}`} disabled={disabled} key={item.id} onClick={() => onSelect(item.id)}>
-      <span className="chat-title">{item.title}</span>
-    </button>
+    <div className={`chat-item ${item.id === activeId ? "active" : ""}`} key={item.id}>
+      <button className="chat-open" disabled={selectDisabled} onClick={() => onSelect(item.id)} title={item.title}><span className="chat-title">{item.title}</span></button>
+      <button className="chat-archive" disabled={archiveDisabled} onClick={() => onArchive(item.id)} title="归档聊天" aria-label={`归档 ${item.title}`}><Icon name="archive" size={13}/></button>
+    </div>
   ))}</div>;
 }
 
@@ -691,9 +698,13 @@ function ModelConnectionEditor({
 
 function SettingsView({
   bootstrap,
+  section,
+  appBusy,
   onNotice,
 }: {
   bootstrap: AppBootstrap;
+  section: SettingsSection;
+  appBusy: boolean;
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
 }) {
   const [connectionBusy, setConnectionBusy] = useState(false);
@@ -703,6 +714,7 @@ function SettingsView({
   const [transferringMemory, setTransferringMemory] = useState<"import" | "export" | null>(null);
   const [skillBusy, setSkillBusy] = useState<string | null>(null);
   const [pendingSkillTrust, setPendingSkillTrust] = useState<PublicSkill | null>(null);
+  const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
 
   const deleteMemory = async (memoryId: string) => {
     if (deletingMemory) return;
@@ -752,7 +764,7 @@ function SettingsView({
   };
 
   const updateSkillModelActivation = async (enabled: boolean) => {
-    if (skillBusy) return;
+    if (skillBusy || appBusy) return;
     setSkillBusy("settings");
     try {
       await window.hammerCode.updateSkillSettings({ modelActivationEnabled: enabled });
@@ -764,7 +776,7 @@ function SettingsView({
   };
 
   const setSkillEnabled = async (skill: PublicSkill, enabled: boolean, trustProject = false) => {
-    if (skillBusy) return;
+    if (skillBusy || appBusy) return;
     if (enabled && skill.source === "project" && !skill.trusted && !trustProject) {
       setPendingSkillTrust(skill);
       return;
@@ -782,7 +794,7 @@ function SettingsView({
   };
 
   const importSkill = async () => {
-    if (skillBusy) return;
+    if (skillBusy || appBusy) return;
     setSkillBusy("import");
     try {
       const result = await window.hammerCode.importSkill();
@@ -795,7 +807,7 @@ function SettingsView({
   };
 
   const exportSkill = async (skill: PublicSkill) => {
-    if (skillBusy) return;
+    if (skillBusy || appBusy) return;
     setSkillBusy(`export:${skill.key}`);
     try {
       const result = await window.hammerCode.exportSkill(skill.key);
@@ -808,7 +820,7 @@ function SettingsView({
   };
 
   const uninstallSkill = async (skill: PublicSkill) => {
-    if (skillBusy || !window.confirm(`卸载 ${skill.name}？Skill 文件会移入 HammerCode 的可恢复移除目录。`)) return;
+    if (skillBusy || appBusy || !window.confirm(`卸载 ${skill.name}？Skill 文件会移入 HammerCode 的可恢复移除目录。`)) return;
     setSkillBusy(`remove:${skill.key}`);
     try {
       await window.hammerCode.uninstallSkill(skill.key);
@@ -820,33 +832,70 @@ function SettingsView({
     }
   };
 
+  const changeWorkspaceArchive = async (root: string, mode: "archive" | "restore") => {
+    if (archiveBusy || appBusy) return;
+    setArchiveBusy(`${mode}:${root}`);
+    try {
+      if (mode === "archive") await window.hammerCode.archiveWorkspace(root);
+      else await window.hammerCode.restoreWorkspace(root);
+      onNotice({ level: "info", text: mode === "archive" ? "项目中的聊天已归档，项目仍保留。" : "项目中的归档聊天已恢复。" });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setArchiveBusy(null);
+    }
+  };
+
+  const restoreArchivedSession = async (sessionId: string) => {
+    if (archiveBusy || appBusy) return;
+    setArchiveBusy(`restore:${sessionId}`);
+    try {
+      await window.hammerCode.restoreSession(sessionId);
+      onNotice({ level: "info", text: "聊天已恢复到原项目。" });
+    } catch (error) {
+      onNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setArchiveBusy(null);
+    }
+  };
+
+  const headings: Record<SettingsSection, { title: string; description: string }> = {
+    models: { title: "模型连接", description: "管理默认模型与 OpenAI-compatible 接口。API Key 只会在主进程中加密保存。" },
+    skills: { title: "Skills", description: "管理本地工作流、项目级 Skill 和模型自动选择。Skill 不会绕过工具权限。" },
+    memory: { title: "项目记忆", description: "记忆按项目隔离，并由你分别控制读取、生成、导入与导出。" },
+    archived: { title: "已归档", description: "归档只整理聊天列表，不会删除聊天内容或项目。" },
+  };
+  const skillControlsDisabled = Boolean(skillBusy) || appBusy;
+
   return (
     <section className="settings-view">
-      <header className="settings-heading"><small>Settings</small><h1>设置</h1><p>Fast 与 Strong 是默认连接，也可以重命名。你还可以添加其他 OpenAI-compatible 接口；API Key 只在主进程中加密保存，不会回显。</p></header>
-      <div className="settings-section-heading"><div><h2>模型连接</h2><p>检测 URL 后选择服务端返回的模型。</p></div><button className="secondary-action" disabled={connectionBusy || showNewConnection} onClick={() => setShowNewConnection(true)}>新增连接</button></div>
-      {bootstrap.config.connections.map((connection) => <ModelConnectionEditor key={connection.id} connection={connection} busy={connectionBusy} onBusyChange={setConnectionBusy} onNotice={onNotice}/>)}
-      {showNewConnection && <div className="new-connection-wrap"><ModelConnectionEditor busy={connectionBusy} onBusyChange={setConnectionBusy} onSaved={() => setShowNewConnection(false)} onNotice={onNotice}/><button className="cancel-new-connection" disabled={connectionBusy} onClick={() => setShowNewConnection(false)}>取消新增</button></div>}
-      <section className="settings-card skill-settings-card" id="skill-settings">
+      <header className="settings-heading"><h1>{headings[section].title}</h1><p>{headings[section].description}</p></header>
+      <div className={`settings-section-panel ${section === "models" ? "active" : ""}`}>
+      <div className="settings-section-heading"><div><h2>已保存连接</h2><p>检测 URL 后选择服务端返回的模型。</p></div><button className="primary-action settings-create" disabled={connectionBusy || showNewConnection || appBusy} onClick={() => setShowNewConnection(true)}><Icon name="plus" size={14}/>新增连接</button></div>
+      {bootstrap.config.connections.map((connection) => <ModelConnectionEditor key={connection.id} connection={connection} busy={connectionBusy || appBusy} onBusyChange={setConnectionBusy} onNotice={onNotice}/>)}
+      {showNewConnection && <div className="new-connection-wrap"><div className="new-connection-dialog" role="dialog" aria-modal="true" aria-label="新增模型连接"><button className="cancel-new-connection" disabled={connectionBusy} onClick={() => setShowNewConnection(false)} aria-label="关闭新增连接">×</button><ModelConnectionEditor busy={connectionBusy} onBusyChange={setConnectionBusy} onSaved={() => setShowNewConnection(false)} onNotice={onNotice}/></div></div>}
+      </div>
+      <section className={`settings-card skill-settings-card settings-section-panel ${section === "skills" ? "active" : ""}`} id="skill-settings">
         <div className="settings-card-title"><div><h2>Skills</h2><p>本地工作流按需加载且默认只对当前 turn 生效，不会授予工具或权限。输入 $ 可显式选择；项目 Skill 来自当前工作区的 .agents/skills/。</p></div><span>{bootstrap.skills.skills.filter((skill) => skill.enabled && skill.valid).length} 个启用</span></div>
         <div className="skill-controls">
-          <label className="setting-switch"><span><strong>允许模型选择</strong><small>向模型提供有界名称与 description 目录，正文仍需通过 activate_skill 加载</small></span><input type="checkbox" checked={bootstrap.skills.settings.modelActivationEnabled} disabled={Boolean(skillBusy)} onChange={(event) => void updateSkillModelActivation(event.target.checked)}/><i aria-hidden="true"/></label>
-          <button className="secondary-action" disabled={Boolean(skillBusy)} onClick={() => void importSkill()}>{skillBusy === "import" ? "正在检查…" : "导入文件夹"}</button>
+          <label className="setting-switch"><span><strong>允许模型选择</strong><small>向模型提供有界名称与 description 目录，正文仍需通过 activate_skill 加载</small></span><input type="checkbox" checked={bootstrap.skills.settings.modelActivationEnabled} disabled={skillControlsDisabled} onChange={(event) => void updateSkillModelActivation(event.target.checked)}/><i aria-hidden="true"/></label>
+          <button className="secondary-action" disabled={skillControlsDisabled} onClick={() => void importSkill()}>{skillBusy === "import" ? "正在检查…" : "导入文件夹"}</button>
         </div>
         {bootstrap.skills.skills.length === 0 ? <p className="memory-empty">还没有发现本地 Skill。</p> : <div className="skill-list">
           {bootstrap.skills.skills.map((skill) => <article className={`skill-item ${skill.valid ? "" : "invalid"} compatibility-${skill.compatibilityStatus}`} key={skill.key}>
-            <div className="skill-item-main"><div><strong>{skill.id}</strong><span>{skill.name} · {skill.version}</span></div><label className="mini-switch" title={skill.valid ? (skill.enabled ? "禁用" : "启用") : "校验未通过"}><input type="checkbox" checked={skill.enabled} disabled={!skill.valid || Boolean(skillBusy)} onChange={(event) => void setSkillEnabled(skill, event.target.checked)}/><i aria-hidden="true"/></label></div>
+            <div className="skill-item-main"><div><strong>{skill.id}</strong><span>{skill.name} · {skill.version}</span></div><label className="mini-switch" title={skill.valid ? (skill.enabled ? "禁用" : "启用") : "校验未通过"}><input type="checkbox" checked={skill.enabled} disabled={!skill.valid || skillControlsDisabled} onChange={(event) => void setSkillEnabled(skill, event.target.checked)}/><i aria-hidden="true"/></label></div>
             <p>{skill.description}</p>
             <div className="skill-capabilities"><span>来源 {skill.source === "builtin" ? "内置" : skill.source === "user" ? "用户" : "当前项目"}</span><span>License {skill.license}</span><span className={`skill-compatibility compatibility-${skill.compatibilityStatus}`}>{skill.compatibilityStatus === "compatible" ? "完全兼容" : skill.compatibilityStatus === "partial" ? "可导入但部分不兼容" : "不可使用"}</span><span>声明工具 {skill.capabilities.tools.length} 项（不授权）</span><span>脚本 {skill.capabilities.scripts.length} 个</span>{skill.lastUsedAt && <span>最近使用 {new Date(skill.lastUsedAt).toLocaleString("zh-CN")}</span>}</div>
             {skill.compatibility && <div className="skill-compatibility-note">兼容声明：{skill.compatibility}</div>}
             {skill.compatibilityIssues.length > 0 && <div className="skill-compatibility-note partial">{skill.compatibilityIssues.join("；")}</div>}
             {skill.trustInvalidated && <div className="skill-trust-invalidated">包内容已变化，先前信任已自动撤销；重新启用时需要再次确认完整内容指纹。</div>}
             {skill.issues.length > 0 && <div className="skill-issues">{skill.issues.join("；")}</div>}
-            {pendingSkillTrust?.key === skill.key && <div className="skill-trust"><strong>信任当前项目 Skill？</strong><p>来源：当前工作区 .agents/skills/ · 内容指纹 {skill.packageFingerprint.slice(0, 16)}… · 声明工具 {skill.capabilities.tools.join("、") || "无"}（不会授权）· 脚本 {skill.capabilities.scripts.join("、") || "无"}。信任绑定完整包内容，任意文件变化后会自动撤销；操作仍受工作区与审批保护。</p><div><button className="secondary-action" onClick={() => setPendingSkillTrust(null)}>取消</button><button className="primary-action" onClick={() => void setSkillEnabled(skill, true, true)}>检查并信任此版本</button></div></div>}
-            <footer><button className="secondary-action" disabled={Boolean(skillBusy) || !skill.valid} onClick={() => void exportSkill(skill)}>导出</button>{skill.source !== "builtin" && <button className="danger-action" disabled={Boolean(skillBusy)} onClick={() => void uninstallSkill(skill)}>卸载</button>}</footer>
+            {pendingSkillTrust?.key === skill.key && <div className="skill-trust"><strong>信任当前项目 Skill？</strong><p>来源：当前工作区 .agents/skills/ · 内容指纹 {skill.packageFingerprint.slice(0, 16)}… · 声明工具 {skill.capabilities.tools.join("、") || "无"}（不会授权）· 脚本 {skill.capabilities.scripts.join("、") || "无"}。信任绑定完整包内容，任意文件变化后会自动撤销；操作仍受工作区与审批保护。</p><div><button className="secondary-action" onClick={() => setPendingSkillTrust(null)}>取消</button><button className="primary-action" disabled={appBusy} onClick={() => void setSkillEnabled(skill, true, true)}>检查并信任此版本</button></div></div>}
+            <footer><button className="secondary-action" disabled={skillControlsDisabled || !skill.valid} onClick={() => void exportSkill(skill)}>导出</button>{skill.source !== "builtin" && <button className="danger-action" disabled={skillControlsDisabled} onClick={() => void uninstallSkill(skill)}>卸载</button>}</footer>
           </article>)}
         </div>}
       </section>
-      <section className="settings-card memory-settings-card">
+      <section className={`settings-card memory-settings-card settings-section-panel ${section === "memory" ? "active" : ""}`}>
         <div className="settings-card-title"><div><h2>项目记忆</h2><p>只在当前项目的聊天之间共享，不会跨项目使用。关闭后保留已有记录，但下一轮不再读取或生成。</p></div><span>{bootstrap.projectMemory?.records.filter((record) => record.status === "active").length ?? 0} 条有效</span></div>
         {bootstrap.workspaceRoot && bootstrap.projectMemory && <div className="memory-controls">
           <label className="setting-switch"><span><strong>启用项目记忆</strong><small>新项目默认关闭</small></span><input type="checkbox" checked={bootstrap.projectMemory.settings.enabled} disabled={savingMemory} onChange={(event) => void updateMemorySettings({ enabled: event.target.checked })}/><i aria-hidden="true"/></label>
@@ -858,15 +907,74 @@ function SettingsView({
           <div className="memory-transfer-actions"><button className="secondary-action" disabled={Boolean(transferringMemory)} onClick={() => void transferMemory("import")}>{transferringMemory === "import" ? "正在导入…" : "导入"}</button><button className="secondary-action" disabled={Boolean(transferringMemory)} onClick={() => void transferMemory("export")}>{transferringMemory === "export" ? "正在导出…" : "导出"}</button></div>
         </div>}
         {!bootstrap.workspaceRoot ? <p className="memory-empty">选择工作区后可查看项目记忆。</p> : !bootstrap.projectMemory?.records.length ? <p className="memory-empty">这个工作区还没有项目记忆。</p> : <div className="memory-list">
-          {bootstrap.projectMemory.records.map((record) => <article className={`memory-item memory-${record.status}`} key={record.id}>
-            <div><strong>{record.subject}</strong><span>{record.kind === "decision" ? "决定" : record.kind === "constraint" ? "约束" : record.kind === "verification" ? "验证" : "事实"} · {record.confidence === "tool_verified" ? "工具核验" : record.confidence === "user_confirmed" ? "用户确认" : "模型推断"} · {record.status === "active" ? "有效" : record.status === "conflicted" ? "冲突" : record.status === "invalidated" ? "已失效" : "已删除"}</span></div>
-            <p>{record.statement}</p>
-            <footer><code>{record.source.label}</code>{record.status !== "deleted" && <button disabled={Boolean(deletingMemory)} onClick={() => void deleteMemory(record.id)}>{deletingMemory === record.id ? "删除中…" : "删除"}</button>}</footer>
+          {bootstrap.projectMemory.records.map((record) => <article className={`memory-item memory-${record.status} memory-kind-${record.kind}`} key={record.id}>
+            <div><strong>{memoryTitle(record)}</strong><span>{record.kind === "decision" ? "决定" : record.kind === "constraint" ? "约束" : record.kind === "verification" ? "验证" : "事实"} · {record.status === "active" ? "有效" : record.status === "conflicted" ? "冲突" : record.status === "invalidated" ? "已失效" : "已删除"}</span></div>
+            <p>{memoryDescription(record)}</p>
+            <footer><span>{memorySourceTitle(record, bootstrap.workspaces, bootstrap.archivedWorkspaces)}</span>{record.status !== "deleted" && <button disabled={Boolean(deletingMemory) || appBusy} onClick={() => void deleteMemory(record.id)}>{deletingMemory === record.id ? "删除中…" : "删除"}</button>}</footer>
           </article>)}
         </div>}
       </section>
+      <div className={`archive-settings settings-section-panel ${section === "archived" ? "active" : ""}`}>
+        <section className="settings-card archive-active-card">
+          <div className="settings-card-title"><div><h2>批量整理</h2><p>归档一个项目中的全部聊天，项目本身会继续留在左侧。</p></div></div>
+          <div className="archive-project-list">
+            {bootstrap.workspaces.map((workspace) => <div className="archive-project-row" key={workspace.root}>
+              <div><Icon name="folder" size={17}/><span><strong>{workspace.name}</strong><small>{workspace.sessionCount} 条活动聊天</small></span></div>
+              <button className="secondary-action" disabled={workspace.sessionCount === 0 || Boolean(archiveBusy) || appBusy} onClick={() => void changeWorkspaceArchive(workspace.root, "archive")}>{archiveBusy === `archive:${workspace.root}` ? "归档中…" : "全部归档"}</button>
+            </div>)}
+          </div>
+        </section>
+        {bootstrap.archivedWorkspaces.every((workspace) => workspace.sessionCount === 0)
+          ? <div className="archive-empty"><Icon name="archive" size={23}/><strong>还没有归档聊天</strong><p>归档后的聊天会按原项目显示在这里。</p></div>
+          : bootstrap.archivedWorkspaces.filter((workspace) => workspace.sessionCount > 0).map((workspace) => <section className="settings-card archived-group" key={workspace.root}>
+            <div className="settings-card-title"><div><h2>{workspace.name}</h2><p>{workspace.sessionCount} 条已归档聊天</p></div><button className="secondary-action" disabled={Boolean(archiveBusy) || appBusy} onClick={() => void changeWorkspaceArchive(workspace.root, "restore")}>{archiveBusy === `restore:${workspace.root}` ? "恢复中…" : "全部恢复"}</button></div>
+            <div className="archived-chat-list">{workspace.sessions.map((item) => <div className="archived-chat-row" key={item.id}><span><strong>{item.title}</strong><small>{new Date(item.updatedAt).toLocaleString("zh-CN")}</small></span><button disabled={Boolean(archiveBusy) || appBusy} onClick={() => void restoreArchivedSession(item.id)}>{archiveBusy === `restore:${item.id}` ? "恢复中…" : "恢复"}</button></div>)}</div>
+          </section>)}
+      </div>
     </section>
   );
+}
+
+function SettingsShell({
+  bootstrap,
+  section,
+  busy,
+  notice,
+  onSectionChange,
+  onBack,
+  onNotice,
+  onDismissNotice,
+}: {
+  bootstrap: AppBootstrap;
+  section: SettingsSection;
+  busy: boolean;
+  notice: { level: "info" | "error"; text: string } | null;
+  onSectionChange: (section: SettingsSection) => void;
+  onBack: () => void;
+  onNotice: (notice: { level: "info" | "error"; text: string }) => void;
+  onDismissNotice: () => void;
+}) {
+  const items: Array<{ id: SettingsSection; label: string; icon: IconName }> = [
+    { id: "models", label: "模型连接", icon: "spark" },
+    { id: "skills", label: "Skills", icon: "gear" },
+    { id: "memory", label: "项目记忆", icon: "branch" },
+    { id: "archived", label: "已归档", icon: "archive" },
+  ];
+  const archivedCount = bootstrap.archivedWorkspaces.reduce((total, workspace) => total + workspace.sessionCount, 0);
+  return <div className="settings-shell">
+    <aside className="settings-sidebar">
+      <div className="settings-sidebar-drag"/>
+      <button className="settings-back" onClick={onBack}>← 返回</button>
+      <div className="settings-nav-title"><img src={logoUrl} alt=""/><strong>设置</strong></div>
+      <nav>{items.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => onSectionChange(item.id)}><Icon name={item.icon} size={16}/><span>{item.label}</span>{item.id === "archived" && archivedCount > 0 && <small>{archivedCount}</small>}</button>)}</nav>
+    </aside>
+    <main className="settings-main">
+      <div className="settings-content">
+        {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={onDismissNotice}>×</button></div>}
+        <SettingsView bootstrap={bootstrap} section={section} appBusy={busy} onNotice={onNotice}/>
+      </div>
+    </main>
+  </div>;
 }
 
 function ContextRing({
@@ -899,12 +1007,14 @@ export function App() {
   const [session, setSession] = useState<AgentSession | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [archivedWorkspaces, setArchivedWorkspaces] = useState<ArchivedWorkspaceSummary[]>([]);
   const [expandedRoots, setExpandedRoots] = useState<Set<string>>(new Set());
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [modelTier, setModelTier] = useState<ModelTier>("fast");
   const [modelRef, setModelRef] = useState<ModelRef>("builtin:fast");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("ask");
   const [view, setView] = useState<"chat" | "settings">("chat");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("models");
   const [task, setTask] = useState("");
   const [composerEntities, setComposerEntities] = useState<ComposerEntity[]>([]);
   const [busy, setBusy] = useState(false);
@@ -935,6 +1045,7 @@ export function App() {
       setSession(value.session);
       setSessions(value.sessions);
       setWorkspaces(value.workspaces);
+      setArchivedWorkspaces(value.archivedWorkspaces);
       setExpandedRoots(new Set(value.workspaces.map((workspace) => workspace.root)));
       setWorkspaceRoot(value.workspaceRoot);
       setModelTier(value.session?.modelTier ?? "fast");
@@ -966,6 +1077,7 @@ export function App() {
       if (event.type === "workspace_changed") {
         setWorkspaceRoot(event.workspaceRoot);
         setWorkspaces(event.workspaces);
+        setArchivedWorkspaces(event.archivedWorkspaces);
         setSessions(event.sessions);
         setSession(event.session);
         setExpandedRoots((roots) => {
@@ -980,6 +1092,14 @@ export function App() {
         setComposerEntities([]);
         setReferencePreview(null);
         setPanelMode(null);
+        setBootstrap((current) => current ? {
+          ...current,
+          session: event.session,
+          sessions: event.sessions,
+          workspaces: event.workspaces,
+          archivedWorkspaces: event.archivedWorkspaces,
+          workspaceRoot: event.workspaceRoot,
+        } : current);
       }
       if (event.type === "config_updated") {
         setBootstrap((current) => current ? {
@@ -1003,6 +1123,12 @@ export function App() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  useEffect(() => {
+    if (view !== "settings") return;
+    textareaRef.current?.blur();
+    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".settings-back")?.focus());
+  }, [view]);
 
   const isRunning = Boolean(session && ACTIVE_STATUSES.includes(session.status));
   const isBusy = isRunning || Boolean(session?.pendingUndo);
@@ -1142,6 +1268,19 @@ export function App() {
     finally { setBusy(false); }
   };
 
+  const archiveSession = async (id: string) => {
+    if (busy || isBusy) return;
+    setBusy(true);
+    try {
+      await window.hammerCode.archiveSession(id);
+      setNotice({ level: "info", text: "聊天已归档，可在设置的“已归档”中恢复。" });
+    } catch (error) {
+      setNotice({ level: "error", text: userFacingError(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const focusComposerAt = (position: number) => {
     window.requestAnimationFrame(() => {
       const textarea = textareaRef.current;
@@ -1211,8 +1350,8 @@ export function App() {
     }
     if (id === "skills") {
       setPaletteMode(null);
+      setSettingsSection("skills");
       setView("settings");
-      window.requestAnimationFrame(() => document.getElementById("skill-settings")?.scrollIntoView({ behavior: "smooth", block: "start" }));
       return;
     }
     setPaletteMode(id);
@@ -1446,10 +1585,12 @@ export function App() {
     "--panel-column": `${workbenchLayout.panelWidth}px`,
   } as CSSProperties;
   const composerLocked = !workspaceRoot || anotherSessionIsRunning || busy || Boolean(session?.pendingUndo);
+  const settingsBootstrap: AppBootstrap = { ...bootstrap, session, sessions, workspaces, archivedWorkspaces, workspaceRoot };
 
   return (
     <div className={`app-shell ${panelVisible ? "panel-open" : ""} ${panelOpen && workbenchLayout.panelCollapsed ? "panel-auto-collapsed" : ""}`} style={layoutStyle}>
-      <aside className="sidebar">
+      {view === "settings" && <SettingsShell bootstrap={settingsBootstrap} section={settingsSection} busy={hasRunningSession || isBusy || busy} notice={notice} onSectionChange={setSettingsSection} onBack={() => { setView("chat"); setNotice(null); }} onNotice={setNotice} onDismissNotice={() => setNotice(null)}/>}
+      <aside className="sidebar" aria-hidden={view === "settings"}>
         <div className="sidebar-drag"/>
         <header className="brand-row"><button className="brand-button" aria-label="HammerCode"><img className="brand-logo" src={logoUrl} alt=""/>HammerCode <span>⌄</span></button></header>
         <nav className="primary-nav" aria-label="主要导航"><button className="new-chat-button" onClick={newChat} disabled={busy || !workspaceRoot}><Icon name="plus" size={17}/><span>新对话</span></button></nav>
@@ -1461,7 +1602,7 @@ export function App() {
                 <div className="project-row" title={workspace.root}><button className="project-toggle" onClick={() => toggleWorkspace(workspace.root)} aria-expanded={expandedRoots.has(workspace.root)}><span className={`project-chevron ${expandedRoots.has(workspace.root) ? "expanded" : ""}`}><Icon name="chevron" size={14}/></span><Icon name="folder" size={18}/><span>{workspace.name}</span><small>{workspace.sessionCount || ""}</small></button><button className="project-add-chat" onClick={() => void startChatInWorkspace(workspace.root)} disabled={busy || Boolean(session?.pendingUndo)} aria-label={`在 ${workspace.name} 中新建聊天`} title="新建聊天"><Icon name="plus" size={14}/></button></div>
                 {expandedRoots.has(workspace.root) && (
                   workspace.sessions.length > 0
-                    ? <ChatList sessions={workspace.sessions} activeId={session?.id} disabled={busy || Boolean(session?.pendingUndo)} onSelect={(id) => void selectSession(id)}/>
+                    ? <ChatList sessions={workspace.sessions} activeId={session?.id} selectDisabled={busy || Boolean(session?.pendingUndo)} archiveDisabled={busy || hasRunningSession || isBusy} onSelect={(id) => void selectSession(id)} onArchive={(id) => void archiveSession(id)}/>
                     : <button className="empty-chat-list" disabled={busy || Boolean(session?.pendingUndo)} onClick={() => void startChatInWorkspace(workspace.root)}>在此项目开始新对话</button>
                 )}
               </section>
@@ -1470,7 +1611,7 @@ export function App() {
           </div>
         </section>
         <footer className="sidebar-footer">
-          <button className={`settings-nav ${view === "settings" ? "active" : ""}`} onClick={() => setView(view === "settings" ? "chat" : "settings")}><Icon name="gear" size={17}/><span>设置</span></button>
+          <button className={`settings-nav ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="gear" size={17}/><span>设置</span></button>
           {(["fast", "strong"] as ModelTier[]).map((tier) => {
             const state = bootstrap.config.models[tier].connectionStatus;
             return <div className="runtime-line" key={tier}><span className={`connection-dot ${state === "missing" ? "missing" : state === "error" ? "error" : "ready"}`}/><strong>{tier === "fast" ? "Fast" : "Strong"} · {bootstrap.config.models[tier].model}</strong></div>;
@@ -1479,14 +1620,14 @@ export function App() {
         </footer>
       </aside>
 
-      <main className="workspace">
+      <main className="workspace" aria-hidden={view === "settings"}>
         <header className="topbar">
           <div className="topbar-title"><Icon name={view === "settings" ? "gear" : "folder"} size={17}/><strong>{view === "settings" ? "设置" : session ? fallbackChatTitle(session.title ?? session.task) : "新对话"}</strong>{view === "chat" && workspaceRoot && <span>{folderName(workspaceRoot)}</span>}</div>
           <div className="top-actions">{isRunning && activeTurn && <div className="run-status" aria-label="任务正在运行"><span className="run-status-dot"/>运行中 · <ElapsedTime start={activeTurn.createdAt} prefix="已运行"/></div>}{session?.pendingUndo?.status === "executing" && <span className="undo-running"><Icon name="undo" size={14}/>正在撤销</span>}</div>
         </header>
 
         <section className="conversation" ref={conversationRef} onScroll={handleConversationScroll}>
-          {view === "settings" ? <div className="settings-page">{notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}<SettingsView bootstrap={bootstrap} onNotice={setNotice}/></div> : !session ? (
+          {!session ? (
             <div className="welcome"><img className="welcome-mark" src={logoUrl} alt="HammerCode"/><h1>{workspaceRoot ? `在 ${folderName(workspaceRoot)} 中开始` : "选择一个工作区"}</h1><p>{workspaceRoot ? (permissionMode === "ask" ? "描述你想完成的开发任务。文件修改和命令执行会逐次向你确认。" : "完全访问已选中：普通工作区操作会自动执行，安全边界仍然生效。") : "HammerCode 会把所有本地操作限制在你明确选择的目录中。"}</p>{!workspaceRoot && <button onClick={chooseWorkspace}><Icon name="folder" size={17}/>打开文件夹</button>}{workspaceRoot && !selectedModel?.hasApiKey && <div className="config-warning">{modelTier === "fast" ? "Fast" : "Strong"} 模型尚未配置本地 API key，请切换可用模型或完成配置。</div>}</div>
           ) : (
             <div className="message-stack">

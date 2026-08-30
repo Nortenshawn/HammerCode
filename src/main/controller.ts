@@ -22,6 +22,7 @@ import {
   PERMISSION_MODES,
   type AgentSession,
   type AppBootstrap,
+  type ArchivedWorkspaceSummary,
   type EphemeralSideChatState,
   type ModelConnectionProbeInput,
   type ModelConnectionSaveInput,
@@ -108,6 +109,7 @@ function toSummary(session: AgentSession): SessionSummary {
 export class AppController {
   private workspaceRoot: string | null = null;
   private workspaces: WorkspaceSummary[] = [];
+  private archivedWorkspaces: ArchivedWorkspaceSummary[] = [];
   private currentSession: AgentSession | null = null;
   private currentProjectMemory: ProjectMemorySnapshot | null = null;
   private currentSkills: SkillInventorySnapshot = {
@@ -148,6 +150,7 @@ export class AppController {
       session: this.currentSession,
       sessions: this.sessions,
       workspaces: this.workspaces,
+      archivedWorkspaces: this.archivedWorkspaces,
       workspaceRoot: this.workspaceRoot,
       projectMemory: this.currentProjectMemory,
       skills: this.currentSkills,
@@ -203,6 +206,9 @@ export class AppController {
   async selectSession(idInput: unknown): Promise<void> {
     if (this.isUndoBusy()) throw new HammerCodeError("撤销运行时不能切换聊天", "SESSION_BUSY", true);
     const id = sessionIdSchema.parse(idInput);
+    if (!this.workspaces.some((workspace) => workspace.sessions.some((item) => item.id === id))) {
+      throw new HammerCodeError("找不到这条活动聊天记录", "SESSION_NOT_FOUND", true);
+    }
     const session = await this.store.loadSession(id, {
       preserveActive: id === this.runningSessionId,
     });
@@ -214,6 +220,56 @@ export class AppController {
     this.navigationRevision += 1;
     await this.store.selectWorkspace(session.workspaceRoot);
     await this.store.setActive(id);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async archiveSession(idInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能归档聊天", "SESSION_BUSY", true);
+    const id = sessionIdSchema.parse(idInput);
+    if (!this.workspaces.some((workspace) => workspace.sessions.some((item) => item.id === id))) {
+      throw new HammerCodeError("找不到可归档的聊天", "SESSION_NOT_FOUND", true);
+    }
+    if (this.currentSession?.id === id) this.destroySideChat();
+    this.navigationRevision += 1;
+    await this.store.archiveSession(id);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async restoreSession(idInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能恢复聊天", "SESSION_BUSY", true);
+    const id = sessionIdSchema.parse(idInput);
+    if (!this.archivedWorkspaces.some((workspace) => workspace.sessions.some((item) => item.id === id))) {
+      throw new HammerCodeError("找不到已归档聊天", "SESSION_NOT_FOUND", true);
+    }
+    this.navigationRevision += 1;
+    await this.store.restoreSession(id);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async archiveWorkspace(rootInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能批量归档", "SESSION_BUSY", true);
+    const root = workspaceRootSchema.parse(rootInput);
+    const workspace = this.workspaces.find((item) => item.root === root);
+    if (!workspace) throw new HammerCodeError("找不到这个工作区", "WORKSPACE_NOT_FOUND", true);
+    if (workspace.sessionCount === 0) return;
+    if (this.currentSession?.workspaceRoot === root) this.destroySideChat();
+    this.navigationRevision += 1;
+    await this.store.archiveWorkspace(root);
+    await this.refreshNavigation();
+    this.emitWorkspaceChanged();
+  }
+
+  async restoreWorkspace(rootInput: unknown): Promise<void> {
+    if (this.isBusy()) throw new HammerCodeError("任务、审批或撤销运行时不能批量恢复", "SESSION_BUSY", true);
+    const root = workspaceRootSchema.parse(rootInput);
+    const workspace = this.archivedWorkspaces.find((item) => item.root === root);
+    if (!workspace) throw new HammerCodeError("找不到已归档项目记录", "WORKSPACE_NOT_FOUND", true);
+    if (workspace.sessionCount === 0) return;
+    this.navigationRevision += 1;
+    await this.store.restoreWorkspace(root);
     await this.refreshNavigation();
     this.emitWorkspaceChanged();
   }
@@ -1024,6 +1080,7 @@ export class AppController {
     this.currentSession = state.activeSession;
     this.sessions = state.sessions;
     this.workspaces = state.workspaces;
+    this.archivedWorkspaces = state.archivedWorkspaces;
     this.workspaceRoot = state.workspaceRoot;
     this.currentProjectMemory = this.workspaceRoot
       ? await this.projectMemory.snapshot(this.workspaceRoot)
@@ -1036,6 +1093,7 @@ export class AppController {
       type: "workspace_changed",
       workspaceRoot: this.workspaceRoot,
       workspaces: this.workspaces,
+      archivedWorkspaces: this.archivedWorkspaces,
       sessions: this.sessions,
       session: this.currentSession,
     });

@@ -95,6 +95,18 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:select-session", (sessionId: unknown) =>
     appController.selectSession(sessionId),
   );
+  handle("hammercode:archive-session", (sessionId: unknown) =>
+    appController.archiveSession(sessionId),
+  );
+  handle("hammercode:restore-session", (sessionId: unknown) =>
+    appController.restoreSession(sessionId),
+  );
+  handle("hammercode:archive-workspace", (workspaceRoot: unknown) =>
+    appController.archiveWorkspace(workspaceRoot),
+  );
+  handle("hammercode:restore-workspace", (workspaceRoot: unknown) =>
+    appController.restoreWorkspace(workspaceRoot),
+  );
   handle("hammercode:update-session-settings", (settings: unknown) =>
     appController.updateSessionSettings(settings),
   );

@@ -253,8 +253,83 @@ describe("session persistence", () => {
       turns: [expect.objectContaining({ modelTier: "fast", modelRef: "builtin:fast", permissionMode: "ask" })],
     });
     const migratedIndex = JSON.parse(await readFile(path.join(directory, "session-index.json"), "utf8")) as { version: number; workspaces: unknown[] };
-    expect(migratedIndex.version).toBe(2);
+    expect(migratedIndex.version).toBe(3);
     expect(migratedIndex.workspaces).toHaveLength(1);
+  });
+
+  it("migrates a v2 index with all existing chats kept active", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const session = createSession("session_v2", "保留活动聊天", "2026-08-30T01:00:00.000Z");
+    await mkdir(path.join(directory, "chats"), { recursive: true });
+    await writeFile(path.join(directory, "chats", "session_v2.json"), JSON.stringify(session), "utf8");
+    await writeFile(path.join(directory, "session-index.json"), JSON.stringify({
+      version: 2,
+      activeWorkspaceRoot: session.workspaceRoot,
+      workspaces: [{
+        root: session.workspaceRoot,
+        activeSessionId: session.id,
+        sessionIds: [session.id],
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      }],
+    }), "utf8");
+
+    const state = await new SessionStore(directory).loadState();
+    expect(state.activeSession?.id).toBe(session.id);
+    expect(state.archivedWorkspaces[0]).toMatchObject({ sessionCount: 0, sessions: [] });
+    const migrated = JSON.parse(await readFile(path.join(directory, "session-index.json"), "utf8")) as {
+      version: number;
+      workspaces: Array<{ archivedSessionIds: string[] }>;
+    };
+    expect(migrated).toMatchObject({ version: 3, workspaces: [{ archivedSessionIds: [] }] });
+  });
+
+  it("archives and restores chats without deleting chat files or the project", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const root = "/tmp/project-archive";
+    await store.save(createSession("session_archive_1", "第一条", "2026-08-30T01:00:00.000Z", root));
+    await store.save(createSession("session_archive_2", "第二条", "2026-08-30T02:00:00.000Z", root));
+
+    await store.archiveSession("session_archive_2");
+    let state = await store.loadState();
+    expect(state.activeSession).toBeNull();
+    expect(state.workspaces[0]).toMatchObject({ root, sessionCount: 1 });
+    expect(state.archivedWorkspaces[0].sessions.map((item) => item.id)).toEqual(["session_archive_2"]);
+    expect(JSON.parse(await readFile(path.join(directory, "chats", "session_archive_2.json"), "utf8"))).toMatchObject({ id: "session_archive_2" });
+
+    await store.archiveWorkspace(root);
+    state = await store.loadState();
+    expect(state.workspaces).toEqual([expect.objectContaining({ root, sessionCount: 0, sessions: [] })]);
+    expect(state.archivedWorkspaces[0].sessions.map((item) => item.id)).toEqual(["session_archive_2", "session_archive_1"]);
+
+    await store.restoreSession("session_archive_1");
+    await store.restoreWorkspace(root);
+    state = await store.loadState();
+    expect(state.workspaces[0].sessions.map((item) => item.id)).toEqual(["session_archive_2", "session_archive_1"]);
+    expect(state.archivedWorkspaces[0]).toMatchObject({ sessionCount: 0, sessions: [] });
+  });
+
+  it("rejects a whole-project archive atomically when one chat is active", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const root = "/tmp/project-running-archive";
+    await store.save(createSession("session_archive_done", "完成", "2026-08-30T01:00:00.000Z", root));
+    const running = createSession("session_archive_running", "运行", "2026-08-30T02:00:00.000Z", root);
+    running.status = "requesting";
+    running.turns[0].status = "requesting";
+    running.terminationReason = undefined;
+    running.turns[0].terminationReason = undefined;
+    running.turns[0].finishedAt = undefined;
+    await store.save(running);
+
+    await expect(store.archiveWorkspace(root)).rejects.toThrow("不能归档");
+    const state = await store.loadState({ liveSessionIds: [running.id] });
+    expect(state.workspaces[0].sessions.map((item) => item.id)).toEqual([running.id, "session_archive_done"]);
+    expect(state.archivedWorkspaces[0].sessions).toEqual([]);
   });
 
   it("persists plans, metrics and context memory while migrating custom model references", async () => {

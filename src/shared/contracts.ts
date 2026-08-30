@@ -413,6 +413,14 @@ export interface WorkspaceSummary {
   updatedAt: string;
 }
 
+export interface ArchivedWorkspaceSummary {
+  root: string;
+  name: string;
+  sessionCount: number;
+  sessions: SessionSummary[];
+  updatedAt: string;
+}
+
 export interface PublicModelConfig {
   tier: ModelTier;
   label: string;
@@ -625,6 +633,7 @@ export interface AppBootstrap {
   session: AgentSession | null;
   sessions: SessionSummary[];
   workspaces: WorkspaceSummary[];
+  archivedWorkspaces: ArchivedWorkspaceSummary[];
   workspaceRoot: string | null;
   projectMemory: ProjectMemorySnapshot | null;
   skills: SkillInventorySnapshot;
@@ -685,6 +694,7 @@ export type RendererEvent =
       type: "workspace_changed";
       workspaceRoot: string | null;
       workspaces: WorkspaceSummary[];
+      archivedWorkspaces: ArchivedWorkspaceSummary[];
       sessions: SessionSummary[];
       session: AgentSession | null;
     }
@@ -696,6 +706,10 @@ export interface HammerCodeApi {
   selectWorkspace(workspaceRoot: string): Promise<void>;
   newChat(): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
+  archiveSession(sessionId: string): Promise<void>;
+  restoreSession(sessionId: string): Promise<void>;
+  archiveWorkspace(workspaceRoot: string): Promise<void>;
+  restoreWorkspace(workspaceRoot: string): Promise<void>;
   updateSessionSettings(settings: SessionSettings): Promise<void>;
   testModelConnection(input: ModelConnectionProbeInput): Promise<ModelConnectionTestResult>;
   saveModelConnection(input: ModelConnectionSaveInput): Promise<PublicModelConnection>;

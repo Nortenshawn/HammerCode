@@ -163,7 +163,7 @@ function queryTerms(query: string): string[] {
 
 function renderRecord(record: ProjectMemoryRecord): string {
   const conflict = record.status === "conflicted" ? " · 冲突" : "";
-  return `- [${record.kind} · ${record.confidence}${conflict}] ${record.subject}: ${record.statement}（来源：${record.source.label}；${record.updatedAt}）`;
+  return `- [${record.kind} · ${record.confidence}${conflict}] ${record.subject}: ${record.statement}（来源：${portableSourceLabel(record.source)}；${record.updatedAt}）`;
 }
 
 export class ProjectMemoryStore implements ProjectMemoryPort {
@@ -352,7 +352,7 @@ export class ProjectMemoryStore implements ProjectMemoryPort {
         turnId: input.source.turnId,
         toolCallId: input.source.toolCallId,
         toolName: "remember_project",
-        label: `模型推断 · ${input.source.sessionId}/${input.source.turnId}`,
+        label: "模型推断",
       },
       invalidation,
     });
@@ -367,7 +367,7 @@ export class ProjectMemoryStore implements ProjectMemoryPort {
         turnId: input.turnId,
         toolCallId: input.call.id,
         toolName: input.call.name,
-        label: `工具 ${input.call.name} · ${input.sessionId}/${input.turnId}`,
+        label: `工具 ${input.call.name}`,
       };
       if (input.fileChange) {
         const state = await this.load(input.workspaceRoot);

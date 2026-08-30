@@ -190,6 +190,30 @@ describe("project memory store", () => {
     expect(recall.truncated).toBe(true);
   });
 
+  it("keeps structured source ids for linking but omits them from labels and recalled context", async () => {
+    const root = await workspace("source-labels");
+    const storage = await workspace("source-labels-store");
+    const { ids, clock } = fixtures();
+    const store = new ProjectMemoryStore(storage, clock, ids);
+    const saved = await store.rememberInference({
+      workspaceRoot: root,
+      kind: "decision",
+      subject: "测试策略",
+      statement: "先运行单元测试",
+      invalidation: { type: "none" },
+      source: { sessionId: "session_internal", turnId: "turn_internal", toolCallId: "call_internal" },
+    });
+    expect(saved.source).toMatchObject({
+      sessionId: "session_internal",
+      turnId: "turn_internal",
+      label: "模型推断",
+    });
+    const recall = await store.retrieve(root, "测试策略", { maxRecords: 2, maxCharacters: 700 });
+    expect(recall.rendered).toContain("来源：模型推断");
+    expect(recall.rendered).not.toContain("session_internal");
+    expect(recall.rendered).not.toContain("turn_internal");
+  });
+
   it("serializes concurrent writes within one workspace without losing records", async () => {
     const root = await workspace("concurrent");
     const storage = await workspace("concurrent-store");

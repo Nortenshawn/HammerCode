@@ -8,6 +8,10 @@ const api: HammerCodeApi = {
     ipcRenderer.invoke("hammercode:select-workspace", workspaceRoot),
   newChat: () => ipcRenderer.invoke("hammercode:new-chat"),
   selectSession: (sessionId) => ipcRenderer.invoke("hammercode:select-session", sessionId),
+  archiveSession: (sessionId) => ipcRenderer.invoke("hammercode:archive-session", sessionId),
+  restoreSession: (sessionId) => ipcRenderer.invoke("hammercode:restore-session", sessionId),
+  archiveWorkspace: (workspaceRoot) => ipcRenderer.invoke("hammercode:archive-workspace", workspaceRoot),
+  restoreWorkspace: (workspaceRoot) => ipcRenderer.invoke("hammercode:restore-workspace", workspaceRoot),
   updateSessionSettings: (settings) =>
     ipcRenderer.invoke("hammercode:update-session-settings", settings),
   testModelConnection: (input) =>
