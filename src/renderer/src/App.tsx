@@ -1139,6 +1139,8 @@ export function App() {
   const [notice, setNotice] = useState<{ level: "info" | "error"; text: string } | null>(null);
   const conversationRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
   const autoScrollRef = useRef(true);
   const navigationRef = useRef<{ workspaceRoot: string | null; sessionId: string | null }>({ workspaceRoot: null, sessionId: null });
 
@@ -1244,6 +1246,18 @@ export function App() {
     textareaRef.current?.blur();
     window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".settings-back")?.focus());
   }, [view]);
+
+  useEffect(() => {
+    if (paletteMode !== "add") return;
+    const dismissAddMenu = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (addMenuRef.current?.contains(target) || addButtonRef.current?.contains(target)) return;
+      setPaletteMode(null);
+    };
+    document.addEventListener("pointerdown", dismissAddMenu, true);
+    return () => document.removeEventListener("pointerdown", dismissAddMenu, true);
+  }, [paletteMode]);
 
   const isRunning = Boolean(session && ACTIVE_STATUSES.includes(session.status));
   const isBusy = isRunning || Boolean(session?.pendingUndo);
@@ -1870,7 +1884,7 @@ export function App() {
         {view === "chat" && <section className="composer-wrap">
           {notice && <div className={`notice ${notice.level}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
           <div className={`composer ${composerLocked ? "disabled" : ""}`}>
-            {paletteOpen && !busy && !session?.pendingUndo && <div className={`composer-palette ${paletteMode === "add" ? "add-menu" : ""}`} role="listbox" aria-label={paletteMode === "add" ? "添加" : paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : composerToken?.kind === "skill" ? "Skills" : "命令"} onMouseDown={(event) => event.preventDefault()}>
+            {paletteOpen && !busy && !session?.pendingUndo && <div ref={paletteMode === "add" ? addMenuRef : undefined} className={`composer-palette ${paletteMode === "add" ? "add-menu" : ""}`} role="listbox" aria-label={paletteMode === "add" ? "添加" : paletteMode === "models" ? "模型" : composerToken?.kind === "mention" ? "工作区文件" : composerToken?.kind === "skill" ? "Skills" : "命令"} onMouseDown={(event) => event.preventDefault()}>
               <header><strong>{paletteMode === "add" ? "添加" : paletteMode === "models" ? "选择模型" : composerToken?.kind === "mention" ? "引用文件或文件夹" : composerToken?.kind === "skill" ? "选择 Skill" : "命令"}</strong></header>
               <div className="palette-list">
                 {paletteMode === "add" ? addMenu.sectionOrder.map((section) => section === "commands" ? (
@@ -1905,7 +1919,7 @@ export function App() {
               </div>
             </div>
             <div className="composer-toolbar">
-              <button className={`composer-add ${paletteMode === "add" ? "active" : ""}`} type="button" onClick={toggleAddMenu} disabled={composerLocked} aria-label="添加命令、文件或 Skill" aria-expanded={paletteMode === "add"} title="添加"><Icon name="plus" size={18}/></button>
+              <button ref={addButtonRef} className={`composer-add ${paletteMode === "add" ? "active" : ""}`} type="button" onClick={toggleAddMenu} disabled={composerLocked} aria-label="添加命令、文件或 Skill" aria-expanded={paletteMode === "add"} title="添加"><Icon name="plus" size={18}/></button>
               <div className="composer-controls">
                 <ContextRing session={session} budget={bootstrap.config.contextTokenBudget} autoCompactRatio={bootstrap.config.autoCompactRatio} compacting={contextCompacting}/>
                 <select aria-label="模型" title="模型" value={modelRef} disabled={isBusy || busy || settingsBusy} onChange={(event) => void persistSettings(event.target.value as ModelRef, permissionMode)}>{bootstrap.config.availableModels.map((option) => <option key={option.ref} value={option.ref} disabled={!option.hasApiKey}>{option.label}{option.hasApiKey ? "" : "（未配置）"}</option>)}</select>
