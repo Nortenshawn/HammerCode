@@ -15,8 +15,9 @@
 
 ## 当前模型接入约定
 
-- 当前提供 `fast` 与 `strong` 两个显式模型档位：`fast` 默认使用 `deepseek-v4-flash`，默认 OpenAI-compatible base URL 为 `https://api.deepseek.com`；`strong` 默认使用 `glm-5.3-flash`，默认智谱 base URL 为 `https://open.bigmodel.cn/api/paas/v4`。两者都使用 `POST /chat/completions`、Bearer 鉴权、SSE 流式输出和 function tool calling。
-- 模型档位、模型名、endpoint、思考模式、推理强度、输出预算和请求超时必须集中配置，不得散落硬编码在 agent core 中。每个 turn 必须固化实际模型档位，不允许运行中切换或在失败时静默回退到另一模型。
+- 产品允许用户保存完全自定义的 OpenAI-compatible 连接信息，包括显示名称、endpoint、API key 和模型 ID。自定义连接必须选择现有 `fast` 或 `strong` 兼容档位，以复用经过校验的 provider 请求配置；不得允许用户注入任意请求字段或借此绕过协议、安全和预算校验。
+- `fast` 与 `strong` 是不可删除但可配置、可重命名的内置默认档位，也是当前调试与验收版本的最终默认选取：`fast` 默认使用 `deepseek-v4-flash`，默认 base URL 为 `https://api.deepseek.com`；`strong` 默认使用 `glm-5.3-flash`，默认智谱 base URL 为 `https://open.bigmodel.cn/api/paas/v4`。两者都使用 `POST /chat/completions`、Bearer 鉴权、SSE 流式输出和 function tool calling。
+- 模型档位、模型名、endpoint、思考模式、推理强度、输出预算和请求超时必须集中配置，不得散落硬编码在 agent core 中。每个 turn 必须固化实际连接引用、模型档位和模型名，不允许运行中切换或在失败时静默回退到另一连接或模型。
 - DeepSeek V4 的思考模式通过请求字段 `thinking: { type: "enabled" | "disabled" }` 控制，当前默认开启；`reasoning_effort` 只允许经过配置校验的 `low`、`high` 或 `max`，日常 agent 任务默认使用 `high`。思考模式请求不得发送官方明确不兼容的 `tool_choice`。
 - GLM-5.3-Flash 的 `thinking.type` 只允许 `enabled`，默认发送 `thinking.clear_thinking: false`、`reasoning_effort: max`、`stream: true` 和 `tool_stream: true`。应用必须按厂商配置生成请求体，不得把 DeepSeek 专用字段无条件发送给智谱，反之亦然。
 - 流式解析必须兼容文本、`reasoning_content`、分片 `tool_calls`、`[DONE]` 以及 `stop`、`tool_calls`、`length`、`content_filter`、`insufficient_system_resource` 等结束原因。模型返回的 tool call 参数始终按不可信 JSON 处理。
@@ -43,7 +44,7 @@
 - agent core 必须与 Electron UI 解耦，核心状态机不得依赖 renderer，且应能在自动测试中独立运行。
 - Electron main process 负责模型访问、会话持久化、文件系统、子进程、审批执行及 agent 生命周期。
 - renderer 只负责展示和用户交互。必须关闭 Node.js integration，并通过 preload 暴露最小、明确、带类型的 IPC 接口；不得向 renderer 暴露任意文件、Shell 或环境变量访问能力。
-- API key 的持久化读取和模型使用只能发生在 main process。用户在设置页输入 Fast/Strong 的 API key 时，允许它短暂存在于密码输入框，并通过单向、带类型的 IPC 请求传入 main process；preload 和 main process 不得把密钥值回传 renderer，提交后 renderer 必须清空输入状态。产品模型入口只保留固定的 Fast/Strong 双槽，不得重新引入任意已保存连接列表。
+- API key 的持久化读取和模型使用只能发生在 main process。用户在设置页配置内置档位或新增自定义连接时，API key 只允许短暂存在于密码输入框，并通过单向、带类型的 IPC 请求传入 main process；preload 和 main process 不得把密钥值回传 renderer，提交后 renderer 必须清空输入状态。
 - 可以提供复用同一 agent core 的轻量调试 CLI，但不得为 CLI 建设第二套 agent 实现或将其扩展成另一个正式产品。
 - 会话应具有明确状态，例如 idle、requesting、awaiting_approval、executing_tool、completed、cancelled 和 failed。状态转换必须可追踪，禁止通过分散布尔值隐式表达核心生命周期。
 
@@ -93,7 +94,7 @@
 ## 凭据与敏感信息
 
 - 凭据只能通过环境变量或已被 Git 忽略的本地配置提供。任何真实密钥都不得出现在源码、测试夹具、提交历史、日志或示例文档中。
-- 设置页保存的 Fast/Strong API key 必须使用 Electron `safeStorage` 加密后写入应用用户数据目录；系统安全存储不可用时只能执行当前连接测试，不得降级为明文持久化。公开连接信息仅包含档位、脱敏 URL、固定模型 ID、检测状态和时间。
+- 设置页保存的内置档位和自定义连接 API key 必须使用 Electron `safeStorage` 加密后写入应用用户数据目录；系统安全存储不可用时只能执行当前连接测试，不得降级为明文持久化。公开连接信息仅包含稳定连接引用、显示名称、兼容档位、脱敏 URL、模型 ID、检测状态和时间。
 - 正式应用、调试入口和在线测试可以通过统一配置加载器读取真实 `.env` 并调用外部模型；允许检查必需变量是否存在、配置是否合法及脱敏后的 endpoint/model，但不得把凭据值回传 renderer、打印到终端、写入测试报告、复制到其他文件或发送给非目标 API 服务。
 - 排障必须优先使用“是否配置”、HTTP 状态、脱敏错误和请求阶段等信息。只有当这些信息不足且用户明确要求检查具体配置时，才可最小化查看相关字段；任何展示和记录仍必须脱敏。
 - `.env.example` 只能包含无效占位值，并应列出运行所需配置，不得包含可用凭据。
@@ -111,15 +112,6 @@
 - 关键设计应保持代码清晰并有必要的说明，使维护者能够解释 agent 为何继续、暂停、请求批准或终止。
 - BTW 侧边聊天属于临时只读分支：只允许在创建时单向复制主聊天快照，必须使用独立模型请求与取消控制器，不得接入工具、审批、会话存储或主聊天记忆；关闭、切换主聊天或应用退出后立即销毁。
 - 聊天导航标题可以由 Fast 模型异步生成，但标题请求不得携带工具，不得阻塞或改变主任务结果；输出必须清理 Emoji、Markdown 和状态信息，并保留确定性的本地回退标题。
-
-## 阶段二连续会话与变更恢复约定
-
-- 同一聊天允许包含多个显式用户轮次。只有新的用户输入可以把 `completed`、`cancelled` 或 `failed` 会话重新置为 `requesting`；后台恢复、应用重启和历史加载都不得自行续跑 agent。
-- 每条消息、工具轨迹和状态转换必须归属明确的 turn。新轮次可以读取历史上下文，但只允许执行本轮模型流中新产生的 tool call，禁止从持久化历史重放任何工具或副作用。
-- 终止或恢复会话时，历史中缺少 tool result 的 tool call 必须被补成明确的中断结果。该修复必须幂等，并保留“未执行/执行状态不明”的真实语义，不能伪造成功。
-- 每次成功的文件创建、文本修改或文本删除都必须记录归一化路径、before/after 内容、哈希和审批时 diff，用于生成按文件汇总的累计审查结果。二进制文件和超过安全大小限制的文件不进入当前撤销链路。
-- 撤销不是内存回滚：必须生成可见的反向 diff 并再次审批。只允许撤销同一路径上最新且仍为 applied 的变更；执行前必须确认磁盘当前哈希等于记录的 after 哈希，外部编辑或状态不明时直接拒绝。
-- 撤销审批和执行状态必须持久化。重启后只允许根据磁盘哈希判断“已撤销 / 未执行 / 状态冲突”，禁止自动重放反向写入或删除。
 
 ## 工程质量要求
 
@@ -156,5 +148,5 @@
 ## 开发计划与范围管理
 
 - 当前阶段目标、实现顺序、验收标准和候选能力统一维护在 `docs/DEVELOPMENT_PLAN.md`。`AGENTS.md` 只保留跨阶段长期有效的架构、安全、质量和交付底线，不再用“首版范围外”冻结后续方向。
-- 多工作区、多模型路由、计划编排、多 agent、MCP、插件、IDE 能力与跨平台支持都可以进入后续阶段，但必须先在计划文件中说明用户价值、架构边界、风险、测试策略和退出标准，再开始大规模实现。
+- 任何新的能力扩展都必须先在计划文件中说明用户价值、架构边界、风险、测试策略和退出标准，再开始大规模实现；不得把候选方向或阶段目标写成本文件的永久实现清单。
 - 每完成或调整一个阶段，都必须同步更新开发计划的状态与证据；历史结果写入 `docs/DEVELOPMENT_STATUS.md`，在线实测记录写入 `docs/ONLINE_TEST_REPORT.md`。

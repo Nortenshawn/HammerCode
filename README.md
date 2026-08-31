@@ -17,7 +17,7 @@
     <a href="#核心闭环">核心闭环</a> ·
     <a href="#架构与安全边界">架构</a> ·
     <a href="#演示建议">演示</a> ·
-    <a href="docs/INTERVIEW_TUTORIAL.md">面试教程</a>
+    <a href="#文档索引">文档</a>
   </p>
 </div>
 
@@ -27,7 +27,7 @@ HammerCode 是南京大学软件学院预推免“构建编程智能体”考核
 
 项目没有封装 Claude Code、Codex、OpenCode 等现成 agent 产品，也没有使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 agent 框架。对话历史、上下文预算、流式 tool call 组装、工具校验与本地执行、审批、安全边界、循环终止和错误处理均在仓库内独立实现。
 
-> 答辩时的一句话：HammerCode 的重点不是“让模型拥有 Shell”，而是把模型的不可信操作提案放进一个有状态、有边界、可审批、可恢复的本地执行闭环。
+> 核心原则：模型只提出操作意图，HammerCode 负责把它放进有状态、有边界、可审批、可恢复的本地执行闭环。
 
 ## 核心闭环
 
@@ -56,7 +56,8 @@ flowchart LR
 ### 自主 Agent Core
 
 - OpenAI-compatible `POST /chat/completions`、Bearer 鉴权、SSE 流式文本、`reasoning_content` 和分片 tool calls。
-- `fast` / `strong` 两个显式运行档位，默认分别使用 `deepseek-v4-flash` 与 `glm-5.3-flash`；模型、权限和预算在每个 turn 开始时固化，不在失败时静默换档。
+- `fast` / `strong` 是本调试与验收版本的内置默认档位，分别使用 `deepseek-v4-flash` 与 `glm-5.3-flash`；用户也可保存自定义名称、endpoint、API key 和模型 ID 的 OpenAI-compatible 连接。
+- 自定义连接选择既有 Fast/Strong 兼容档位，复用经过校验的 provider 请求配置；实际连接、模型、权限和预算在每个 turn 开始时固化，不在失败时静默切换。
 - 显式状态机：`idle → requesting → awaiting_approval / executing_tool → completed / cancelled / failed`。
 - 有界重试、轮次/工具/运行时间/输出预算，以及 `stop`、`tool_calls`、`length`、内容策略、资源不足、取消等独立终止语义。
 - 复杂任务在首次文件副作用或命令前建立可持久化 Plan；已完成步骤不能静默回退。
@@ -146,18 +147,19 @@ git clone https://github.com/Nortenshawn/HammerCode.git
 cd HammerCode
 npm ci
 cp .env.example .env
-# 只在本地 .env 中填写自己的 API key；不要提交、截图或录屏展示该文件
+# 使用内置档位时在本地 .env 填写对应 API key；也可启动后在设置页新增自定义连接
+# 不要提交、截图或录屏展示 .env
 npm run dev
 ```
 
-默认模型配置：
+本调试版本的内置默认模型配置：
 
 | 档位 | 默认模型 | 默认 Base URL | 思考/推理 |
 | --- | --- | --- | --- |
 | Fast | `deepseek-v4-flash` | `https://api.deepseek.com` | thinking enabled，`reasoning_effort=high` |
 | Strong | `glm-5.3-flash` | `https://open.bigmodel.cn/api/paas/v4` | thinking enabled，`reasoning_effort=max` |
 
-两档默认单次输出预算均为 32K tokens，请求超时为 600 秒。开发模式从仓库根目录 `.env` 加载本地配置；打包应用也可从 `~/Library/Application Support/HammerCode/.env` 加载。真实 `.env` 已被 Git 忽略。
+两档默认单次输出预算均为 32K tokens，请求超时为 600 秒。设置页还可新增自定义 OpenAI-compatible 连接；连接信息由用户填写，运行时选择 Fast 或 Strong 兼容档位。开发模式从仓库根目录 `.env` 加载本地配置；打包应用也可从 `~/Library/Application Support/HammerCode/.env` 加载。真实 `.env` 已被 Git 忽略。
 
 ### 检查与打包
 
@@ -173,7 +175,7 @@ npm run package:mac # 生成 release/mac-arm64/HammerCode.app
 ## 使用方式
 
 1. 打开一个本地文件夹；HammerCode 会将它规范化为聊天绑定的工作区根目录。
-2. 选择 Fast/Strong 和“请求批准/完全访问”，输入真实开发任务。
+2. 选择内置 Fast/Strong 或已保存的自定义连接，再选择“请求批准/完全访问”，输入真实开发任务。
 3. 查看流式思考、Plan 和工具链；请求批准模式下，在 diff 或完整命令面板中决定批准或拒绝。
 4. 任务结束后查看累计改动、测试结果和终止原因，可在同一聊天继续纠正。
 5. 如需回退，选择最新可撤销文件变更，检查反向 diff 并再次批准。
@@ -220,10 +222,8 @@ src/
 └── shared/     # main/preload/renderer 共用的公开数据契约
 tests/          # 纯函数、边界、失败/取消与模拟端到端测试
 skills/         # 随应用发布的内置标准 SKILL.md 包
-docs/           # 架构、计划、状态、在线证据、演示和面试教程
+docs/           # 架构、计划、状态、在线证据和演示材料
 ```
-
-推荐的源码阅读顺序：`src/shared/contracts.ts` → `src/main/main.ts` → `src/main/controller.ts` → `src/core/agent-runner.ts` → `src/core/model/*` → `src/core/tools/*` → `src/main/session-store.ts` → `src/renderer/src/App.tsx`。零基础解释、面试问答和逐课学习入口见 [HammerCode 面试与源码学习教程](docs/INTERVIEW_TUTORIAL.md)。
 
 ## 当前边界
 
@@ -243,7 +243,6 @@ docs/           # 架构、计划、状态、在线证据、演示和面试教�
 - [两分钟演示检查单](docs/DEMO.md)
 - [项目记忆调研](docs/MEMORY_SYSTEM_RESEARCH.md)
 - [Skill 系统调研](docs/SKILL_SYSTEM_RESEARCH.md)
-- [面试与源码学习教程](docs/INTERVIEW_TUTORIAL.md)
 - [最终提交 README.txt 初稿](README.txt)
 
 ## 独立实现声明

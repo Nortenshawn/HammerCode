@@ -15,14 +15,15 @@
 目标：
 
 1. 逐项对照原始考核 PDF、`AGENTS.md`、当前代码和历史证据，保证公开说明只陈述已经实现且可复核的事实。
-2. 完成面向 GitHub 的展示型 `README.md`、1000 汉字以内的最终 `README.txt`、两分钟视频脚本和零基础面试教程。
-3. 只修复会影响安全、主要 Agent 闭环、演示、构建或答辩一致性的缺陷；不再新增页面、工具、协议、记忆、Skill、子 Agent 或其他功能模块。
+2. 完成面向 GitHub 的展示型 `README.md`、1000 汉字以内的最终 `README.txt` 和两分钟视频脚本。
+3. 只修复会影响安全、主要 Agent 闭环、演示、构建或提交一致性的缺陷；不再新增页面、工具、协议、记忆、Skill、子 Agent 或其他功能模块。
 4. 复验严格类型检查、全量自动测试、生产构建、Apple Silicon 打包、生产依赖审计和凭据/提交物检查。
 5. 在截止时间前完成最终 commit/push 与公开仓库核对；截止时间后停止推送。
 
-当前 P0 收敛项：
+当前模型连接口径（2026-08-31 用户最终决策）：
 
-- 最新 `AGENTS.md` 要求产品模型入口只保留固定 Fast/Strong 双槽，但当前 `ModelRef`、`ModelCredentialStore`、Controller 和设置页仍支持 `connection:<id>` 自定义连接。最终提交前必须按硬约束移除产品入口并完成必要的兼容迁移、测试和文档同步；不能只在 README 隐藏，也不能以收敛为由弱化硬约束。
+- 产品允许用户保存完全自定义的 OpenAI-compatible 连接信息，包括名称、endpoint、API key 和模型 ID；自定义连接选择现有 Fast 或 Strong 兼容档位，不能注入任意 provider 请求字段。
+- Fast/Strong 是不可删除的内置默认档位，也是本调试与验收版本的最终默认选取，分别默认使用 `deepseek-v4-flash` 与 `glm-5.3-flash`。当前 `connection:<id>`、凭据存储、Controller、设置页和测试与该口径一致，不需要删除自定义连接能力。
 - `DEVELOPMENT_STATUS.md`、README、测试数字、默认模型和正式包状态必须以最终验证结果为准，历史阶段记录不得被误写成当前未完成事实。
 
 退出标准：
@@ -30,8 +31,8 @@
 - GitHub README 能在不了解项目的情况下说明价值、核心闭环、架构、安全、运行、证据和限制，且不泄露凭据或夸大能力。
 - `README.txt` 包含正确仓库地址、运行方式、特色与边界，按包含英文和标点的保守字符计数也不超过 1000。
 - MP4 不超过 2 分钟和 200 MB，展示一个真实编程任务闭环且不出现 API key。
-- 面试教程能从 TypeScript/Electron 基础带到源码调用链、设计辩护、限制和模拟问答。
-- P0 约束冲突全部关闭；`npm run typecheck`、`npm test`、`npm run build`、`npm run package:mac` 与生产依赖审计通过。
+- 模型连接口径在长期约束、公开说明、当前实现和测试中保持一致。
+- `npm run typecheck`、`npm test`、`npm run build`、`npm run package:mac` 与生产依赖审计通过。
 - tracked/staged 内容不含 `.env`、真实凭据、构建缓存、目录包、日志或提交 zip；公开远端与最终本地提交一致。
 
 ## 当前阶段：Phase 3 · 真实在线闭环与可靠性
@@ -177,6 +178,8 @@
 ## 当前阶段：Phase 7 · 双模型收敛、聊天记忆与本地工具
 
 状态：已完成（2026-08-29）
+
+历史口径说明：本阶段当时曾将模型入口收敛为固定双槽；Phase 10 随后按产品需求恢复并完成开放模型连接。当前产品口径以本文件 Phase 16 顶部决策为准。
 
 用户价值：
 
