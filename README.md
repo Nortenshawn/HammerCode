@@ -1,89 +1,253 @@
-# HammerCode
+<div align="center">
+  <img src="logos/logo.png" width="112" alt="HammerCode logo" />
+  <h1>HammerCode</h1>
+  <p><strong>Forge ideas into working software.</strong></p>
+  <p>一个本地优先、过程透明、操作可审批的 macOS 编程智能体。</p>
 
-> **Forge ideas into working software.**
+  <p>
+    <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white" />
+    <img alt="Electron 44" src="https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white" />
+    <img alt="TypeScript 7" src="https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&logoColor=white" />
+    <img alt="186 tests passed" src="https://img.shields.io/badge/tests-186%20passed-8DB95A" />
+    <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-111111" />
+  </p>
 
-HammerCode 是南京大学软件学院预推免“构建编程智能体”项目考核作品：一个面向 Apple Silicon macOS 的本地、透明、可审批的编程智能体。
+  <p>
+    <a href="#快速开始">快速开始</a> ·
+    <a href="#核心闭环">核心闭环</a> ·
+    <a href="#架构与安全边界">架构</a> ·
+    <a href="#演示建议">演示</a> ·
+    <a href="docs/INTERVIEW_TUTORIAL.md">面试教程</a>
+  </p>
+</div>
 
-它不是现成 agent 产品的套壳，也没有使用 agent 框架。对话循环、流式 tool call 组装、上下文预算、工具校验、审批策略、工作区隔离、命令生命周期和终止条件都在本仓库中独立实现。
+---
+
+HammerCode 是南京大学软件学院预推免“构建编程智能体”考核项目。用户选择一个本地工作区并给出开发目标后，模型可以通过本机工具读取代码、提出修改、运行验证；每一步工具意图、授权来源、执行结果和终止原因都可追踪。
+
+项目没有封装 Claude Code、Codex、OpenCode 等现成 agent 产品，也没有使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 agent 框架。对话历史、上下文预算、流式 tool call 组装、工具校验与本地执行、审批、安全边界、循环终止和错误处理均在仓库内独立实现。
+
+> 答辩时的一句话：HammerCode 的重点不是“让模型拥有 Shell”，而是把模型的不可信操作提案放进一个有状态、有边界、可审批、可恢复的本地执行闭环。
+
+## 核心闭环
+
+```mermaid
+flowchart LR
+    U[用户目标] --> C[构建受预算约束的上下文]
+    C --> M[OpenAI-compatible 流式请求]
+    M --> A{结束原因}
+    A -->|stop| F[完成并持久化]
+    A -->|tool_calls| V[组装并校验工具参数]
+    V --> S[路径与命令安全检查]
+    S --> P{是否需要授权}
+    P -->|只读或安全验证| E[本地执行]
+    P -->|请求批准| H[用户批准或拒绝]
+    P -->|完全访问普通操作| E
+    H -->|批准| E
+    H -->|拒绝| R[结构化拒绝结果]
+    E --> R[结构化工具结果]
+    R --> C
+```
+
+模型的 function call 不会被直接执行。HammerCode 先把分片参数组装完整，再按运行时 schema 校验，通过工作区与风险检查后才进入只读自动执行、用户审批、完全访问自动批准或安全策略直接阻断中的一种路径。
 
 ## 已实现能力
 
-- `fast = deepseek-v4-flash`、`strong = glm-5.3-flash` 的显式双模型选择，共享 OpenAI-compatible Chat Completions 流式兼容层，支持思考内容、文本和分片 tool calls，不做静默回退。
-- 显式会话状态机：`idle`、`requesting`、`awaiting_approval`、`executing_tool`、`completed`、`cancelled`、`failed`。
-- 本地只读工具：列目录、读文件、固定字符串搜索。
-- 本地副作用工具：创建/完整写入文件、精确文本替换、删除文件和运行命令；全部先生成完整意图或 diff，再按聊天的“请求批准 / 完全访问”模式授权。
-- 真实路径和符号链接边界检查，阻断 `..`、绝对路径、越界 symlink、提权与明显破坏性命令。
-- 命令超时、输出截断、用户取消和进程组清理。
-- 保守的上下文预算和本地历史压缩；摘要会明确标注为程序生成，不伪装成新事实。
-- 多项目聊天导航：每个文件夹维护独立聊天集合，文件夹右侧可直接新建聊天；任务运行时仍可切换查看其他聊天，后台执行状态不会被误恢复为中断。
-- 单条聊天支持连续追问与纠正；完成、取消或失败后会开启一个新 turn，保留上下文但不会重放历史工具调用。
-- 完成前实时展示思考与工具链，每轮结束后自动折叠过程，并使用 Markdown 渲染最终答复。
-- 成功的文本文件变更会汇总为按文件审查卡片和累计 diff；点击文件后以并排侧栏展示红绿代码差异，主聊天与审查栏按接近黄金比例共同伸缩。可对仍匹配磁盘状态的最新改动生成反向 diff、重新审批并安全撤销。
-- Electron 安全隔离：renderer 关闭 Node integration，通过 context-isolated preload 暴露最小 IPC。
+### 自主 Agent Core
 
-## 本地运行
+- OpenAI-compatible `POST /chat/completions`、Bearer 鉴权、SSE 流式文本、`reasoning_content` 和分片 tool calls。
+- `fast` / `strong` 两个显式运行档位，默认分别使用 `deepseek-v4-flash` 与 `glm-5.3-flash`；模型、权限和预算在每个 turn 开始时固化，不在失败时静默换档。
+- 显式状态机：`idle → requesting → awaiting_approval / executing_tool → completed / cancelled / failed`。
+- 有界重试、轮次/工具/运行时间/输出预算，以及 `stop`、`tool_calls`、`length`、内容策略、资源不足、取消等独立终止语义。
+- 复杂任务在首次文件副作用或命令前建立可持久化 Plan；已完成步骤不能静默回退。
 
-要求：Apple Silicon Mac、Node.js 22 或更新版本、npm。
+### 本地工具与安全
+
+- 只读：目录、文本、固定字符串搜索、PDF 文本提取、Git status/diff。
+- 有副作用：创建或完整写入、精确文本替换、删除、运行 Python 脚本和本地命令。
+- 所有模型参数都视为不可信 JSON，以 Zod 在执行边界校验。
+- 真实路径校验覆盖绝对路径、`..`、已存在 symlink 和“symlink 父目录 + 尚不存在文件”的逃逸场景。
+- 文件审批前生成 diff，审批后再次比较 SHA-256；原子写入避免半文件，过期意图不会覆盖外部编辑。
+- 命令按“自动执行 / 始终审批 / 直接阻断”分类，支持超时、输出截断、取消和进程组清理。
+
+### 连续会话与可解释性
+
+- 同一聊天可在完成、失败或取消后继续；历史工具只作为上下文，不会被恢复逻辑重放。
+- 会话、turn、消息、工具轨迹、授权来源、Plan、预算、终止原因和文件变更分别持久化。
+- 文件修改按路径汇总为累计 diff；最新且磁盘哈希仍匹配的修改可生成反向 diff，再次审批后撤销。
+- 上下文接近阈值时由无工具模型请求压缩，并附加本地事实锚点；完整审计历史仍保留在磁盘。
+- 项目记忆按工作区隔离，可控制读取/生成、查看来源、失效与冲突，并支持带校验的本地导入导出。
+
+### 桌面工作台
+
+- 多项目、多聊天导航；每条聊天始终绑定单一工作区，全局同一时间只运行一个主 Agent。
+- 中文界面实时展示思考、文本、Plan、工具意图、审批、授权来源、命令结果、耗时和上下文占用。
+- `请求批准` 与 `完全访问` 两种聊天权限；完全访问只免除普通工作区操作的弹窗，不取消硬安全边界。
+- BTW 临时侧边聊天只读取创建时的主线快照，不携带工具、不写会话和项目记忆，关闭即销毁。
+- 本地 Skill 采用标准 `SKILL.md` 目录格式，渐进加载并受包指纹、信任、工作区、审批和脚本沙箱限制。
+- 主 Agent 可派出最多三个隔离只读子任务；子任务不能递归编排、直接写盘或执行远端操作。
+
+## 架构与安全边界
+
+```mermaid
+flowchart TB
+    subgraph Renderer[Electron Renderer · sandbox]
+      UI[React 中文界面]
+    end
+
+    subgraph Bridge[Preload]
+      IPC[最小、带类型 IPC]
+    end
+
+    subgraph Main[Electron Main · 本机能力边界]
+      CTRL[AppController]
+      RUNNER[AgentRunner]
+      MODEL[OpenAI-compatible Client]
+      TOOLS[LocalToolExecutor]
+      STORE[Session / Credential / Memory / Skill Stores]
+    end
+
+    subgraph Workspace[用户明确选择的工作区]
+      FILES[文件与本地进程]
+    end
+
+    UI --> IPC --> CTRL
+    CTRL --> RUNNER
+    RUNNER <--> MODEL
+    RUNNER --> TOOLS --> FILES
+    CTRL <--> STORE
+```
+
+| 边界 | 设计 |
+| --- | --- |
+| Renderer | `nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`，不能直接读文件、执行 Shell 或读取环境变量 |
+| Preload | 只暴露明确的 `window.hammerCode` IPC 方法，不提供任意 Node API |
+| Main | 独占模型访问、凭据、会话持久化、文件系统、审批和子进程生命周期 |
+| Agent Core | 不依赖 renderer；模型客户端、工具、审批、时钟和 ID 生成器通过端口注入，便于测试失败与取消分支 |
+| Workspace | 所有文件和 cwd 先规范化并校验真实路径，越界与明显破坏性操作在审批前阻断 |
+| Credentials | API key 只在 main process 使用；设置页保存时经 Electron `safeStorage` 加密，公开配置永不返回 key |
+
+更完整的设计说明见 [架构与安全设计](docs/ARCHITECTURE.md)。
+
+## 快速开始
+
+### 环境要求
+
+- Apple Silicon Mac
+- Node.js 22 或更新版本
+- npm
+- 可访问已配置的 OpenAI-compatible API
+- 可选：Poppler 的 `pdftotext`（PDF 工具）、Python 3（Python 工具）
+
+### 安装与开发运行
 
 ```bash
-npm install
+git clone https://github.com/Nortenshawn/HammerCode.git
+cd HammerCode
+npm ci
 cp .env.example .env
-# 只在本地 .env 中填写 DEEPSEEK_API_KEY / GLM_API_KEY；不要提交该文件
+# 只在本地 .env 中填写自己的 API key；不要提交、截图或录屏展示该文件
 npm run dev
 ```
 
-`.env.example` 列出了全部可配置项。Fast 默认模型为 `deepseek-v4-flash`，Strong 默认模型为 `glm-5.3-flash`；两档默认单次输出预算均为 32768 tokens，请求超时为 600000 ms。真实 `.env` 已被 Git 忽略，应用只在 Electron main process 中加载凭据。
+默认模型配置：
 
-开发模式读取仓库根目录的 `.env`。打包后的 `.app` 不会携带或复制真实凭据；双击运行时可把同样的 `.env` 放在 `~/Library/Application Support/HammerCode/.env`，也可以从已设置环境变量的终端启动应用。
+| 档位 | 默认模型 | 默认 Base URL | 思考/推理 |
+| --- | --- | --- | --- |
+| Fast | `deepseek-v4-flash` | `https://api.deepseek.com` | thinking enabled，`reasoning_effort=high` |
+| Strong | `glm-5.3-flash` | `https://open.bigmodel.cn/api/paas/v4` | thinking enabled，`reasoning_effort=max` |
 
-为兼容已有 OpenAI-compatible 配置，main process 也接受 `OPENAI_API_KEY` / `API_KEY`、`DEEPSEEK_BASE_URL` / `BASE_URL` 和 `DEEPSEEK_MODEL` / `MODEL` 作为回退别名；新配置仍推荐使用模板中的明确前缀变量。
+两档默认单次输出预算均为 32K tokens，请求超时为 600 秒。开发模式从仓库根目录 `.env` 加载本地配置；打包应用也可从 `~/Library/Application Support/HammerCode/.env` 加载。真实 `.env` 已被 Git 忽略。
 
-## 质量检查
-
-```bash
-npm run typecheck
-npm test
-npm run build
-```
-
-生成 Apple Silicon `.app` 目录：
+### 检查与打包
 
 ```bash
-npm run package:mac
+npm run typecheck   # renderer、main/preload/core、tests 三套严格类型检查
+npm test            # Vitest 全量自动测试
+npm run build       # 清理、类型检查、编译 main/preload/core、打包 renderer
+npm run package:mac # 生成 release/mac-arm64/HammerCode.app
 ```
 
-## 使用流程
+`npm run dev` 的执行顺序是：先用 `tsc` 把 main/preload/core 编译到 `dist/`，再同时启动 Vite renderer 开发服务器和 Electron；Electron main 最终加载开发服务器页面。生产构建则由 Vite 把 React renderer 写入 `dist/renderer/`，Electron 加载本地 HTML。
 
-1. 在左侧选择或添加项目。每条聊天只绑定一个目录，不会跨项目读取或执行。
-2. 输入开发目标。agent 会先通过只读工具了解代码库。
-3. “请求批准”下，文件变更会显示 patch，命令会显示完整命令和 cwd，批准后才执行；“完全访问”会自动批准普通工作区操作，但不能绕过路径边界和高风险命令阻断。
-4. 可随时停止模型请求、审批等待或命令执行。
-5. 任务结束后可在原输入框继续追问或纠正；每次输入是同一聊天里的新一轮，旧工具调用只用于解释上下文，不会再次执行。
-6. 左侧按项目列出独立聊天；文件夹右侧的 `+` 可直接创建聊天，任务运行时也可以切换查看其他记录。
-7. 对话内逐轮展示用户输入、可折叠的思考/工具链和 Markdown 总结；流式内容不会强制抢回已向上滚动的视口。
-8. 聊天下方的“改动审查”按文件展示累计 diff，并在右侧并排打开代码差异。需要回退时点击“撤销最近修改”，确认反向 diff 后才会落盘。
+## 使用方式
 
-## 目录结构
+1. 打开一个本地文件夹；HammerCode 会将它规范化为聊天绑定的工作区根目录。
+2. 选择 Fast/Strong 和“请求批准/完全访问”，输入真实开发任务。
+3. 查看流式思考、Plan 和工具链；请求批准模式下，在 diff 或完整命令面板中决定批准或拒绝。
+4. 任务结束后查看累计改动、测试结果和终止原因，可在同一聊天继续纠正。
+5. 如需回退，选择最新可撤销文件变更，检查反向 diff 并再次批准。
+
+## 演示建议
+
+两分钟视频应只展示一个清楚的真实闭环：
+
+1. 选择预先准备的可丢弃工作区，提出“阅读代码、修复一个失败测试并验证”的任务。
+2. 快速展示只读工具自动执行、模型定位问题和 Plan。
+3. 展开一次精确修改 diff 并批准；随后展示本地测试命令、退出码与通过结果。
+4. 展示累计 diff 和最终 Markdown 总结，最后用一句话说明 renderer 隔离、工作区边界和历史工具不重放。
+
+不要在视频中打开 `.env`、系统凭据、应用数据目录或任何真实 API key。详细脚本见 [演示检查单](docs/DEMO.md)。
+
+## 质量与验证证据
+
+- 严格 TypeScript 类型检查覆盖 renderer、main/preload/core 和 tests。
+- 当前基线为 31 个测试文件、186 项自动测试；覆盖状态机、流组装、AgentRunner、上下文、路径边界、命令策略、审批、持久化、撤销、BTW、项目记忆、Skill 和隔离子任务。
+- 真实 Fast 与 Strong 都通过正式 Electron main/preload/renderer 链路测试；在线证据包含读写、审批、命令、连续 turn、重启恢复、撤销、模型压缩和安全阻断。
+- Apple Silicon 目录包可以本地运行；当前未做代码签名、公证和 Mac App Store 沙箱。
+
+自动测试不是在线通过的替代品。每次真实验收使用 `/Users/norten/Developer/HammerTest` 授权沙箱并记录模型、实际副作用和结果，详见 [在线测试报告](docs/ONLINE_TEST_REPORT.md)。
+
+## 关键设计取舍
+
+| 选择 | 原因 | 代价 |
+| --- | --- | --- |
+| Electron + TypeScript | 同一语言覆盖桌面 UI、IPC、网络、文件和测试；适合 macOS 演示 | 包体较大，正式分发仍需签名、公证与更强 OS 沙箱 |
+| OpenAI-compatible Chat Completions | 复用稳定消息与原生 tool calling 边界，同时保留 provider profile | 不同厂商仍有 thinking、tool stream 等字段差异 |
+| 模型只提案，本地执行 | 参数、权限和副作用都可审计 | 比直接给 Shell 多一层状态和错误处理复杂度 |
+| 保守字符 token 估算 | 无需绑定厂商 tokenizer，行为可测试 | 不是精确 token 数，服务端仍可能返回长度错误 |
+| JSON 本地持久化 + 原子替换 | 可阅读、可迁移、适合单机考核项目 | 不适合高并发和超大规模历史 |
+| 哈希与反向 diff 撤销 | 不覆盖用户在 agent 之后做的外部修改 | 只覆盖受控文本文件工具，不等价于 Git 回滚 |
+
+## 项目结构
 
 ```text
 src/
-  core/       与 Electron 无关的 agent core、模型流、上下文、安全和工具
-  main/       模型访问、会话持久化、审批与 Electron 生命周期
-  preload/    最小、带类型的 IPC 桥
-  renderer/   中文桌面界面
-  shared/     main/preload/renderer 共用的安全数据契约
-tests/        核心单元与端到端模拟测试
+├── core/       # AgentRunner、模型流、上下文、状态机、安全、工具、撤销、记忆与子任务
+├── main/       # Electron 生命周期、Controller、凭据/会话/Skill/项目记忆持久化
+├── preload/    # contextBridge 暴露的最小 IPC
+├── renderer/   # React 中文桌面界面
+└── shared/     # main/preload/renderer 共用的公开数据契约
+tests/          # 纯函数、边界、失败/取消与模拟端到端测试
+skills/         # 随应用发布的内置标准 SKILL.md 包
+docs/           # 架构、计划、状态、在线证据、演示和面试教程
 ```
 
-更详细的边界、数据流和安全决策见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，演示检查单见 [docs/DEMO.md](docs/DEMO.md)，当前路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)，历史与真实模型证据分别见 [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) 和 [docs/ONLINE_TEST_REPORT.md](docs/ONLINE_TEST_REPORT.md)。
+推荐的源码阅读顺序：`src/shared/contracts.ts` → `src/main/main.ts` → `src/main/controller.ts` → `src/core/agent-runner.ts` → `src/core/model/*` → `src/core/tools/*` → `src/main/session-store.ts` → `src/renderer/src/App.tsx`。零基础解释、面试问答和逐课学习入口见 [HammerCode 面试与源码学习教程](docs/INTERVIEW_TUTORIAL.md)。
 
-## 基础设施依赖说明
+## 当前边界
 
-- Electron、React：桌面运行时和展示层，不参与 agent 决策。
-- react-markdown、remark-gfm：安全渲染模型最终答复的 Markdown/GFM，不执行原始 HTML，也不参与 agent 逻辑。
-- Zod：校验模型参数、IPC 和持久化数据等不可信输入。
-- `diff`：为写文件审批生成统一 diff。
-- dotenv：仅由 main process 加载未入库的本地配置。
-- TypeScript、Vite、Vitest、electron-builder：类型、构建、测试和 macOS 打包工具。
+- 正式演示目标是 Apple Silicon macOS；目录包未签名、未公证。
+- 当前只有一条主 Agent 任务可以执行；隔离子任务并不允许直接写盘。
+- 自动撤销只覆盖 HammerCode 文件工具产生的、不超过 1 MB 的 UTF-8 文本变更；命令产生的任意文件变化不进入撤销链。
+- 通用 Shell 无法被静态规则证明绝对安全，因此只有很小的本地验证白名单可自动执行，其他命令仍需权限判断或审批。
+- 上下文 token 为保守估算值，不等同于厂商 tokenizer。
+- 本项目没有内置在线 Skill 市场、自动依赖下载、远程部署或跨平台正式发行。
 
-项目没有引入 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 或其他 agent 框架。
+## 文档索引
+
+- [原始架构与安全设计](docs/ARCHITECTURE.md)
+- [最终收敛与开发计划](docs/DEVELOPMENT_PLAN.md)
+- [历史完成状态](docs/DEVELOPMENT_STATUS.md)
+- [真实模型与桌面验收证据](docs/ONLINE_TEST_REPORT.md)
+- [两分钟演示检查单](docs/DEMO.md)
+- [项目记忆调研](docs/MEMORY_SYSTEM_RESEARCH.md)
+- [Skill 系统调研](docs/SKILL_SYSTEM_RESEARCH.md)
+- [面试与源码学习教程](docs/INTERVIEW_TUTORIAL.md)
+- [最终提交 README.txt 初稿](README.txt)
+
+## 独立实现声明
+
+基础设施依赖只承担桌面运行时、UI、数据校验、diff、配置加载、构建和测试：Electron、React、Zod、`diff`、dotenv、TypeScript、Vite、Vitest 与 electron-builder。它们不替代 Agent 核心逻辑。
+
+本项目不依赖 API 服务端托管的代码执行、文件读写或工作区工具；所有文件访问和命令执行均由 HammerCode 在用户本机、当前绑定工作区内完成。

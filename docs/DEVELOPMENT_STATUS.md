@@ -1,10 +1,10 @@
 # HammerCode 迭代开发状态
 
-最后更新：2026-08-30
+最后更新：2026-08-31
 
 ## 当前结论
 
-HammerCode 已完成 Phase 14 的统一添加菜单与宽松输入区。主输入框提高为双行正文区，左下角加号把 `/` 命令、`@` 项目文件和 `$` Skill 合并到一个按固定顺序滚动的面板；少量文件候选之外始终保留原生访达入口，选择结果在 main process 重新经过当前工作区真实路径校验。
+HammerCode 已完成 Phase 15 的产品身份与本轮运行认知，并进入 Phase 16 最终收敛。自 2026-08-31 起冻结新功能模块，当前工作只包括题目符合性、代码/约束口径一致性、缺陷、公开文档、演示、面试准备和最终验证。GitHub 展示 README、1000 字符以内的 `README.txt` 初稿和零基础面试教程已经形成；固定 Fast/Strong 双槽约束与当前 `connection:<id>` 自定义连接实现的冲突仍是提交前必须关闭的 P0，不能把它描述成已解决。
 
 ## 版本演进
 
@@ -35,8 +35,8 @@ HammerCode 已完成 Phase 14 的统一添加菜单与宽松输入区。主输�
 ## 当前质量状态
 
 - TypeScript 主进程、渲染进程和测试配置均采用严格类型检查。
-- 30 个测试文件共 179 项自动测试通过，除既有状态机、双 provider、工作区工具、Plan、长任务、记忆、BTW、多工作区、连接、受限子 Agent 和 Skill 外，新增覆盖统一添加面板的 `/ → @ → $` 稳定顺序、5 项文件候选上限和有效 Skill 过滤；既有文本触发、原子输入与工作区路径边界测试继续通过。
-- 本阶段 `npm run typecheck`、`npm test`、`npm run build` 与 `npm run package:mac` 均通过；生产依赖审计为 0 个漏洞，macOS 目录包未签名，符合当前本地演示阶段预期。
+- 最近完成的 Phase 15 基线为 31 个测试文件共 186 项自动测试，覆盖状态机、双 provider、工作区工具、Plan、上下文、记忆、BTW、多工作区、连接、受限子 Agent、Skill、运行身份和输入交互。
+- 2026-08-31 Phase 16 文档收敛基线重新通过 `npm run typecheck`、31 个测试文件共 186 项测试、`npm run build` 和 `npm run package:mac`；`npm audit --omit=dev` 为 0 个漏洞。macOS arm64 目录包仍因本机没有有效签名身份而未签名，符合当前本地演示边界。P0 代码收敛后仍须再次执行同一套检查。
 
 ### 阶段三：真实在线闭环与可靠性
 
@@ -166,5 +166,16 @@ HammerCode 已完成 Phase 14 的统一添加菜单与宽松输入区。主输�
 - 模型名随 turn 持久化；旧聊天缺失时明确显示未知。BTW 复用产品身份但如实声明零工具、零文件访问，隔离子 Agent 也由同一入口获得受限运行事实。
 - 压缩测试确认本地历史压缩后，首个 system message 仍保留 HammerCode 身份、绑定工作区、安全边界、实际工具和事实优先级。真实 Fast 在 Phase4FastAsk 以 0 次工具调用准确回答全部运行字段，验收聊天完成后已归档，工作区零修改。
 - 最终严格类型检查、31 个测试文件共 186 项测试、生产构建、Apple Silicon 目录包和生产依赖审计全部通过；包内已核对包含 runtime identity、agent runner 与 system prompt 产物。完整证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
+
+### 阶段十六：最终收敛、调试与提交
+
+- 状态：进行中（2026-08-31），功能冻结。
+- 已重新核对两页原始考核 PDF、`AGENTS.md`、全部 docs、核心源码调用链、运行脚本、测试结构和提交历史。
+- 已重写 GitHub 展示 README，加入品牌图、徽章、Agent 闭环、进程架构、安全模型、运行/打包、证据、取舍和边界；不把历史计划伪装成当前能力。
+- 已形成 `README.txt` 初稿，按包含英文、标点和换行的保守口径为 964 个字符，包含公开仓库地址、运行、特色和限制。
+- 已新增 `INTERVIEW_TUTORIAL.md`，从 TypeScript/Electron 基础讲到 AgentRunner、SSE/tool calls、工具安全、上下文、持久化、撤销、测试、答辩问答和十课学习路线。
+- 本轮严格类型检查、31 个测试文件共 186 项测试、生产构建、Apple Silicon 目录包和生产依赖审计已通过；目录包位于 `release/mac-arm64/HammerCode.app`，未签名状态与 README 说明一致。
+- P0 未完成：按最新硬约束收敛 `connection:<id>` 自定义连接实现，只保留固定 Fast/Strong 产品双槽，并完成迁移与回归验证。
+- P0 完成后的最终回归、凭据检查、视频和提交 zip 尚需按 Phase 16 退出标准逐项完成。
 
 后续范围、实现顺序和退出标准不再写入本状态记录，统一见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。
