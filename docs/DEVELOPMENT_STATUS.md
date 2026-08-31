@@ -4,7 +4,7 @@
 
 ## 当前结论
 
-HammerCode 已完成 Phase 15 的产品身份与本轮运行认知，并进入 Phase 16 最终收敛。自 2026-08-31 起冻结新功能模块，当前工作只包括题目符合性、代码/约束口径一致性、缺陷、公开文档、演示和最终验证。GitHub 展示 README 与 1000 字符以内的 `README.txt` 初稿已经形成。用户最终确认产品允许自定义 OpenAI-compatible 连接，Fast/Strong 是本调试与验收版本的内置默认选取；现有 `connection:<id>` 实现与该口径一致。
+HammerCode 已完成 Phase 15 的产品身份与本轮运行认知，并进入 Phase 16 最终收敛。2026-08-31 经用户明确调整范围后，不同项目主 Agent 并行已经完成实现与真实双模型验收；未获批准的新功能仍保持冻结。GitHub 展示 README 与 1000 字符以内的 `README.txt` 初稿已经形成。用户最终确认产品允许自定义 OpenAI-compatible 连接，Fast/Strong 是本调试与验收版本的内置默认选取；现有 `connection:<id>` 实现与该口径一致。
 
 ## 版本演进
 
@@ -35,8 +35,8 @@ HammerCode 已完成 Phase 15 的产品身份与本轮运行认知，并进入 P
 ## 当前质量状态
 
 - TypeScript 主进程、渲染进程和测试配置均采用严格类型检查。
-- 最近完成的 Phase 15 基线为 31 个测试文件共 186 项自动测试，覆盖状态机、双 provider、工作区工具、Plan、上下文、记忆、BTW、多工作区、连接、受限子 Agent、Skill、运行身份和输入交互。
-- 2026-08-31 Phase 16 文档收敛基线重新通过 `npm run typecheck`、31 个测试文件共 186 项测试、`npm run build` 和 `npm run package:mac`；`npm audit --omit=dev` 为 0 个漏洞。macOS arm64 目录包仍因本机没有有效签名身份而未签名，符合当前本地演示边界。
+- 当前 Phase 16 范围调整基线为 34 个测试文件共 202 项自动测试，新增覆盖跨项目并行、会话级取消/审批隔离、同项目互斥、全局上限、启动失败释放、共享索引并发写和多活动会话冷启动恢复；既有状态机、双 provider、工作区工具、Plan、上下文、记忆、BTW、连接、受限子 Agent、Skill、运行身份和输入交互回归继续通过。
+- 2026-08-31 最终交付基线重新通过 `npm run typecheck`、34 个测试文件共 202 项测试、`npm run build` 和 `npm run package:mac`；`npm audit --omit=dev` 为 0 个漏洞。macOS arm64 目录包仍因本机没有有效签名身份而未签名，符合当前本地演示边界。
 
 ### 阶段三：真实在线闭环与可靠性
 
@@ -167,13 +167,22 @@ HammerCode 已完成 Phase 15 的产品身份与本轮运行认知，并进入 P
 - 压缩测试确认本地历史压缩后，首个 system message 仍保留 HammerCode 身份、绑定工作区、安全边界、实际工具和事实优先级。真实 Fast 在 Phase4FastAsk 以 0 次工具调用准确回答全部运行字段，验收聊天完成后已归档，工作区零修改。
 - 最终严格类型检查、31 个测试文件共 186 项测试、生产构建、Apple Silicon 目录包和生产依赖审计全部通过；包内已核对包含 runtime identity、agent runner 与 system prompt 产物。完整证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
 
+### 阶段十六范围调整：多项目并行主任务
+
+- 状态：已完成（2026-08-31）。
+- 主任务生命周期由全局单例升级为以 `sessionId` 为键的注册表；每个运行项独立持有 runner、审批器、取消控制器、工作区真实路径、模型/权限/预算快照和最新会话。默认及硬上限均为 3。
+- 工作区在首个异步边界前同步预留，并在 `realpath` 后再次绑定；同一工作区第二个主任务明确拒绝。不同项目的模型流、工具、子 Agent、写租约、审批和取消互不共享。
+- `cancelTask` 与 `resolveApproval` IPC 同时校验 sessionId 和审批 ID；错误组合直接拒绝。后台快照只更新对应侧栏摘要，不抢占当前聊天；应用退出统一停止全部运行项，冷启动把所有残留活动会话标记为 interrupted/failed 并闭合未完成工具。
+- SessionStore 的共享项目索引改为事务串行更新，避免两个 Agent 同时保存时用旧索引覆盖另一条聊天。renderer 允许运行中切换聊天和在其他项目启动任务；聊天行以紧凑绿点/橙点表示运行和等待审批，同项目新聊天显示“当前项目已有主任务运行”。
+- 自动测试增至 34 个文件 202 项。真实 Fast/Strong 在 `Phase16Fast` 与 `Phase16Strong` 验证了审批等待时另一项目完成；补充长 Python 工具验证了单独停止、双任务重启中断、同聊天继续和旧工具不重放。完整证据见 [ONLINE_TEST_REPORT.md](ONLINE_TEST_REPORT.md)。
+
 ### 阶段十六：最终收敛、调试与提交
 
 - 状态：进行中（2026-08-31），功能冻结。
 - 已重新核对两页原始考核 PDF、`AGENTS.md`、全部 docs、核心源码调用链、运行脚本、测试结构和提交历史。
 - 已重写 GitHub 展示 README，加入品牌图、徽章、Agent 闭环、进程架构、安全模型、运行/打包、证据、取舍和边界；不把历史计划伪装成当前能力。
-- 已形成 `README.txt` 初稿，按包含英文、标点和换行的保守口径为 965 个字符，包含公开仓库地址、运行、特色和限制。
-- 本轮严格类型检查、31 个测试文件共 186 项测试、生产构建、Apple Silicon 目录包和生产依赖审计已通过；目录包位于 `release/mac-arm64/HammerCode.app`，未签名状态与 README 说明一致。
+- 已形成 `README.txt` 初稿，按包含英文、标点和换行的保守口径为 987 个字符，包含公开仓库地址、运行、特色和限制。
+- 本轮严格类型检查、34 个测试文件共 202 项测试、生产构建、Apple Silicon 目录包和生产依赖审计已通过；目录包位于 `release/mac-arm64/HammerCode.app`，未签名状态与 README 说明一致。
 - 模型连接口径已按用户最终决策统一：允许保存自定义 OpenAI-compatible 连接，Fast/Strong 保留为本调试与验收版本的内置默认档位；长期约束、公开说明与现有实现一致。
 - 最终凭据检查、视频和提交 zip 尚需按 Phase 16 退出标准逐项完成。
 

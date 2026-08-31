@@ -171,6 +171,28 @@ describe("session persistence", () => {
     expect(state.activeSession?.id).toBe("session_a1");
   });
 
+  it("serializes concurrent index updates without losing chats", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const root = "/tmp/project-concurrent-index";
+    await store.setWorkspaceRoot(root);
+    const sessions = Array.from({ length: 24 }, (_, index) => createSession(
+      `session_parallel_${index}`,
+      `Parallel ${index}`,
+      `2026-08-31T03:${String(index).padStart(2, "0")}:00.000Z`,
+      root,
+    ));
+
+    await Promise.all(sessions.map((session) => store.save(session, { activate: false })));
+
+    const state = await store.loadState();
+    const persistedIds = state.workspaces.find((workspace) => workspace.root === root)?.sessions
+      .map((session) => session.id);
+    expect(new Set(persistedIds)).toEqual(new Set(sessions.map((session) => session.id)));
+    expect(persistedIds).toHaveLength(sessions.length);
+  });
+
   it("clears only the active chat in the selected workspace", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
     directories.push(directory);
@@ -217,6 +239,45 @@ describe("session persistence", () => {
     expect(state.workspaces.find((workspace) => workspace.root === rootA)).toMatchObject({
       activeSessionId: "session_running",
       sessions: [expect.objectContaining({ id: "session_running", status: "requesting" })],
+    });
+  });
+
+  it("preserves every live main session during navigation refresh and interrupts all of them after a cold restart", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hammercode-session-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const first = createSession("session_live_a", "Live A", "2026-08-31T01:00:00.000Z", "/tmp/project-live-a");
+    const second = createSession("session_live_b", "Live B", "2026-08-31T02:00:00.000Z", "/tmp/project-live-b");
+    for (const session of [first, second]) {
+      session.status = "requesting";
+      session.terminationReason = undefined;
+      session.turns[0].status = "requesting";
+      session.turns[0].terminationReason = undefined;
+      session.turns[0].finishedAt = undefined;
+      session.streamingText = `streaming ${session.id}`;
+      await store.save(session);
+    }
+
+    const live = await store.loadState({ liveSessionIds: [first.id, second.id] });
+    expect(live.workspaces.flatMap((workspace) => workspace.sessions)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, status: "requesting" }),
+      expect.objectContaining({ id: second.id, status: "requesting" }),
+    ]));
+
+    const restarted = await new SessionStore(directory).loadState();
+    expect(restarted.workspaces.flatMap((workspace) => workspace.sessions)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, status: "failed" }),
+      expect.objectContaining({ id: second.id, status: "failed" }),
+    ]));
+    expect(await store.loadSession(first.id, { preserveActive: true })).toMatchObject({
+      status: "failed",
+      terminationReason: "interrupted",
+      streamingText: "",
+    });
+    expect(await store.loadSession(second.id, { preserveActive: true })).toMatchObject({
+      status: "failed",
+      terminationReason: "interrupted",
+      streamingText: "",
     });
   });
 

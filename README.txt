@@ -15,7 +15,7 @@ HammerCode 使用 Electron + TypeScript 独立实现，没有封装现成 agent 
 
 模型只能提出工具调用，不能直接操作系统。执行前校验不可信 JSON、工作区真实路径和命令风险；只读工具可自动执行，文件 diff 和普通命令按“请求批准/完全访问”授权，越界、提权、擦盘等操作直接阻断。命令支持超时、输出截断、取消和进程组清理。
 
-同一聊天可连续追问且不重放历史副作用；会话、工具、授权、预算与终止原因可恢复。文本修改提供累计 diff、哈希过期检查和二次审批撤销。renderer 关闭 Node integration，只通过最小 preload IPC 通信；API key 仅在 main process 使用并由 safeStorage 加密保存。
+不同项目最多 3 个主任务并行，同项目保持单任务；聊天可连续追问且不重放旧副作用。会话、工具、授权、预算与终止原因可恢复。文本修改提供累计 diff、哈希过期检查和二次审批撤销。renderer 关闭 Node integration，只通过最小 preload IPC 通信；API key 仅在 main process 使用并由 safeStorage 加密保存。
 
 三、说明
 当前面向 Apple Silicon macOS 本地演示，目录包未签名；自动撤销仅覆盖不超过 1 MB 的 UTF-8 文本工具变更。设计与验证证据见 README.md 和 docs/。

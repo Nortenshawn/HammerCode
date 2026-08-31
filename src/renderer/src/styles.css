@@ -153,7 +153,11 @@ button { color: inherit; }
 .chat-item.active { background: #e8eae5; }
 .chat-open { min-width: 0; padding: 4px 7px 4px 10px; overflow: hidden; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .chat-open:disabled { cursor: default; opacity: .48; }
+.chat-title-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .chat-title { display: block; overflow: hidden; color: #3a3c37; font-size: 15px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-marker { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px rgba(141, 185, 90, .13); }
+.chat-run-marker.awaiting_approval { background: #d49a48; box-shadow: 0 0 0 2px rgba(212, 154, 72, .15); }
+.chat-run-marker.requesting, .chat-run-marker.executing_tool { animation: process-pulse 1.35s ease-in-out infinite; }
 .chat-archive { display: grid; place-items: center; width: 25px; height: 25px; padding: 0; border: 0; border-radius: 6px; color: var(--quiet); background: transparent; cursor: pointer; opacity: 0; transition: opacity .12s ease, background .12s ease; }
 .chat-item:hover .chat-archive, .chat-archive:focus-visible { opacity: 1; }
 .chat-archive:hover:not(:disabled) { color: #555950; background: rgba(255, 255, 255, .76); }

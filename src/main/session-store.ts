@@ -646,6 +646,7 @@ export class SessionStore {
   private readonly sessionsDirectory: string;
   private readonly legacyPath: string;
   private writeCounter = 0;
+  private indexOperations: Promise<void> = Promise.resolve();
 
   constructor(dataDirectory: string) {
     this.dataDirectory = dataDirectory;
@@ -655,6 +656,10 @@ export class SessionStore {
   }
 
   async loadState(options: { liveSessionIds?: readonly string[] } = {}): Promise<SessionStoreState> {
+    return this.withIndexOperation(() => this.loadStateUnlocked(options));
+  }
+
+  private async loadStateUnlocked(options: { liveSessionIds?: readonly string[] } = {}): Promise<SessionStoreState> {
     const index = await this.readIndex();
     const liveSessionIds = new Set(options.liveSessionIds ?? []);
     const workspaceSummaries: WorkspaceSummary[] = [];
@@ -725,6 +730,10 @@ export class SessionStore {
   }
 
   async save(session: AgentSession, options: { activate?: boolean } = {}): Promise<void> {
+    return this.withIndexOperation(() => this.saveUnlocked(session, options));
+  }
+
+  private async saveUnlocked(session: AgentSession, options: { activate?: boolean } = {}): Promise<void> {
     this.assertSafeSessionId(session.id);
     const parsed = sessionSchema.parse(session);
     const normalized = normalizeSessionShape(parsed);
@@ -765,6 +774,10 @@ export class SessionStore {
   }
 
   async setWorkspaceRoot(workspaceRoot: string): Promise<void> {
+    return this.withIndexOperation(() => this.setWorkspaceRootUnlocked(workspaceRoot));
+  }
+
+  private async setWorkspaceRootUnlocked(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     let workspace = index.workspaces.find((item) => item.root === workspaceRoot);
     if (!workspace) {
@@ -790,6 +803,10 @@ export class SessionStore {
   }
 
   async selectWorkspace(workspaceRoot: string): Promise<void> {
+    return this.withIndexOperation(() => this.selectWorkspaceUnlocked(workspaceRoot));
+  }
+
+  private async selectWorkspaceUnlocked(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot);
     if (!workspace || workspace.status !== "active") throw new Error("找不到指定工作区");
@@ -799,6 +816,10 @@ export class SessionStore {
   }
 
   async setActive(sessionId: string | null): Promise<void> {
+    return this.withIndexOperation(() => this.setActiveUnlocked(sessionId));
+  }
+
+  private async setActiveUnlocked(sessionId: string | null): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find(
       (item) => item.root === index.activeWorkspaceRoot,
@@ -814,6 +835,10 @@ export class SessionStore {
   }
 
   async archiveSession(sessionId: string): Promise<void> {
+    return this.withIndexOperation(() => this.archiveSessionUnlocked(sessionId));
+  }
+
+  private async archiveSessionUnlocked(sessionId: string): Promise<void> {
     this.assertSafeSessionId(sessionId);
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.status === "active" && item.sessionIds.includes(sessionId));
@@ -831,6 +856,10 @@ export class SessionStore {
   }
 
   async restoreSession(sessionId: string): Promise<void> {
+    return this.withIndexOperation(() => this.restoreSessionUnlocked(sessionId));
+  }
+
+  private async restoreSessionUnlocked(sessionId: string): Promise<void> {
     this.assertSafeSessionId(sessionId);
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.status === "active" && item.archivedSessionIds.includes(sessionId));
@@ -844,6 +873,10 @@ export class SessionStore {
   }
 
   async archiveWorkspaceChats(workspaceRoot: string): Promise<void> {
+    return this.withIndexOperation(() => this.archiveWorkspaceChatsUnlocked(workspaceRoot));
+  }
+
+  private async archiveWorkspaceChatsUnlocked(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
     if (!workspace) throw new Error("找不到指定工作区");
@@ -862,6 +895,10 @@ export class SessionStore {
   }
 
   async restoreWorkspaceChats(workspaceRoot: string): Promise<void> {
+    return this.withIndexOperation(() => this.restoreWorkspaceChatsUnlocked(workspaceRoot));
+  }
+
+  private async restoreWorkspaceChatsUnlocked(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
     if (!workspace) throw new Error("找不到指定工作区");
@@ -881,6 +918,10 @@ export class SessionStore {
   }
 
   async setProjectPinned(workspaceRoot: string, pinned: boolean): Promise<void> {
+    return this.withIndexOperation(() => this.setProjectPinnedUnlocked(workspaceRoot, pinned));
+  }
+
+  private async setProjectPinnedUnlocked(workspaceRoot: string, pinned: boolean): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
     if (!workspace) throw new Error("找不到活动项目");
@@ -890,6 +931,10 @@ export class SessionStore {
   }
 
   async renameProject(workspaceRoot: string, displayName: string): Promise<void> {
+    return this.withIndexOperation(() => this.renameProjectUnlocked(workspaceRoot, displayName));
+  }
+
+  private async renameProjectUnlocked(workspaceRoot: string, displayName: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status !== "removed");
     if (!workspace) throw new Error("找不到项目");
@@ -899,6 +944,10 @@ export class SessionStore {
   }
 
   async archiveProject(workspaceRoot: string): Promise<void> {
+    return this.withIndexOperation(() => this.archiveProjectUnlocked(workspaceRoot));
+  }
+
+  private async archiveProjectUnlocked(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
     if (!workspace) throw new Error("找不到活动项目");
@@ -914,6 +963,10 @@ export class SessionStore {
   }
 
   async restoreProject(workspaceRoot: string): Promise<void> {
+    return this.withIndexOperation(() => this.restoreProjectUnlocked(workspaceRoot));
+  }
+
+  private async restoreProjectUnlocked(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "archived");
     if (!workspace) throw new Error("找不到已归档项目");
@@ -923,6 +976,10 @@ export class SessionStore {
   }
 
   async removeProject(workspaceRoot: string): Promise<void> {
+    return this.withIndexOperation(() => this.removeProjectUnlocked(workspaceRoot));
+  }
+
+  private async removeProjectUnlocked(workspaceRoot: string): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status === "active");
     if (!workspace) throw new Error("找不到活动项目");
@@ -941,6 +998,13 @@ export class SessionStore {
     workspaceRoot: string,
     preference: { mode: "project" | "custom"; customDirectory?: string },
   ): Promise<void> {
+    return this.withIndexOperation(() => this.updateProjectMemoryExportUnlocked(workspaceRoot, preference));
+  }
+
+  private async updateProjectMemoryExportUnlocked(
+    workspaceRoot: string,
+    preference: { mode: "project" | "custom"; customDirectory?: string },
+  ): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status !== "removed");
     if (!workspace) throw new Error("找不到项目");
@@ -950,6 +1014,10 @@ export class SessionStore {
   }
 
   async projectMemoryExport(workspaceRoot: string): Promise<{ mode: "project" | "custom"; customDirectory?: string }> {
+    return this.withIndexOperation(() => this.projectMemoryExportUnlocked(workspaceRoot));
+  }
+
+  private async projectMemoryExportUnlocked(workspaceRoot: string): Promise<{ mode: "project" | "custom"; customDirectory?: string }> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find((item) => item.root === workspaceRoot && item.status !== "removed");
     if (!workspace) throw new Error("找不到项目");
@@ -957,6 +1025,10 @@ export class SessionStore {
   }
 
   async clear(): Promise<void> {
+    return this.withIndexOperation(() => this.clearUnlocked());
+  }
+
+  private async clearUnlocked(): Promise<void> {
     const index = await this.readIndex();
     const workspace = index.workspaces.find(
       (item) => item.root === index.activeWorkspaceRoot,
@@ -968,6 +1040,15 @@ export class SessionStore {
     workspace.activeSessionId = null;
     workspace.updatedAt = new Date().toISOString();
     await this.writeIndex(index);
+  }
+
+  private withIndexOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.indexOperations.then(operation, operation);
+    this.indexOperations = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async readIndex(): Promise<SessionIndex> {

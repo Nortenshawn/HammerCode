@@ -42,6 +42,7 @@ import { renderDiffLines } from "./diff-renderer";
 import { detectComposerToken, replaceComposerToken } from "./composer-tokens";
 import { computeWorkbenchLayout, DEFAULT_PANEL_RATIO, panelRatioFromDivider } from "./panel-layout";
 import { memoryDescription, memorySourceTitle, memoryTitle } from "./memory-presentation";
+import { ACTIVE_MAIN_STATUSES, deriveMainRunUiState } from "./main-run-state";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -52,7 +53,6 @@ const STATUS_LABELS: Record<SessionStatus, string> = {
   cancelled: "已取消",
   failed: "未完成",
 };
-const ACTIVE_STATUSES: SessionStatus[] = ["requesting", "awaiting_approval", "executing_tool"];
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "cancelled", "failed"];
 
 type IconName =
@@ -602,7 +602,7 @@ function ChatList({ sessions, activeId, selectDisabled, archiveDisabled, onSelec
   if (sessions.length === 0) return <p className="empty-chat-list">还没有聊天</p>;
   return <div className="chat-list">{sessions.map((item) => (
     <div className={`chat-item ${item.id === activeId ? "active" : ""}`} key={item.id}>
-      <button className="chat-open" disabled={selectDisabled} onClick={() => onSelect(item.id)} title={item.title}><span className="chat-title">{item.title}</span></button>
+      <button className="chat-open" disabled={selectDisabled} onClick={() => onSelect(item.id)} title={item.title}><span className="chat-title-row"><span className="chat-title">{item.title}</span>{ACTIVE_MAIN_STATUSES.includes(item.status) && <span className={`chat-run-marker ${item.status}`} title={item.status === "awaiting_approval" ? "等待批准" : "任务运行中"} aria-label={item.status === "awaiting_approval" ? "等待批准" : "任务运行中"}/>}</span></button>
       <button className="chat-archive" disabled={archiveDisabled} onClick={() => onArchive(item.id)} title="归档聊天" aria-label={`归档 ${item.title}`}><Icon name="archive" size={13}/></button>
     </div>
   ))}</div>;
@@ -1259,12 +1259,17 @@ export function App() {
     return () => document.removeEventListener("pointerdown", dismissAddMenu, true);
   }, [paletteMode]);
 
-  const isRunning = Boolean(session && ACTIVE_STATUSES.includes(session.status));
-  const isBusy = isRunning || Boolean(session?.pendingUndo);
-  const hasRunningSession = workspaces.some((workspace) =>
-    workspace.sessions.some((item) => ACTIVE_STATUSES.includes(item.status)),
+  const runUiState = deriveMainRunUiState(
+    workspaces,
+    workspaceRoot,
+    session?.id ?? null,
+    bootstrap?.config.maxConcurrentMainAgents ?? 3,
   );
-  const anotherSessionIsRunning = hasRunningSession && !isRunning;
+  const isRunning = runUiState.currentSessionRunning;
+  const isBusy = isRunning || Boolean(session?.pendingUndo);
+  const hasRunningSession = runUiState.activeCount > 0;
+  const anotherSessionInWorkspaceIsRunning = runUiState.anotherSessionInWorkspaceRunning;
+  const mainAgentLimitReached = runUiState.limitReached;
   const selectedModel = bootstrap?.config.availableModels.find((option) => option.ref === modelRef);
   const fileReviews = useMemo(
     () => session ? buildFileReviews(session.fileChanges) : [],
@@ -1690,13 +1695,13 @@ export function App() {
 
   const submit = async () => {
     const serializedTask = serializeComposerTask(task, composerEntities);
-    if (!serializedTask || !workspaceRoot || isBusy || anotherSessionIsRunning || !selectedModel?.hasApiKey) return;
+    if (!serializedTask || !workspaceRoot || isBusy || anotherSessionInWorkspaceIsRunning || mainAgentLimitReached || !selectedModel?.hasApiKey) return;
     setBusy(true);
     autoScrollRef.current = true;
     setShowJumpToLatest(false);
     setNotice(null);
     try {
-      await window.hammerCode.startTask({ task: serializedTask, modelTier, modelRef, permissionMode });
+      await window.hammerCode.startTask({ task: serializedTask, sessionId: session?.id ?? null, modelTier, modelRef, permissionMode });
       setTask("");
       setComposerEntities([]);
     } catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
@@ -1705,7 +1710,7 @@ export function App() {
 
   const resolveApproval = async (approved: boolean) => {
     if (!session?.pendingApproval) return;
-    try { await window.hammerCode.resolveApproval(session.pendingApproval.id, approved); }
+    try { await window.hammerCode.resolveApproval(session.id, session.pendingApproval.id, approved); }
     catch (error) { setNotice({ level: "error", text: userFacingError(error) }); }
   };
 
@@ -1804,7 +1809,7 @@ export function App() {
     "--main-column": `${workbenchLayout.mainWidth}px`,
     "--panel-column": `${workbenchLayout.panelWidth}px`,
   } as CSSProperties;
-  const composerLocked = !workspaceRoot || anotherSessionIsRunning || busy || Boolean(session?.pendingUndo);
+  const composerLocked = !workspaceRoot || anotherSessionInWorkspaceIsRunning || busy || Boolean(session?.pendingUndo);
   const settingsBootstrap: AppBootstrap = { ...bootstrap, session, sessions, workspaces, archivedWorkspaces, archivedProjects, workspaceRoot };
   const menuProject = projectMenu ? workspaces.find((project) => project.root === projectMenu.root) : undefined;
 
@@ -1915,7 +1920,7 @@ export function App() {
                   <button className="composer-entity-open" type="button" onClick={() => void openEntityPreview(entity)} title={`预览 ${entity.detail}`}><Icon name={entity.kind === "skill" ? "spark" : entity.kind === "directory" ? "folder" : "file"} size={14}/><span>{entity.label}</span></button>
                   <button className="composer-entity-remove" type="button" onClick={() => removeComposerEntity(entity.key)} aria-label={`移除 ${entity.label}`}>×</button>
                 </span>)}
-                <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={composerEntities.length > 0 ? "继续输入" : workspaceRoot ? (contextCompacting ? "正在压缩上下文" : anotherSessionIsRunning ? "另一条聊天正在运行" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={2}/>
+                <textarea ref={textareaRef} value={task} onChange={(event) => { setTask(event.target.value); setComposerCursor(event.target.selectionStart); if (paletteMode) setPaletteMode(null); }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onKeyDown={handleComposerKeyDown} placeholder={composerEntities.length > 0 ? "继续输入" : workspaceRoot ? (contextCompacting ? "正在压缩上下文" : anotherSessionInWorkspaceIsRunning ? "当前项目已有主任务运行" : mainAgentLimitReached && !isRunning ? "并发主任务已达上限" : isRunning ? "主任务运行中" : session ? "继续追问" : "交给 HammerCode 一个开发任务") : "请先选择工作区"} disabled={composerLocked} rows={2}/>
               </div>
             </div>
             <div className="composer-toolbar">
@@ -1926,8 +1931,8 @@ export function App() {
                 <select aria-label="权限" title="权限" value={permissionMode} disabled={isBusy || busy || settingsBusy} onChange={(event) => choosePermission(event.target.value as PermissionMode)}><option value="ask">请求批准</option><option value="full_access">完全访问</option></select>
               </div>
               {isRunning || contextCompacting
-                ? <button key="stop" className="composer-stop" onClick={() => window.hammerCode.cancelTask()} aria-label={contextCompacting ? "停止上下文压缩" : "停止任务"}><Icon name="stop" size={15}/></button>
-                : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={(!task.trim() && composerEntities.length === 0) || !workspaceRoot || isBusy || anotherSessionIsRunning || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
+                ? <button key="stop" className="composer-stop" onClick={() => session && window.hammerCode.cancelTask(session.id)} aria-label={contextCompacting ? "停止上下文压缩" : "停止任务"}><Icon name="stop" size={15}/></button>
+                : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={(!task.trim() && composerEntities.length === 0) || !workspaceRoot || isBusy || anotherSessionInWorkspaceIsRunning || mainAgentLimitReached || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
             </div>
           </div>
         </section>}

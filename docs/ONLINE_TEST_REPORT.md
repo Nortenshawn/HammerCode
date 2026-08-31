@@ -592,3 +592,38 @@ HammerTest 验收开始时有 14 条活动聊天。先归档一条聊天并从�
 - 实际工具清单与请求一致，共 13 个：`update_plan`、`list_files`、`read_file`、`read_pdf`、`search_text`、`git_status`、`git_diff`、`write_file`、`edit_file`、`delete_file`、`run_python`、`run_command`、`spawn_subagents`。对于未提供的插件或模型权重细节，回答明确表示无法确认。
 
 验收没有触发任何工具、审批、文件修改或命令执行。临时聊天已归档，Phase4FastAsk 活动列表恢复为空；工作区文件零变化。离线测试进一步覆盖 Strong/GLM、完全访问、模型名持久化、工具调用后的剩余预算、BTW 零工具、缺失事实、凭据隔离和压缩保留。最终严格类型检查、31 个测试文件共 186 项测试、生产构建、Apple Silicon 目录包与生产依赖审计全部通过。
+
+## HC-ONLINE-2026-08-31-01
+
+- 时间：2026-08-31 20:35–20:52（Asia/Shanghai）
+- 基线提交：`afcadec`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer、真实 AgentRunner、审批弹窗、工作区工具和会话持久化完整链路操作。macOS Computer Use 本轮只能读取辅助功能树，点击时本机控制管道异常关闭，因此改用同一 Electron renderer 的本地调试协议触发实际界面控件；没有直接调用 AgentController 或工具执行器绕过产品链路
+- 模型：真实 Fast · `deepseek-v4-flash` 与 Strong · `glm-5.3-flash`
+- 主验收工作区：`/Users/norten/Developer/HammerTest/Phase16Fast`、`/Users/norten/Developer/HammerTest/Phase16Strong`
+- 补充恢复工作区：`/Users/norten/Developer/HammerTest/Phase4FastAsk`、`/Users/norten/Developer/HammerTest`
+- 凭据：只由正式 main process 的既有加密配置读取；界面、终端、测试输出和本报告均未读取、展示、打印或复制 key
+
+### 独立项目 Fast/Strong 并行
+
+Fast 在 `Phase16Fast` 以请求批准模式调用 `write_file` 创建 `isolated-fast.txt`，审批弹窗保持打开时，切换到 `Phase16Strong` 新建聊天并选择 Strong。Strong 使用一次只读 `list_files` 验证该独立工作区为空，14 秒完成；Fast 侧栏同时保持橙色“等待批准”标记，没有抢占当前聊天。切回 Fast 后原审批仍然存在，批准后 Fast 写入并通过 `read_file` 回读 13 字节 `ISOLATED_FAST`，最终侧栏无活动标记。
+
+| 场景 | 实际行为 | 结果 |
+| --- | --- | --- |
+| 跨项目启动 | Fast 等待文件审批时，Strong 可在另一个项目启动、流式展示并完成 | 通过 |
+| 导航与后台状态 | 切换项目不停止 Fast，不改变 Strong 当前主视图；Fast 只显示紧凑等待标记 | 通过 |
+| 审批隔离 | 回到 Fast 后仍是原 session/approval；批准只在 `Phase16Fast` 写入目标文件 | 通过 |
+| 模型隔离 | Fast 轨迹为 DeepSeek，请求批准；Strong 轨迹为 GLM，请求批准，模型和预算未串线 | 通过 |
+
+### 停止、同项目互斥与重启恢复
+
+补充使用两个 30/90 秒 Python 工具任务制造稳定并发窗口。Fast 与 Strong 同时显示 `executing_tool` 时停止 Fast，Fast 立即进入“用户停止”，Strong 的 `run_python` 不受影响并成功输出 `STRONG_SLOW_DONE`。随后再次让 Fast 执行 90 秒脚本、Strong 启动新轮次，在两条聊天同时活动时终止 Electron 并重启：两条聊天均显示“运行被中断”，侧栏没有运行标记，也没有模型请求或工具自动续跑。
+
+重启后在 Fast 原聊天追加“只读取脚本、禁止运行 Python”的新 turn，实际只产生一次 `read_file`，正确报告 `sleep(90)`；历史未完成的 `run_python` 没有重放。另一次 Fast 长任务运行时，在同一 `Phase4FastAsk` 项目点击文件夹右侧加号，新聊天输入框显示“当前项目已有主任务运行”，文本区和发送按钮同时禁用；切回带绿点的原聊天后可以只停止该任务。
+
+### 副作用与交付检查
+
+- `Phase16Fast/isolated-fast.txt`：13 字节，内容 `ISOLATED_FAST`，由真实 Fast 经用户批准创建并回读。
+- `Phase16Strong`：只读验收保持空目录。
+- 补充长任务产物：`Phase4FastAsk/phase16-fast-approval.txt`、`Phase4FastAsk/phase16-slow.py`、`phase16-strong-slow.py`，全部位于用户授权的 HammerTest 沙箱并保留供人工复核。
+- 验收结束后进程表中没有 `phase16-slow.py` 或 `phase16-strong-slow.py` 残留进程；所有聊天均为 completed、cancelled 或 failed/interrupted，没有活动标记。
+- 离线自动测试覆盖错误 session/approval 组合、同时批准/拒绝、三任务上限、第四任务拒绝、启动失败释放、真实路径别名、共享索引并发保存和多个 live session 冷启动恢复。最终严格类型检查、34 个测试文件共 202 项测试、生产构建、Apple Silicon 目录包和生产依赖审计全部通过。

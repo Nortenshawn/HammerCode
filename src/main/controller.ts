@@ -14,7 +14,7 @@ import { WorkspaceBoundary } from "../core/security/path-boundary";
 import { RestrictedSubagentCoordinator } from "../core/subagent-coordinator";
 import { DEFAULT_SYSTEM_PROMPT } from "../core/system-prompt";
 import { LocalToolExecutor } from "../core/tools/tool-executor";
-import { HammerCodeError } from "../core/types";
+import { HammerCodeError, type ModelClient } from "../core/types";
 import { isAbortError, redactSecrets, systemClock, toErrorMessage, uuidGenerator } from "../core/utils";
 import { WorkspaceWriteLeaseManager } from "../core/write-leases";
 import {
@@ -45,23 +45,28 @@ import {
 import { PendingApprovalGateway } from "./approval-gateway";
 import type { RuntimeConfig } from "./config";
 import { toPublicConfig } from "./config";
+import {
+  MainAgentRunRegistry,
+  type MainAgentRunExecutionSnapshot,
+} from "./main-agent-run-registry";
 import { connectionModelRef, ModelCredentialStore } from "./model-credential-store";
 import { ProjectMemoryStore } from "./project-memory-store";
 import { SessionStore } from "./session-store";
 import { SkillStore } from "./skill-store";
 import { searchWorkspace } from "./workspace-search";
 
+const sessionIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const startTaskSchema = z
   .object({
     task: z.string().trim().min(1).max(100_000),
+    sessionId: sessionIdSchema.nullable(),
     modelTier: z.enum(MODEL_TIERS),
     modelRef: z.string().regex(/^(?:builtin:(?:fast|strong)|connection:[0-9a-f-]{36})$/i).optional(),
     permissionMode: z.enum(PERMISSION_MODES),
   })
   .strict();
-const settingsSchema = startTaskSchema.omit({ task: true });
 const approvalIdSchema = z.string().min(1).max(200);
-const sessionIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
+const settingsSchema = startTaskSchema.omit({ task: true, sessionId: true });
 const changeIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const workspaceRootSchema = z.string().min(1).max(4096);
 const workspaceQuerySchema = z.string().max(240);
@@ -95,6 +100,10 @@ const projectMemorySettingsSchema = z.object({
   maxRecallCharacters: z.number().int().min(500).max(20_000),
 }).strict();
 
+export interface AppControllerRuntimeOverrides {
+  createModelClient?(config: RuntimeConfig["models"]["fast"]): ModelClient;
+}
+
 function toSummary(session: AgentSession): SessionSummary {
   return {
     id: session.id,
@@ -126,11 +135,10 @@ export class AppController {
     updatedAt: new Date(0).toISOString(),
   };
   private sessions: SessionSummary[] = [];
-  private runner: AgentRunner | null = null;
-  private approvals: PendingApprovalGateway | null = null;
+  private readonly mainRuns: MainAgentRunRegistry;
+  private undoApprovals: PendingApprovalGateway | null = null;
   private undoAbort: AbortController | null = null;
   private contextCompactionAbort: AbortController | null = null;
-  private runningSessionId: string | null = null;
   private sideChat: EphemeralSideChat | null = null;
   private readonly titleRequests = new Set<string>();
   private readonly pendingTitles = new Map<string, string>();
@@ -143,7 +151,10 @@ export class AppController {
     private readonly modelCredentials: ModelCredentialStore,
     private readonly projectMemory: ProjectMemoryStore,
     private readonly skills: SkillStore,
-  ) {}
+    private readonly runtimeOverrides: AppControllerRuntimeOverrides = {},
+  ) {
+    this.mainRuns = new MainAgentRunRegistry(config.maxConcurrentMainAgents);
+  }
 
   async initialize(): Promise<void> {
     await this.modelCredentials.load(this.config.models);
@@ -218,7 +229,7 @@ export class AppController {
       throw new HammerCodeError("找不到这条活动聊天记录", "SESSION_NOT_FOUND", true);
     }
     const session = await this.store.loadSession(id, {
-      preserveActive: id === this.runningSessionId,
+      preserveActive: this.mainRuns.has(id),
     });
     if (!session) throw new HammerCodeError("找不到这条聊天记录", "SESSION_NOT_FOUND", true);
     if (!this.workspaces.some((workspace) => workspace.root === session.workspaceRoot)) {
@@ -347,7 +358,7 @@ export class AppController {
     const settings = settingsSchema.parse(input);
     const session = this.currentSession;
     if (!session) throw new HammerCodeError("当前没有聊天", "NO_SESSION", true);
-    if (this.runningSessionId === session.id || this.isUndoBusy()) {
+    if (this.mainRuns.has(session.id) || this.isUndoBusy()) {
       throw new HammerCodeError("任务、审批或撤销运行时不能切换模型或权限", "SESSION_BUSY", true);
     }
     this.resolveModel(settings.modelTier, settings.modelRef);
@@ -363,119 +374,174 @@ export class AppController {
 
   async startTask(input: unknown): Promise<{ sessionId: string }> {
     const request = startTaskSchema.parse(input);
-    if (!this.workspaceRoot) {
+    const workspaceRoot = this.workspaceRoot;
+    const sourceSession = this.currentSession;
+    const startNavigationRevision = this.navigationRevision;
+    if (!workspaceRoot) {
       throw new HammerCodeError("请先选择工作区", "WORKSPACE_REQUIRED", true);
     }
-    if (this.isBusy()) throw new HammerCodeError("已有任务或撤销正在运行", "SESSION_BUSY", true);
-    const selected = this.resolveModel(request.modelTier, request.modelRef);
-    const modelConfig = selected.config;
-
-    const boundary = await WorkspaceBoundary.create(this.workspaceRoot);
-    const approvals = new PendingApprovalGateway();
-    const tools = new LocalToolExecutor(boundary, uuidGenerator);
-    const writeLeases = new WorkspaceWriteLeaseManager();
-    const model = new OpenAICompatibleChatClient({
-      provider: modelConfig.provider,
-      apiKey: modelConfig.apiKey,
-      baseUrl: modelConfig.apiBaseUrl,
-      model: modelConfig.model,
-      thinking: modelConfig.thinking,
-      reasoningEffort: modelConfig.reasoningEffort,
-      maxOutputTokens: modelConfig.maxOutputTokens,
-      requestTimeoutMs: modelConfig.requestTimeoutMs,
-    });
-    const subagents = new RestrictedSubagentCoordinator(
-      model,
-      boundary,
-      systemClock,
-      uuidGenerator,
-      writeLeases,
-      {
-        modelName: modelConfig.model,
-        maxRounds: Math.min(8, this.config.maxAgentRounds),
-        maxToolCalls: Math.min(30, this.config.maxToolCalls),
-        maxRunTimeMs: Math.min(300_000, this.config.maxRunTimeMs),
-        maxModelRetries: this.config.maxModelRetries,
-        retryBaseDelayMs: this.config.retryBaseDelayMs,
-        retryMaxDelayMs: this.config.retryMaxDelayMs,
-        maxOutputTokens: Math.min(16_384, modelConfig.maxOutputTokens),
-        contextTokenBudget: Math.min(64_000, this.config.contextTokenBudget),
-      },
-    );
-    const startNavigationRevision = this.navigationRevision;
-    const runner = new AgentRunner(
-      {
+    if (request.sessionId !== (sourceSession?.id ?? null)) {
+      throw new HammerCodeError(
+        "聊天选择已经变化，请在目标聊天中重新发送。",
+        "SESSION_OPERATION_MISMATCH",
+        true,
+      );
+    }
+    if (sourceSession && sourceSession.workspaceRoot !== workspaceRoot) {
+      throw new HammerCodeError("聊天与当前工作区不一致", "SESSION_WORKSPACE_MISMATCH", true);
+    }
+    if (this.undoAbort || this.contextCompactionAbort) {
+      throw new HammerCodeError("撤销或上下文压缩运行时不能启动主任务", "SESSION_BUSY", true);
+    }
+    let reservation = this.mainRuns.reserve(workspaceRoot);
+    let attachedSessionId: string | null = null;
+    let pendingRunner: AgentRunner | null = null;
+    let pendingApprovals: PendingApprovalGateway | null = null;
+    try {
+      const selected = this.resolveModel(request.modelTier, request.modelRef);
+      const modelConfig = selected.config;
+      const boundary = await WorkspaceBoundary.create(workspaceRoot);
+      reservation = this.mainRuns.canonicalizeReservation(reservation, boundary.root);
+      const approvals = new PendingApprovalGateway();
+      pendingApprovals = approvals;
+      const tools = new LocalToolExecutor(boundary, uuidGenerator);
+      const writeLeases = new WorkspaceWriteLeaseManager();
+      const model = this.createModelClient(modelConfig);
+      const subagents = new RestrictedSubagentCoordinator(
         model,
-        tools,
-        approvals,
-        clock: systemClock,
-        ids: uuidGenerator,
-        projectMemory: this.projectMemory,
-        skills: this.skills,
-        subagents,
+        boundary,
+        systemClock,
+        uuidGenerator,
         writeLeases,
-        onSessionChange: async (session) => {
-          const pendingTitle = this.pendingTitles.get(session.id);
-          if (pendingTitle) {
-            session.title = pendingTitle;
-            this.pendingTitles.delete(session.id);
-          }
-          this.runningSessionId ??= session.id;
-          const selected =
-            this.currentSession?.id === session.id ||
-            (this.navigationRevision === startNavigationRevision &&
-              this.workspaceRoot === session.workspaceRoot);
-          if (selected) this.currentSession = session;
-          this.upsertSummary(session);
-          this.upsertWorkspace(session, selected);
-          await this.store.save(session, { activate: selected });
-          this.emit(selected
-            ? { type: "session_snapshot", session }
-            : { type: "session_updated", session });
+        {
+          modelName: modelConfig.model,
+          maxRounds: Math.min(8, this.config.maxAgentRounds),
+          maxToolCalls: Math.min(30, this.config.maxToolCalls),
+          maxRunTimeMs: Math.min(300_000, this.config.maxRunTimeMs),
+          maxModelRetries: this.config.maxModelRetries,
+          retryBaseDelayMs: this.config.retryBaseDelayMs,
+          retryMaxDelayMs: this.config.retryMaxDelayMs,
+          maxOutputTokens: Math.min(16_384, modelConfig.maxOutputTokens),
+          contextTokenBudget: Math.min(64_000, this.config.contextTokenBudget),
         },
-      },
-      {
+      );
+      const runner = new AgentRunner(
+        {
+          model,
+          tools,
+          approvals,
+          clock: systemClock,
+          ids: uuidGenerator,
+          projectMemory: this.projectMemory,
+          skills: this.skills,
+          subagents,
+          writeLeases,
+          onSessionChange: async (session) => {
+            const pendingTitle = this.pendingTitles.get(session.id);
+            if (pendingTitle) {
+              session.title = pendingTitle;
+              this.pendingTitles.delete(session.id);
+            }
+            this.mainRuns.updateSession(session);
+            const isSelected = this.currentSession?.id === session.id;
+            if (isSelected) this.currentSession = session;
+            this.upsertSummary(session);
+            this.upsertWorkspace(session, isSelected);
+            await this.store.save(session, { activate: isSelected });
+            this.emit(isSelected
+              ? { type: "session_snapshot", session }
+              : { type: "session_updated", session });
+          },
+        },
+        {
+          modelName: modelConfig.model,
+          maxRounds: this.config.maxAgentRounds,
+          maxToolCalls: this.config.maxToolCalls,
+          maxRunTimeMs: this.config.maxRunTimeMs,
+          maxModelRetries: this.config.maxModelRetries,
+          retryBaseDelayMs: this.config.retryBaseDelayMs,
+          retryMaxDelayMs: this.config.retryMaxDelayMs,
+          maxOutputTokens: modelConfig.maxOutputTokens,
+          autoCompactRatio: this.config.autoCompactRatio,
+          contextTokenBudget: this.config.contextTokenBudget,
+          systemPrompt: DEFAULT_SYSTEM_PROMPT,
+        },
+      );
+      pendingRunner = runner;
+      const settings: SessionSettings = {
+        modelTier: request.modelTier,
+        modelRef: selected.modelRef,
+        permissionMode: request.permissionMode,
+      };
+      const runPromise = sourceSession
+        ? runner.resume(sourceSession, request.task, settings)
+        : runner.start(request.task, boundary.root, settings);
+      const snapshot = runner.snapshot;
+      if (!snapshot) {
+        await runPromise;
+        throw new HammerCodeError("无法创建会话", "SESSION_CREATE_FAILED");
+      }
+      const abortController = new AbortController();
+      const execution: MainAgentRunExecutionSnapshot = {
+        modelTier: request.modelTier,
+        modelRef: selected.modelRef,
         modelName: modelConfig.model,
-        maxRounds: this.config.maxAgentRounds,
-        maxToolCalls: this.config.maxToolCalls,
-        maxRunTimeMs: this.config.maxRunTimeMs,
-        maxModelRetries: this.config.maxModelRetries,
-        retryBaseDelayMs: this.config.retryBaseDelayMs,
-        retryMaxDelayMs: this.config.retryMaxDelayMs,
-        maxOutputTokens: modelConfig.maxOutputTokens,
-        autoCompactRatio: this.config.autoCompactRatio,
-        contextTokenBudget: this.config.contextTokenBudget,
-        systemPrompt: DEFAULT_SYSTEM_PROMPT,
-      },
-    );
-    this.runner = runner;
-    this.approvals = approvals;
-    const settings: SessionSettings = {
-      modelTier: request.modelTier,
-      modelRef: selected.modelRef,
-      permissionMode: request.permissionMode,
-    };
-    const run = this.currentSession
-      ? runner.resume(this.currentSession, request.task, settings)
-      : runner.start(request.task, boundary.root, settings);
-    const snapshot = runner.snapshot;
-    if (!snapshot) throw new HammerCodeError("无法创建会话", "SESSION_CREATE_FAILED");
-    this.currentSession = snapshot;
-    this.runningSessionId = snapshot.id;
-    this.upsertSummary(snapshot);
-    this.upsertWorkspace(snapshot);
-    this.emit({ type: "session_snapshot", session: snapshot });
-    void run
-      .catch((error: unknown) => {
-        this.emit({ type: "notification", level: "error", message: toErrorMessage(error) });
-      })
-      .finally(() => {
-        if (this.runningSessionId === snapshot.id) this.runningSessionId = null;
-        if (this.runner === runner) this.runner = null;
-        if (this.approvals === approvals) this.approvals = null;
-        void this.generateAndPersistTitle(snapshot.id);
+        permissionMode: request.permissionMode,
+        budget: {
+          maxRounds: this.config.maxAgentRounds,
+          maxToolCalls: this.config.maxToolCalls,
+          maxRunTimeMs: this.config.maxRunTimeMs,
+          maxModelRetries: this.config.maxModelRetries,
+          maxOutputTokens: modelConfig.maxOutputTokens,
+          contextTokenBudget: this.config.contextTokenBudget,
+        },
+      };
+      this.mainRuns.attach(reservation, {
+        sessionId: snapshot.id,
+        workspaceRoot: boundary.root,
+        runner,
+        approvals,
+        abortController,
+        execution,
+        currentSession: snapshot,
       });
-    return { sessionId: snapshot.id };
+      attachedSessionId = snapshot.id;
+      pendingRunner = null;
+      pendingApprovals = null;
+      const stillSelected =
+        this.navigationRevision === startNavigationRevision &&
+        this.workspaceRoot === workspaceRoot &&
+        this.currentSession?.id === sourceSession?.id;
+      if (stillSelected) this.currentSession = snapshot;
+      this.upsertSummary(snapshot);
+      this.upsertWorkspace(snapshot, stillSelected);
+      this.emit(stillSelected
+        ? { type: "session_snapshot", session: snapshot }
+        : { type: "session_updated", session: snapshot });
+      void runPromise
+        .catch((error: unknown) => {
+          this.emit({ type: "notification", level: "error", message: toErrorMessage(error) });
+        })
+        .finally(() => {
+          const finished = this.mainRuns.finish(snapshot.id);
+          if (!finished?.currentSession.title) void this.generateAndPersistTitle(snapshot.id);
+        });
+      return { sessionId: snapshot.id };
+    } catch (error) {
+      this.mainRuns.releaseReservation(reservation);
+      if (attachedSessionId) {
+        try {
+          this.mainRuns.cancel(attachedSessionId, "主任务启动失败，已安全取消。");
+        } catch {
+          // The run may already have reached a terminal state.
+        }
+        this.mainRuns.finish(attachedSessionId);
+      } else {
+        pendingRunner?.cancel("主任务启动失败，已安全取消。");
+        pendingApprovals?.cancel();
+      }
+      throw error;
+    }
   }
 
   async testModelConnection(input: unknown) {
@@ -503,7 +569,7 @@ export class AppController {
 
   async deleteModelConnection(idInput: unknown): Promise<void> {
     const id = modelConnectionIdSchema.parse(idInput);
-    if (this.runningSessionId || this.sideChat?.snapshot.status === "requesting") {
+    if (this.mainRuns.activeCount > 0 || this.sideChat?.snapshot.status === "requesting") {
       throw new HammerCodeError("模型正在使用中，任务结束后才能删除连接", "MODEL_CONNECTION_BUSY", true);
     }
     const deletedRef = connectionModelRef(id);
@@ -520,7 +586,12 @@ export class AppController {
   async compressContext() {
     const session = this.currentSession;
     if (!session) throw new HammerCodeError("当前没有可压缩的聊天", "NO_SESSION", true);
-    if (this.isBusy() || !["completed", "cancelled", "failed"].includes(session.status)) {
+    if (
+      this.mainRuns.has(session.id) ||
+      this.isUndoBusy() ||
+      this.contextCompactionAbort ||
+      !["completed", "cancelled", "failed"].includes(session.status)
+    ) {
       throw new HammerCodeError("只能在当前任务结束后压缩上下文", "SESSION_BUSY", true);
     }
     const selected = this.resolveModel(session.modelTier, session.modelRef);
@@ -860,7 +931,7 @@ export class AppController {
   }
 
   async uninstallSkill(skillKey: unknown): Promise<SkillInventorySnapshot> {
-    if (this.runningSessionId) {
+    if (this.mainRuns.activeCount > 0) {
       throw new HammerCodeError("任务运行时不能卸载 Skill；禁用仍可安全影响下一轮", "SESSION_BUSY", true);
     }
     this.currentSkills = await this.skills.uninstall(skillKey, this.workspaceRoot);
@@ -879,26 +950,58 @@ export class AppController {
     this.emit({ type: "skills_updated", skills: snapshot });
   }
 
-  cancelTask(detail = "任务已由用户取消"): void {
-    this.runner?.cancel(detail);
-    this.approvals?.cancel();
-    this.undoAbort?.abort(new DOMException("用户取消撤销", "AbortError"));
-    this.contextCompactionAbort?.abort(new DOMException("用户停止上下文压缩", "AbortError"));
+  cancelTask(sessionIdInput: unknown, detail = "任务已由用户取消"): void {
+    const sessionId = sessionIdSchema.parse(sessionIdInput);
+    if (this.mainRuns.has(sessionId)) {
+      this.mainRuns.cancel(sessionId, detail);
+      return;
+    }
+    if (this.currentSession?.id !== sessionId) {
+      throw new HammerCodeError("不能停止另一条聊天的操作", "SESSION_OPERATION_MISMATCH", true);
+    }
+    if (this.undoAbort) {
+      this.undoAbort.abort(new DOMException("用户取消撤销", "AbortError"));
+      return;
+    }
+    if (this.contextCompactionAbort) {
+      this.contextCompactionAbort.abort(new DOMException("用户停止上下文压缩", "AbortError"));
+      return;
+    }
+    throw new HammerCodeError("这条聊天当前没有可停止的任务", "MAIN_AGENT_NOT_RUNNING", true);
   }
 
-  resolveApproval(idInput: unknown, approved: unknown): void {
+  resolveApproval(sessionIdInput: unknown, idInput: unknown, approved: unknown): void {
+    const sessionId = sessionIdSchema.parse(sessionIdInput);
     const id = approvalIdSchema.parse(idInput);
     if (typeof approved !== "boolean") {
       throw new HammerCodeError("审批结果必须为布尔值", "INVALID_APPROVAL", true);
     }
-    this.approvals?.resolve(id, approved);
+    if (this.mainRuns.has(sessionId)) {
+      this.mainRuns.resolveApproval(sessionId, id, approved);
+      return;
+    }
+    if (
+      this.currentSession?.id !== sessionId ||
+      !this.currentSession.pendingUndo ||
+      this.currentSession.pendingApproval?.id !== id ||
+      !this.undoApprovals
+    ) {
+      throw new HammerCodeError("审批不属于这条聊天或已经失效", "APPROVAL_SESSION_MISMATCH", true);
+    }
+    this.undoApprovals.resolve(id, approved);
   }
 
   async requestUndo(idInput: unknown): Promise<void> {
     const changeId = changeIdSchema.parse(idInput);
     const session = this.currentSession;
     if (!session) throw new HammerCodeError("当前没有聊天", "NO_SESSION", true);
-    if (this.isBusy()) throw new HammerCodeError("已有任务或撤销正在运行", "SESSION_BUSY", true);
+    if (
+      this.mainRuns.isWorkspaceOccupied(session.workspaceRoot) ||
+      this.isUndoBusy() ||
+      this.contextCompactionAbort
+    ) {
+      throw new HammerCodeError("当前项目已有任务、撤销或压缩正在运行", "SESSION_BUSY", true);
+    }
     if (!["completed", "cancelled", "failed"].includes(session.status)) {
       throw new HammerCodeError("只能在当前轮次结束后撤销文件修改", "SESSION_NOT_TERMINAL", true);
     }
@@ -928,7 +1031,7 @@ export class AppController {
       createdAt: systemClock.now().toISOString(),
     };
     session.updatedAt = systemClock.now().toISOString();
-    this.approvals = approvals;
+    this.undoApprovals = approvals;
     this.undoAbort = abort;
     await this.store.save(session);
     this.emit({ type: "session_snapshot", session });
@@ -938,11 +1041,15 @@ export class AppController {
   }
 
   async clearSession(): Promise<void> {
-    if (this.isBusy()) throw new HammerCodeError("请先取消当前任务或撤销", "SESSION_BUSY", true);
+    if (
+      (this.currentSession && this.mainRuns.has(this.currentSession.id)) ||
+      this.isUndoBusy() ||
+      this.contextCompactionAbort
+    ) {
+      throw new HammerCodeError("请先取消当前聊天的任务、压缩或撤销", "SESSION_BUSY", true);
+    }
     this.destroySideChat();
     this.currentSession = null;
-    this.runner = null;
-    this.approvals = null;
     await this.store.clear();
     await this.refreshNavigation();
     this.emitWorkspaceChanged();
@@ -984,7 +1091,7 @@ export class AppController {
   }
 
   private isRunning(): boolean {
-    return this.runningSessionId !== null;
+    return this.mainRuns.activeCount > 0;
   }
 
   private isUndoBusy(): boolean {
@@ -1014,7 +1121,9 @@ export class AppController {
 
   shutdown(): void {
     this.destroySideChat(false);
-    this.cancelTask("应用关闭，正在运行的任务已安全取消；重新打开后不会重放工具调用。");
+    this.mainRuns.cancelAll("应用关闭，正在运行的任务已安全取消；重新打开后不会重放工具调用。");
+    this.undoAbort?.abort(new DOMException("应用关闭，撤销已取消", "AbortError"));
+    this.contextCompactionAbort?.abort(new DOMException("应用关闭，上下文压缩已取消", "AbortError"));
   }
 
   private requireSideChat(idInput: unknown): EphemeralSideChat {
@@ -1035,21 +1144,30 @@ export class AppController {
   private createModelClient(
     modelConfig: RuntimeConfig["models"]["fast"],
     overrides: { thinking?: "enabled" | "disabled"; maxOutputTokens?: number; requestTimeoutMs?: number } = {},
-  ): OpenAICompatibleChatClient {
+  ): ModelClient {
+    const resolved = {
+      ...modelConfig,
+      thinking: overrides.thinking ?? modelConfig.thinking,
+      maxOutputTokens: overrides.maxOutputTokens ?? modelConfig.maxOutputTokens,
+      requestTimeoutMs: overrides.requestTimeoutMs ?? modelConfig.requestTimeoutMs,
+    };
+    if (this.runtimeOverrides.createModelClient) {
+      return this.runtimeOverrides.createModelClient(resolved);
+    }
     return new OpenAICompatibleChatClient({
       provider: modelConfig.provider,
       apiKey: modelConfig.apiKey,
       baseUrl: modelConfig.apiBaseUrl,
       model: modelConfig.model,
-      thinking: overrides.thinking ?? modelConfig.thinking,
+      thinking: resolved.thinking,
       reasoningEffort: modelConfig.reasoningEffort,
-      maxOutputTokens: overrides.maxOutputTokens ?? modelConfig.maxOutputTokens,
-      requestTimeoutMs: overrides.requestTimeoutMs ?? modelConfig.requestTimeoutMs,
+      maxOutputTokens: resolved.maxOutputTokens,
+      requestTimeoutMs: resolved.requestTimeoutMs,
     });
   }
 
   private async compactContextWithRetry(
-    model: OpenAICompatibleChatClient,
+    model: ModelClient,
     session: AgentSession,
     signal: AbortSignal,
   ): Promise<ModelContextCompactionResult & { attempts: number }> {
@@ -1122,7 +1240,7 @@ export class AppController {
           // Title generation never changes the outcome of the main task.
         }
       }
-      if (this.runningSessionId === sessionId) {
+      if (this.mainRuns.has(sessionId)) {
         this.pendingTitles.set(sessionId, title);
         return;
       }
@@ -1194,7 +1312,7 @@ export class AppController {
       }
       throw error;
     } finally {
-      this.approvals = null;
+      this.undoApprovals = null;
       this.undoAbort = null;
     }
   }
@@ -1224,7 +1342,7 @@ export class AppController {
 
   private async refreshNavigation(): Promise<void> {
     const state = await this.store.loadState({
-      liveSessionIds: this.runningSessionId ? [this.runningSessionId] : [],
+      liveSessionIds: this.mainRuns.sessionIds,
     });
     this.currentSession = state.activeSession;
     this.sessions = state.sessions;

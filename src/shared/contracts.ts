@@ -647,6 +647,7 @@ export interface PublicRuntimeConfig {
   availableModels: PublicModelOption[];
   contextTokenBudget: number;
   maxAgentRounds: number;
+  maxConcurrentMainAgents: number;
   maxToolCalls: number;
   maxRunTimeMs: number;
   maxModelRetries: number;
@@ -700,6 +701,7 @@ export interface EphemeralSideChatState {
 
 export interface StartTaskInput extends SessionSettings {
   task: string;
+  sessionId: string | null;
 }
 
 export type RendererEvent =
@@ -768,8 +770,8 @@ export interface HammerCodeApi {
   uninstallSkill(skillKey: string): Promise<SkillInventorySnapshot>;
   startTask(input: StartTaskInput): Promise<{ sessionId: string }>;
   requestUndo(changeId: string): Promise<void>;
-  cancelTask(): Promise<void>;
-  resolveApproval(approvalId: string, approved: boolean): Promise<void>;
+  cancelTask(sessionId: string): Promise<void>;
+  resolveApproval(sessionId: string, approvalId: string, approved: boolean): Promise<void>;
   clearSession(): Promise<void>;
   onEvent(listener: (event: RendererEvent) => void): () => void;
 }

@@ -59,9 +59,9 @@ const api: HammerCodeApi = {
   uninstallSkill: (skillKey) => ipcRenderer.invoke("hammercode:uninstall-skill", skillKey),
   startTask: (request) => ipcRenderer.invoke("hammercode:start-task", request),
   requestUndo: (changeId) => ipcRenderer.invoke("hammercode:request-undo", changeId),
-  cancelTask: () => ipcRenderer.invoke("hammercode:cancel-task"),
-  resolveApproval: (approvalId, approved) =>
-    ipcRenderer.invoke("hammercode:resolve-approval", approvalId, approved),
+  cancelTask: (sessionId) => ipcRenderer.invoke("hammercode:cancel-task", sessionId),
+  resolveApproval: (sessionId, approvalId, approved) =>
+    ipcRenderer.invoke("hammercode:resolve-approval", sessionId, approvalId, approved),
   clearSession: () => ipcRenderer.invoke("hammercode:clear-session"),
   onEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: RendererEvent) => listener(payload);

@@ -16,11 +16,11 @@ Preload（contextBridge）
         │
         ▼
 Electron Main
-  ├─ AppController / SessionStore
+  ├─ AppController / MainAgentRunRegistry / SessionStore
   ├─ OpenAICompatibleChatClient
   │    ├─ DeepSeek provider profile
   │    └─ Zhipu provider profile
-  └─ AgentRunner
+  └─ AgentRunner（每条活动主聊天独立实例）
        ├─ Context manager
        ├─ Tool executor
        ├─ Workspace boundary
@@ -77,13 +77,13 @@ API key 只由 main process 从环境变量或 `.env` 加载。公开配置只�
 
 Token 估算采用保守字符启发式，不假装等于厂商 tokenizer。超过预算时保留初始用户目标和最近消息，把较早内容转换为明确标注的“本地压缩摘要”；压缩后仍超预算则终止，不发送不可控请求。
 
-会话快照区分 turn、用户消息、助手消息、tool call、tool result、状态转换、文件变更和终止原因。多工作区 v2 索引保存项目顺序、每个项目的聊天集合和活动聊天；每条聊天分别使用 0600 权限临时文件加原子 rename 保存。启动时如果发现聊天上次状态为请求中、待审批或执行中，会闭合未完成的 tool call、标记为 `interrupted/failed`，不会继续或重放副作用。应用运行期间，main process 会显式传入正在执行的聊天 ID，因此用户切换项目或聊天时不会把真实后台任务误判为崩溃残留。
+会话快照区分 turn、用户消息、助手消息、tool call、tool result、状态转换、文件变更和终止原因。多工作区 v4 索引保存项目顺序与状态、每个项目的聊天集合和活动聊天；每条聊天分别使用 0600 权限临时文件加原子 rename 保存，共享索引的读改写操作在 SessionStore 内串行提交，避免并发会话保存互相覆盖。启动时如果发现聊天上次状态为请求中、待审批或执行中，会闭合未完成的 tool call、标记为 `interrupted/failed`，不会继续或重放副作用。应用运行期间，main process 会显式传入全部正在执行的聊天 ID，因此用户切换项目或聊天时不会把真实后台任务误判为崩溃残留。
 
-AgentRunner 每次只运行一条聊天，但导航与执行生命周期解耦。后台 session 更新通过独立事件写回对应项目，不改变用户当前选中项；全局仍只允许一项 agent 任务，避免审批与工具执行并发竞态。
+单个 AgentRunner 只运行一条聊天；AppController 通过 `sessionId` 注册表管理最多 3 个不同工作区的独立实例，并用工作区真实路径唯一占用阻止同项目第二个主任务。每个实例拥有自己的模型、审批器、取消控制器、工具与预算快照；取消和审批 IPC 同时校验 sessionId。后台 session 更新通过独立事件写回对应项目，不改变用户当前选中项。
 
 ## 当前限制
 
-- 当前为单窗口、多工作区导航和单 agent 执行；暂不并行运行多条 agent 任务。
+- 当前为单窗口、多工作区导航；不同工作区最多运行 3 条主 Agent 任务，同一工作区仍只允许 1 条。暂不自动创建 Git worktree，也不支持跨主 Agent 通信或任务迁移。
 - 文本搜索是本地安全实现，优先可靠性而非大型仓库索引性能。
 - 文本修改同时支持完整写入和 `old_text → new_text` 精确替换；二进制文件及大于 1 MB 的文件不支持写入、删除审查或撤销。
 - 撤销粒度是单次文件副作用，不是 Git commit；命令产生的文件变化不进入自动撤销记录。

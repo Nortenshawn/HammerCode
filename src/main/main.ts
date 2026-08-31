@@ -183,11 +183,11 @@ function registerIpc(appController: AppController): void {
   handle("hammercode:uninstall-skill", (skillKey: unknown) => appController.uninstallSkill(skillKey));
   handle("hammercode:start-task", (request: unknown) => appController.startTask(request));
   handle("hammercode:request-undo", (changeId: unknown) => appController.requestUndo(changeId));
-  handle("hammercode:cancel-task", () =>
-    appController.cancelTask("用户点击了停止按钮，任务已安全取消。"),
+  handle("hammercode:cancel-task", (sessionId: unknown) =>
+    appController.cancelTask(sessionId, "用户点击了停止按钮，任务已安全取消。"),
   );
-  handle("hammercode:resolve-approval", (id: unknown, approved: unknown) =>
-    appController.resolveApproval(id, approved),
+  handle("hammercode:resolve-approval", (sessionId: unknown, id: unknown, approved: unknown) =>
+    appController.resolveApproval(sessionId, id, approved),
   );
   handle("hammercode:clear-session", () => appController.clearSession());
 }
