@@ -15,7 +15,12 @@ import type { AgentSession, RendererEvent } from "../src/shared/contracts";
 const directories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 10,
+  })));
 });
 
 class Deferred {

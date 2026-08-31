@@ -8,7 +8,7 @@
     <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white" />
     <img alt="Electron 44" src="https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white" />
     <img alt="TypeScript 7" src="https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&logoColor=white" />
-    <img alt="186 tests passed" src="https://img.shields.io/badge/tests-186%20passed-8DB95A" />
+    <img alt="202 tests passed" src="https://img.shields.io/badge/tests-202%20passed-8DB95A" />
     <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-111111" />
   </p>
 
@@ -16,7 +16,7 @@
     <a href="#快速开始">快速开始</a> ·
     <a href="#核心闭环">核心闭环</a> ·
     <a href="#架构与安全边界">架构</a> ·
-    <a href="#演示建议">演示</a> ·
+    <a href="#质量与验证证据">验证</a> ·
     <a href="#文档索引">文档</a>
   </p>
 </div>
@@ -102,7 +102,8 @@ flowchart TB
 
     subgraph Main[Electron Main · 本机能力边界]
       CTRL[AppController]
-      RUNNER[AgentRunner]
+      REGISTRY[MainAgentRunRegistry<br/>最多 3 个不同工作区]
+      RUNNER[AgentRunner × N]
       MODEL[OpenAI-compatible Client]
       TOOLS[LocalToolExecutor]
       STORE[Session / Credential / Memory / Skill Stores]
@@ -113,7 +114,7 @@ flowchart TB
     end
 
     UI --> IPC --> CTRL
-    CTRL --> RUNNER
+    CTRL --> REGISTRY --> RUNNER
     RUNNER <--> MODEL
     RUNNER --> TOOLS --> FILES
     CTRL <--> STORE
@@ -123,9 +124,9 @@ flowchart TB
 | --- | --- |
 | Renderer | `nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`，不能直接读文件、执行 Shell 或读取环境变量 |
 | Preload | 只暴露明确的 `window.hammerCode` IPC 方法，不提供任意 Node API |
-| Main | 独占模型访问、凭据、会话持久化、文件系统、审批和子进程生命周期 |
+| Main | 独占模型访问、凭据、会话持久化、文件系统、审批和子进程生命周期；按 session 管理有界主任务运行项 |
 | Agent Core | 不依赖 renderer；模型客户端、工具、审批、时钟和 ID 生成器通过端口注入，便于测试失败与取消分支 |
-| Workspace | 所有文件和 cwd 先规范化并校验真实路径，越界与明显破坏性操作在审批前阻断 |
+| Workspace | 所有文件和 cwd 先规范化并校验真实路径；同一真实工作区只允许一个主 Agent，避免写入、审批和状态相互干扰 |
 | Credentials | API key 只在 main process 使用；设置页保存时经 Electron `safeStorage` 加密，公开配置永不返回 key |
 
 更完整的设计说明见 [架构与安全设计](docs/ARCHITECTURE.md)。
@@ -148,7 +149,7 @@ cd HammerCode
 npm ci
 cp .env.example .env
 # 使用内置档位时在本地 .env 填写对应 API key；也可启动后在设置页新增自定义连接
-# 不要提交、截图或录屏展示 .env
+# .env 仅供本地使用，不得提交或公开
 npm run dev
 ```
 
@@ -180,22 +181,11 @@ npm run package:mac # 生成 release/mac-arm64/HammerCode.app
 4. 任务结束后查看累计改动、测试结果和终止原因，可在同一聊天继续纠正。
 5. 如需回退，选择最新可撤销文件变更，检查反向 diff 并再次批准。
 
-## 演示建议
-
-两分钟视频应只展示一个清楚的真实闭环：
-
-1. 选择预先准备的可丢弃工作区，提出“阅读代码、修复一个失败测试并验证”的任务。
-2. 快速展示只读工具自动执行、模型定位问题和 Plan。
-3. 展开一次精确修改 diff 并批准；随后展示本地测试命令、退出码与通过结果。
-4. 展示累计 diff 和最终 Markdown 总结，最后用一句话说明 renderer 隔离、工作区边界和历史工具不重放。
-
-不要在视频中打开 `.env`、系统凭据、应用数据目录或任何真实 API key。详细脚本见 [演示检查单](docs/DEMO.md)。
-
 ## 质量与验证证据
 
 - 严格 TypeScript 类型检查覆盖 renderer、main/preload/core 和 tests。
 - 当前基线为 34 个测试文件、202 项自动测试；覆盖状态机、流组装、跨项目主任务并发、AgentRunner、上下文、路径边界、命令策略、审批、持久化、撤销、BTW、项目记忆、Skill 和隔离子任务。
-- 真实 Fast 与 Strong 都通过正式 Electron main/preload/renderer 链路测试；在线证据包含读写、审批、命令、连续 turn、重启恢复、撤销、模型压缩和安全阻断。
+- 真实 Fast 与 Strong 都通过正式 Electron main/preload/renderer 链路测试；在线证据包含读写、审批、命令、连续 turn、跨项目并发、独立审批与取消、重启恢复、撤销、模型压缩和安全阻断。
 - Apple Silicon 目录包可以本地运行；当前未做代码签名、公证和 Mac App Store 沙箱。
 
 自动测试不是在线通过的替代品。每次真实验收使用 `/Users/norten/Developer/HammerTest` 授权沙箱并记录模型、实际副作用和结果，详见 [在线测试报告](docs/ONLINE_TEST_REPORT.md)。
@@ -204,11 +194,11 @@ npm run package:mac # 生成 release/mac-arm64/HammerCode.app
 
 | 选择 | 原因 | 代价 |
 | --- | --- | --- |
-| Electron + TypeScript | 同一语言覆盖桌面 UI、IPC、网络、文件和测试；适合 macOS 演示 | 包体较大，正式分发仍需签名、公证与更强 OS 沙箱 |
+| Electron + TypeScript | 同一语言覆盖桌面 UI、IPC、网络、文件和测试，适合本地桌面交互 | 包体较大，正式分发仍需签名、公证与更强 OS 沙箱 |
 | OpenAI-compatible Chat Completions | 复用稳定消息与原生 tool calling 边界，同时保留 provider profile | 不同厂商仍有 thinking、tool stream 等字段差异 |
 | 模型只提案，本地执行 | 参数、权限和副作用都可审计 | 比直接给 Shell 多一层状态和错误处理复杂度 |
 | 保守字符 token 估算 | 无需绑定厂商 tokenizer，行为可测试 | 不是精确 token 数，服务端仍可能返回长度错误 |
-| JSON 本地持久化 + 原子替换 | 可阅读、可迁移、适合单机考核项目 | 不适合高并发和超大规模历史 |
+| JSON 本地持久化 + 原子替换 | 可阅读、可迁移；索引操作串行化后能支持当前有界并发 | 不适合高并发和超大规模历史 |
 | 哈希与反向 diff 撤销 | 不覆盖用户在 agent 之后做的外部修改 | 只覆盖受控文本文件工具，不等价于 Git 回滚 |
 
 ## 项目结构
@@ -222,12 +212,12 @@ src/
 └── shared/     # main/preload/renderer 共用的公开数据契约
 tests/          # 纯函数、边界、失败/取消与模拟端到端测试
 skills/         # 随应用发布的内置标准 SKILL.md 包
-docs/           # 架构、计划、状态、在线证据和演示材料
+docs/           # 架构、计划、状态、调研与在线验证证据
 ```
 
 ## 当前边界
 
-- 正式演示目标是 Apple Silicon macOS；目录包未签名、未公证。
+- 当前支持平台是 Apple Silicon macOS；目录包未签名、未公证。
 - 全局最多同时运行 3 条不同工作区的主 Agent 任务；同一工作区只允许 1 条，隔离子任务仍不能直接写盘。
 - 自动撤销只覆盖 HammerCode 文件工具产生的、不超过 1 MB 的 UTF-8 文本变更；命令产生的任意文件变化不进入撤销链。
 - 通用 Shell 无法被静态规则证明绝对安全，因此只有很小的本地验证白名单可自动执行，其他命令仍需权限判断或审批。
@@ -240,10 +230,9 @@ docs/           # 架构、计划、状态、在线证据和演示材料
 - [最终收敛与开发计划](docs/DEVELOPMENT_PLAN.md)
 - [历史完成状态](docs/DEVELOPMENT_STATUS.md)
 - [真实模型与桌面验收证据](docs/ONLINE_TEST_REPORT.md)
-- [两分钟演示检查单](docs/DEMO.md)
 - [项目记忆调研](docs/MEMORY_SYSTEM_RESEARCH.md)
 - [Skill 系统调研](docs/SKILL_SYSTEM_RESEARCH.md)
-- [最终提交 README.txt 初稿](README.txt)
+- [提交说明（README.txt）](README.txt)
 
 ## 独立实现声明
 
