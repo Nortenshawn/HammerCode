@@ -118,7 +118,7 @@ describe("HammerCode runtime identity", () => {
     });
     const strong = await captureTurn({
       modelTier: "strong",
-      modelName: "glm-5.3-flash",
+      modelName: "glm-5.3",
       permissionMode: "full_access",
       workspaceRoot: "/tmp/project-b",
       maxRounds: 7,
@@ -129,14 +129,14 @@ describe("HammerCode runtime identity", () => {
     const strongPrompt = requestSystemPrompt(strong.request);
 
     expect(fast.session.turns[0]).toMatchObject({ modelTier: "fast", modelName: "deepseek-v4-flash", permissionMode: "ask" });
-    expect(strong.session.turns[0]).toMatchObject({ modelTier: "strong", modelName: "glm-5.3-flash", permissionMode: "full_access" });
+    expect(strong.session.turns[0]).toMatchObject({ modelTier: "strong", modelName: "glm-5.3", permissionMode: "full_access" });
     expect(fastPrompt).toContain("Fast · deepseek-v4-flash");
     expect(fastPrompt).toContain("权限：请求批准");
     expect(fastPrompt).toContain("绑定工作区：/tmp/project-a");
     expect(fastPrompt).toContain("轮次 1/3");
     expect(fastPrompt).toContain("工具 0/5");
     expect(fastPrompt).toContain("时间 0/60 秒");
-    expect(strongPrompt).toContain("Strong · glm-5.3-flash");
+    expect(strongPrompt).toContain("Strong · glm-5.3");
     expect(strongPrompt).toContain("权限：完全访问");
     expect(strongPrompt).toContain("绑定工作区：/tmp/project-b");
     expect(strongPrompt).toContain("轮次 1/7");
@@ -245,7 +245,7 @@ describe("HammerCode runtime identity", () => {
   it("retains product identity and workspace safety after conversation compression", () => {
     const runtimePrompt = systemPromptWithRuntimeIdentity(DEFAULT_SYSTEM_PROMPT, {
       modelTier: "strong",
-      modelName: "glm-5.3-flash",
+      modelName: "glm-5.3",
       permissionMode: "ask",
       workspaceRoot: "/tmp/safe-workspace",
       workspaceAccess: "bound",

@@ -27,7 +27,7 @@ function config(
     provider,
     apiKey: "test-placeholder",
     baseUrl: provider === "zhipu" ? "https://open.bigmodel.cn/api/paas/v4" : "https://api.deepseek.com",
-    model: provider === "zhipu" ? "glm-5.3-flash" : "deepseek-v4-flash",
+    model: provider === "zhipu" ? "glm-5.3" : "deepseek-v4-flash",
     thinking: provider === "zhipu" ? "enabled" : "disabled",
     reasoningEffort: provider === "zhipu" ? "max" : "high",
     maxOutputTokens: 4096,
@@ -53,10 +53,10 @@ describe("OpenAI-compatible provider requests", () => {
     expect(body).not.toHaveProperty("temperature");
   });
 
-  it("builds the GLM-5.3-Flash streaming tool request without DeepSeek-only fields", () => {
+  it("builds the GLM-5.3 streaming tool request without DeepSeek-only fields", () => {
     const body = buildChatCompletionBody(config("zhipu"), request);
     expect(body).toMatchObject({
-      model: "glm-5.3-flash",
+      model: "glm-5.3",
       stream: true,
       tool_choice: "auto",
       tool_stream: true,

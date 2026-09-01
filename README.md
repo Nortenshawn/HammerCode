@@ -56,7 +56,7 @@ flowchart LR
 ### 自主 Agent Core
 
 - OpenAI-compatible `POST /chat/completions`、Bearer 鉴权、SSE 流式文本、`reasoning_content` 和分片 tool calls。
-- `fast` / `strong` 是本调试与验收版本的内置默认档位，分别使用 `deepseek-v4-flash` 与 `glm-5.3-flash`；用户也可保存自定义名称、endpoint、API key 和模型 ID 的 OpenAI-compatible 连接。
+- `fast` / `strong` 是本调试与验收版本的内置默认档位，分别使用 `deepseek-v4-flash` 与 `glm-5.3`；用户也可保存自定义名称、endpoint、API key 和模型 ID 的 OpenAI-compatible 连接。
 - 自定义连接选择既有 Fast/Strong 兼容档位，复用经过校验的 provider 请求配置；实际连接、模型、权限和预算在每个 turn 开始时固化，不在失败时静默切换。
 - 显式状态机：`idle → requesting → awaiting_approval / executing_tool → completed / cancelled / failed`。
 - 有界重试、轮次/工具/运行时间/输出预算，以及 `stop`、`tool_calls`、`length`、内容策略、资源不足、取消等独立终止语义。
@@ -158,9 +158,9 @@ npm run dev
 | 档位 | 默认模型 | 默认 Base URL | 思考/推理 |
 | --- | --- | --- | --- |
 | Fast | `deepseek-v4-flash` | `https://api.deepseek.com` | thinking enabled，`reasoning_effort=high` |
-| Strong | `glm-5.3-flash` | `https://open.bigmodel.cn/api/paas/v4` | thinking enabled，`reasoning_effort=max` |
+| Strong | `glm-5.3` | `https://open.bigmodel.cn/api/paas/v4` | thinking enabled，`reasoning_effort=max` |
 
-两档默认单次输出预算均为 32K tokens，请求超时为 600 秒。设置页还可新增自定义 OpenAI-compatible 连接；连接信息由用户填写，运行时选择 Fast 或 Strong 兼容档位。开发模式从仓库根目录 `.env` 加载本地配置；打包应用也可从 `~/Library/Application Support/HammerCode/.env` 加载。真实 `.env` 已被 Git 忽略。
+Strong 已按[智谱 GLM-5.3 官方文档](https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3)迁移：模型支持 1M 上下文、128K 最大输出并强制开启思考；HammerCode 仍采用更保守的 32K 单次输出预算。两档请求超时均为 600 秒。设置页还可新增自定义 OpenAI-compatible 连接；连接信息由用户填写，运行时选择 Fast 或 Strong 兼容档位。开发模式从仓库根目录 `.env` 加载本地配置；打包应用也可从 `~/Library/Application Support/HammerCode/.env` 加载。真实 `.env` 已被 Git 忽略。
 
 ### 检查与打包
 

@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { z } from "zod";
 import { HammerCodeError } from "../core/types";
 import type { ModelTier, PublicModelConfig, PublicModelConnection, PublicRuntimeConfig } from "../shared/contracts";
+import { configuredStrongModelId, DEFAULT_FAST_MODEL_ID } from "./model-defaults";
 
 const modelConfigSchema = z.object({
   provider: z.enum(["deepseek", "zhipu"]),
@@ -83,7 +84,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
           process.env.DEEPSEEK_MODEL ??
           process.env.HAMMERCODE_MODEL ??
           process.env.MODEL ??
-          "deepseek-v4-flash",
+          DEFAULT_FAST_MODEL_ID,
         thinking:
           process.env.HAMMERCODE_FAST_THINKING ??
           process.env.HAMMERCODE_THINKING ??
@@ -106,7 +107,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
           process.env.GLM_API_BASE_URL ??
           process.env.ZHIPU_API_BASE_URL ??
           "https://open.bigmodel.cn/api/paas/v4",
-        model: process.env.GLM_MODEL ?? "glm-5.3-flash",
+        model: configuredStrongModelId(process.env.GLM_MODEL),
         thinking: "enabled",
         reasoningEffort: process.env.HAMMERCODE_STRONG_REASONING_EFFORT ?? "max",
         maxOutputTokens: readInteger(
@@ -135,7 +136,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
   }
   if (parsed.data.models.strong.maxOutputTokens > 131_072) {
     throw new HammerCodeError(
-      "运行配置无效：models.strong.maxOutputTokens 超过 GLM-5.3-Flash 的 128K 上限",
+      "运行配置无效：models.strong.maxOutputTokens 超过 GLM-5.3 的 128K 上限",
       "INVALID_CONFIG",
       true,
     );

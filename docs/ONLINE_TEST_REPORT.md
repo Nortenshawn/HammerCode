@@ -627,3 +627,20 @@ Fast 在 `Phase16Fast` 以请求批准模式调用 `write_file` 创建 `isolated
 - 补充长任务产物：`Phase4FastAsk/phase16-fast-approval.txt`、`Phase4FastAsk/phase16-slow.py`、`phase16-strong-slow.py`，全部位于用户授权的 HammerTest 沙箱并保留供人工复核。
 - 验收结束后进程表中没有 `phase16-slow.py` 或 `phase16-strong-slow.py` 残留进程；所有聊天均为 completed、cancelled 或 failed/interrupted，没有活动标记。
 - 离线自动测试覆盖错误 session/approval 组合、同时批准/拒绝、三任务上限、第四任务拒绝、启动失败释放、真实路径别名、共享索引并发保存和多个 live session 冷启动恢复。最终严格类型检查、34 个测试文件共 202 项测试、生产构建、Apple Silicon 目录包和生产依赖审计全部通过。
+
+## HC-ONLINE-2026-09-01-01
+
+- 时间：2026-09-01 19:46–19:50（Asia/Shanghai）
+- 基线提交：`3d2c9c6`
+- 正式界面：Electron 开发构建，通过 main/preload/renderer、模型连接设置、正式 AgentRunner、SSE 与只读工具链路完成
+- 模型：真实 Strong · `glm-5.3`，请求批准模式，`thinking.type=enabled`，`reasoning_effort=max`
+- 工作区：`/Users/norten/Developer/HammerTest/Phase16Strong`
+- 凭据：复用正式 main process 已加密保存的原有 Strong key；没有读取、展示、打印、复制或更换 key
+
+### 连接迁移与真实请求
+
+启动新版 Electron 后，输入区、状态栏和设置页均显示 `Strong · glm-5.3`。旧 `glm-5.3-flash` 连接的名称、智谱官方 endpoint 和已加密 key 保持不变，旧模型的连通状态被重置为“已配置”。设置页随后使用现有 key 检测 `https://open.bigmodel.cn/api/paas/v4/models`，发现 10 个模型，耗时 485 ms；选择 `glm-5.3` 保存后状态变为“已连接”，最近检测时间为 2026-09-01 19:46:45。
+
+在 Phase16Strong 新建聊天，通过正式模型选择器固定 `Strong · glm-5.3`，要求只使用 `list_files` 读取空工作区根目录。真实任务用时 12 秒，产生 1 次无需审批的 `list_files`，最终确认相对路径 `.` 为 0 个条目、无截断；轨迹与完成标签均显示 Strong，请求过程中没有模型回退。
+
+本轮没有创建、修改或删除文件，没有运行命令，也没有产生审批弹窗。离线回归另行覆盖环境变量旧值规范化、默认与自定义 Strong 连接迁移、密文 key/名称/endpoint 保留、旧连接检测状态清除以及 GLM-5.3 请求体字段。

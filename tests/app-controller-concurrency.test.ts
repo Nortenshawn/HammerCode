@@ -164,7 +164,7 @@ async function createHarness(options: { failModelCreationOnce?: boolean } = {}):
         provider: "zhipu",
         apiKey: "strong-test-key",
         apiBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
-        model: "glm-5.3-flash",
+        model: "glm-5.3",
         thinking: "enabled",
         reasoningEffort: "max",
         maxOutputTokens: 4_096,

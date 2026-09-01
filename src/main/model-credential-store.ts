@@ -15,6 +15,7 @@ import {
   type ModelTier,
   type PublicModelConnection,
 } from "../shared/contracts";
+import { migrateLegacyStrongModelId } from "./model-defaults";
 
 const MAX_PROBE_BYTES = 1_000_000;
 const MAX_MODELS = 500;
@@ -190,6 +191,20 @@ export class ModelCredentialStore {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") changed = true;
+    }
+
+    for (const connection of this.connections) {
+      if (connection.tier !== "strong") continue;
+      const migratedModel = migrateLegacyStrongModelId(connection.model);
+      if (migratedModel === connection.model) continue;
+      connection.model = migratedModel;
+      connection.models = [...new Set(connection.models.map(migrateLegacyStrongModelId))];
+      connection.status = connection.encryptedApiKey || (connection.kind === "default" && fallbacks.strong.apiKey)
+        ? "configured"
+        : "missing";
+      delete connection.lastCheckedAt;
+      delete connection.error;
+      changed = true;
     }
 
     for (const tier of MODEL_TIERS) {

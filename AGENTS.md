@@ -16,14 +16,14 @@
 ## 当前模型接入约定
 
 - 产品允许用户保存完全自定义的 OpenAI-compatible 连接信息，包括显示名称、endpoint、API key 和模型 ID。自定义连接必须选择现有 `fast` 或 `strong` 兼容档位，以复用经过校验的 provider 请求配置；不得允许用户注入任意请求字段或借此绕过协议、安全和预算校验。
-- `fast` 与 `strong` 是不可删除但可配置、可重命名的内置默认档位，也是当前调试与验收版本的最终默认选取：`fast` 默认使用 `deepseek-v4-flash`，默认 base URL 为 `https://api.deepseek.com`；`strong` 默认使用 `glm-5.3-flash`，默认智谱 base URL 为 `https://open.bigmodel.cn/api/paas/v4`。两者都使用 `POST /chat/completions`、Bearer 鉴权、SSE 流式输出和 function tool calling。
+- `fast` 与 `strong` 是不可删除但可配置、可重命名的内置默认档位，也是当前调试与验收版本的最终默认选取：`fast` 默认使用 `deepseek-v4-flash`，默认 base URL 为 `https://api.deepseek.com`；`strong` 默认使用 `glm-5.3`，默认智谱 base URL 为 `https://open.bigmodel.cn/api/paas/v4`。两者都使用 `POST /chat/completions`、Bearer 鉴权、SSE 流式输出和 function tool calling。
 - 模型档位、模型名、endpoint、思考模式、推理强度、输出预算和请求超时必须集中配置，不得散落硬编码在 agent core 中。每个 turn 必须固化实际连接引用、模型档位和模型名，不允许运行中切换或在失败时静默回退到另一连接或模型。
 - DeepSeek V4 的思考模式通过请求字段 `thinking: { type: "enabled" | "disabled" }` 控制，当前默认开启；`reasoning_effort` 只允许经过配置校验的 `low`、`high` 或 `max`，日常 agent 任务默认使用 `high`。思考模式请求不得发送官方明确不兼容的 `tool_choice`。
-- GLM-5.3-Flash 的 `thinking.type` 只允许 `enabled`，默认发送 `thinking.clear_thinking: false`、`reasoning_effort: max`、`stream: true` 和 `tool_stream: true`。应用必须按厂商配置生成请求体，不得把 DeepSeek 专用字段无条件发送给智谱，反之亦然。
+- GLM-5.3 的 `thinking.type` 只允许 `enabled`，默认发送 `thinking.clear_thinking: false`、`reasoning_effort: max`、`stream: true` 和 `tool_stream: true`。应用必须按厂商配置生成请求体，不得把 DeepSeek 专用字段无条件发送给智谱，反之亦然。
 - 流式解析必须兼容文本、`reasoning_content`、分片 `tool_calls`、`[DONE]` 以及 `stop`、`tool_calls`、`length`、`content_filter`、`insufficient_system_resource` 等结束原因。模型返回的 tool call 参数始终按不可信 JSON 处理。
-- 官方公布的模型上下文与输出上限只能作为能力上限，不能直接作为应用默认值。DeepSeek V4 当前输出能力上限按 384K 校验，GLM-5.3-Flash 按 128K 校验；应用默认两档均为 32K 单次输出、600 秒请求超时，并保持输入预算、输出预算、工具结果上限和 agent 轮次上限可配置。
+- 官方公布的模型上下文与输出上限只能作为能力上限，不能直接作为应用默认值。DeepSeek V4 当前输出能力上限按 384K 校验；GLM-5.3 上下文能力上限按 1M、输出能力上限按 128K 校验。应用默认两档均为 32K 单次输出、600 秒请求超时，并保持输入预算、输出预算、工具结果上限和 agent 轮次上限可配置。
 - 新增 Responses API、厂商扩展或其他模型时，必须先更新 `docs/DEVELOPMENT_PLAN.md` 并保持本地工具安全边界；OpenAI-compatible 模型应优先复用同一模型端口，不在核心循环中散布厂商分支。
-- 本节依据 2026-08-28 查阅的 DeepSeek 与智谱官方 API 文档维护；接口升级时应先核对各自官方模型页、Chat Completions、Tool Calls 和更新日志，再调整兼容层与测试。
+- 本节依据 2026-09-01 查阅的 DeepSeek 与智谱官方 API 文档维护；接口升级时应先核对各自官方模型页、Chat Completions、Tool Calls 和更新日志，再调整兼容层与测试。
 
 ## 不可违反的实现限制
 

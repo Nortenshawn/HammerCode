@@ -22,7 +22,7 @@ const cipher: CredentialCipher = {
 
 const fallbacks = {
   fast: { apiKey: "fast-env-key", apiBaseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" },
-  strong: { apiKey: "strong-env-key", apiBaseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.3-flash" },
+  strong: { apiKey: "strong-env-key", apiBaseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.3" },
 };
 
 async function directory(): Promise<string> {
@@ -66,6 +66,82 @@ describe("model credential store", () => {
     expect(store.resolve("builtin:strong", fallbacks)).toMatchObject({ tier: "strong", apiKey: "strong-env-key" });
     await expect(readFile(path.join(root, "api-connections.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect((await stat(path.join(root, "model-credentials.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  it("migrates saved GLM-5.3-Flash calls without replacing keys or connection metadata", async () => {
+    const root = await directory();
+    const encryptedApiKey = cipher.encrypt("persisted-strong-key").toString("base64");
+    const customId = "11111111-1111-4111-8111-111111111111";
+    await writeFile(path.join(root, "model-credentials.json"), JSON.stringify({
+      version: 2,
+      connections: [
+        {
+          id: "builtin:strong",
+          kind: "default",
+          name: "我的 Strong",
+          tier: "strong",
+          apiBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+          model: "glm-5.3-flash",
+          encryptedApiKey,
+          models: ["glm-5.3-flash", "glm-5.2"],
+          status: "connected",
+          lastCheckedAt: "2026-08-31T12:00:00.000Z",
+        },
+        {
+          id: customId,
+          kind: "custom",
+          name: "备用智谱",
+          tier: "strong",
+          apiBaseUrl: "https://relay.example/v1",
+          model: "glm-5.3-flash",
+          encryptedApiKey,
+          models: ["glm-5.3-flash"],
+          status: "connected",
+          lastCheckedAt: "2026-08-31T12:00:00.000Z",
+        },
+      ],
+    }));
+
+    const store = new ModelCredentialStore(root, cipher, vi.fn() as unknown as typeof fetch);
+    await store.load(fallbacks);
+
+    expect(store.resolve("builtin:strong", fallbacks)).toMatchObject({
+      name: "我的 Strong",
+      model: "glm-5.3",
+      apiKey: "persisted-strong-key",
+      apiBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      status: "configured",
+    });
+    expect(store.resolve(`connection:${customId}`, fallbacks)).toMatchObject({
+      name: "备用智谱",
+      model: "glm-5.3",
+      apiKey: "persisted-strong-key",
+      apiBaseUrl: "https://relay.example/v1",
+      status: "configured",
+    });
+
+    const persisted = JSON.parse(await readFile(path.join(root, "model-credentials.json"), "utf8")) as {
+      connections: Array<Record<string, unknown>>;
+    };
+    expect(persisted.connections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "builtin:strong",
+        model: "glm-5.3",
+        encryptedApiKey,
+        models: ["glm-5.3", "glm-5.2"],
+        status: "configured",
+      }),
+      expect.objectContaining({
+        id: customId,
+        model: "glm-5.3",
+        encryptedApiKey,
+        models: ["glm-5.3"],
+        status: "configured",
+      }),
+    ]));
+    expect(persisted.connections).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ lastCheckedAt: expect.any(String) }),
+    ]));
   });
 
   it("discovers models, adds a connection, renames defaults and deletes only custom entries", async () => {
