@@ -43,6 +43,7 @@ import { detectComposerToken, replaceComposerToken } from "./composer-tokens";
 import { computeWorkbenchLayout, DEFAULT_PANEL_RATIO, panelRatioFromDivider } from "./panel-layout";
 import { memoryDescription, memorySourceTitle, memoryTitle } from "./memory-presentation";
 import { ACTIVE_MAIN_STATUSES, deriveMainRunUiState } from "./main-run-state";
+import { permissionSelectionAction } from "./permission-selection";
 
 const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -1672,30 +1673,21 @@ export function App() {
   };
 
   const choosePermission = (nextPermission: PermissionMode) => {
-    if (nextPermission !== "full_access") {
+    if (permissionSelectionAction(nextPermission) === "persist") {
       void persistSettings(modelRef, nextPermission);
       return;
     }
-    let confirmed = false;
-    try { confirmed = window.localStorage.getItem("hammercode.full-access-warning") === "acknowledged"; }
-    catch { confirmed = false; }
-    if (!confirmed) {
-      setShowFullAccessWarning(true);
-      return;
-    }
-    void persistSettings(modelRef, nextPermission);
+    setShowFullAccessWarning(true);
   };
 
   const confirmFullAccess = () => {
-    try { window.localStorage.setItem("hammercode.full-access-warning", "acknowledged"); }
-    catch { /* The warning is still acknowledged for this selection. */ }
     setShowFullAccessWarning(false);
     void persistSettings(modelRef, "full_access");
   };
 
   const submit = async () => {
     const serializedTask = serializeComposerTask(task, composerEntities);
-    if (!serializedTask || !workspaceRoot || isBusy || anotherSessionInWorkspaceIsRunning || mainAgentLimitReached || !selectedModel?.hasApiKey) return;
+    if (!serializedTask || !workspaceRoot || isBusy || settingsBusy || anotherSessionInWorkspaceIsRunning || mainAgentLimitReached || !selectedModel?.hasApiKey) return;
     setBusy(true);
     autoScrollRef.current = true;
     setShowJumpToLatest(false);
@@ -1932,7 +1924,7 @@ export function App() {
               </div>
               {isRunning || contextCompacting
                 ? <button key="stop" className="composer-stop" onClick={() => session && window.hammerCode.cancelTask(session.id)} aria-label={contextCompacting ? "停止上下文压缩" : "停止任务"}><Icon name="stop" size={15}/></button>
-                : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={(!task.trim() && composerEntities.length === 0) || !workspaceRoot || isBusy || anotherSessionInWorkspaceIsRunning || mainAgentLimitReached || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
+                : <button key="send" className="send-button" onClick={(event) => { event.currentTarget.blur(); void submit(); }} disabled={(!task.trim() && composerEntities.length === 0) || !workspaceRoot || isBusy || settingsBusy || anotherSessionInWorkspaceIsRunning || mainAgentLimitReached || busy || !selectedModel?.hasApiKey} aria-label="发送任务"><Icon name="arrow-up" size={18}/></button>}
             </div>
           </div>
         </section>}

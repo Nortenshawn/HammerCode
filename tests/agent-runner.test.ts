@@ -368,6 +368,47 @@ describe("agent runner", () => {
     expect(await readFile(path.join(workspace, "auto.txt"), "utf8")).toBe("approved by mode\n");
   });
 
+  it("auto-approves a statically validated local command sequence in full access mode", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "hammercode-full-command-"));
+    workspaces.push(workspace);
+    const boundary = await WorkspaceBoundary.create(workspace);
+    const { ids, clock } = fixtures();
+    let approvalRequests = 0;
+    const model = new ScriptedModel([
+      [{ toolCallDeltas: [{
+        index: 0,
+        id: "call_local_sequence",
+        name: "run_command",
+        arguments: JSON.stringify({ command: "node --version && echo compound-ok" }),
+      }], finishReason: "tool_calls" }],
+      [{ content: "本地验证完成。", finishReason: "stop" }],
+    ]);
+    const runner = new AgentRunner(
+      {
+        model,
+        tools: new LocalToolExecutor(boundary, ids),
+        approvals: { request: async () => { approvalRequests += 1; return false; } },
+        ids,
+        clock,
+      },
+      { maxRounds: 3, contextTokenBudget: 10_000, systemPrompt: "system" },
+    );
+
+    const result = await runner.start(
+      "运行两段本地验证命令",
+      workspace,
+      { modelTier: "fast", permissionMode: "full_access" },
+    );
+
+    expect(approvalRequests).toBe(0);
+    expect(result.toolTraces[0]).toMatchObject({
+      status: "succeeded",
+      authorization: "full_access",
+      approvalPolicy: "permission_mode",
+    });
+    expect(result.toolTraces[0]?.result?.output).toContain("compound-ok");
+  });
+
   it("keeps hard path blocking active in full access mode", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "hammercode-full-block-"));
     workspaces.push(workspace);

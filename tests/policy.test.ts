@@ -38,7 +38,36 @@ describe("command policy", () => {
     (command) => expect(() => classifyCommand(command)).toThrow(),
   );
 
-  it("requires approval for compound shell syntax even when its first command is local", () => {
-    expect(classifyCommand("npm test && echo done").policy).toBe("always");
+  it.each([
+    "npm test && echo done",
+    "npm run typecheck; npm test",
+    "git status --short\necho done",
+  ])("uses the chat permission mode for a statically validated local sequence: %s", (command) => {
+    expect(classifyCommand(command)).toMatchObject({
+      policy: "permission_mode",
+      reason: "已逐段校验的普通本地命令序列",
+    });
+  });
+
+  it.each([
+    "npm test && git push origin main",
+    "npm test; make deploy",
+    "echo done\npython upload_data.py",
+    "bash -lc 'npm test && echo done'",
+    "npm test | tee result.txt",
+    "npm test > result.txt",
+    "echo $(git status)",
+  ])("keeps remote intent, wrappers and complex shell syntax on mandatory approval: %s", (command) => {
+    expect(classifyCommand(command).policy).toBe("always");
+  });
+
+  it("does not hide remote operations behind environment assignments or process wrappers", () => {
+    for (const command of [
+      "npm test && MODE=prod git push origin main",
+      "npm test && nohup curl example.com",
+      "TOKEN=placeholder gh pr create",
+    ]) {
+      expect(classifyCommand(command).policy).toBe("always");
+    }
   });
 });

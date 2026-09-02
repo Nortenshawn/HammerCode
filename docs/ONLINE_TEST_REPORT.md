@@ -644,3 +644,21 @@ Fast 在 `Phase16Fast` 以请求批准模式调用 `write_file` 创建 `isolated
 在 Phase16Strong 新建聊天，通过正式模型选择器固定 `Strong · glm-5.3`，要求只使用 `list_files` 读取空工作区根目录。真实任务用时 12 秒，产生 1 次无需审批的 `list_files`，最终确认相对路径 `.` 为 0 个条目、无截断；轨迹与完成标签均显示 Strong，请求过程中没有模型回退。
 
 本轮没有创建、修改或删除文件，没有运行命令，也没有产生审批弹窗。离线回归另行覆盖环境变量旧值规范化、默认与自定义 Strong 连接迁移、密文 key/名称/endpoint 保留、旧连接检测状态清除以及 GLM-5.3 请求体字段。
+
+## HC-ONLINE-2026-09-02-01
+
+- 时间：2026-09-02 12:29–12:31（Asia/Shanghai）
+- 正式界面：重新构建的 Apple Silicon 目录包，通过 renderer、preload、main process、正式 AgentRunner、真实模型和本地工具链完成
+- 模型：真实 Fast · `deepseek-v4-flash`，完全访问模式
+- 工作区：`/Users/norten/Developer/HammerTest`
+- 凭据：仅由正式 main process 读取既有加密配置；界面、终端、测试输出和本报告均未读取、展示、打印或复制 key
+
+### 完全访问警告与本地复合命令
+
+macOS Computer Use 可以读取辅助功能树和截图，但点击动作持续返回原生控制管道断开；因此复用既有验收方式，通过目录包自身的本地调试协议触发实际 DOM 控件和 React 事件。测试仍经过同一 preload IPC、Controller、会话持久化、模型请求、工具准备、权限判断和执行链路，没有直接调用 Controller 或工具执行器。
+
+新建 HammerTest 聊天后，浏览器存储中保留旧版全局确认值 `acknowledged`。第一次从“请求批准”选择“完全访问”仍立即显示“启用完全访问？”警告，选择器在确认前保持 `ask`；确认后变为 `full_access`。任务完成后切回 `ask` 再次选择 `full_access`，警告第二次正常出现，证明旧全局确认值和同一聊天先前确认都不会静默跳过本次切换。
+
+随后要求真实 Fast 建立两步 Plan，只执行一次精确命令 `node --version && npm --version`，且不创建或修改文件。任务用时 15 秒并正常完成：两次 `update_plan` 均为 `not_required`，唯一 `run_command` 的 `approvalPolicy` 为 `permission_mode`、`authorization` 为 `full_access`，全过程没有审批弹窗。会话和 turn 权限快照均为 `full_access`，`pendingApproval=false`、终止原因为 `completed`、文件变更为 0。
+
+离线回归覆盖可逐段校验的 `&&`、`;` 和换行本地序列，以及仍须强制审批的远端子命令、环境变量/进程包装器、`bash -lc`、管道、重定向和命令替换。最终 36 个测试文件共 218 项测试、严格类型检查、生产构建和 Apple Silicon 目录包均通过。

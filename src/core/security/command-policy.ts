@@ -40,7 +40,14 @@ export interface CommandClassification {
 }
 
 function isSimpleCommand(command: string): boolean {
-  return /^[a-zA-Z0-9_@./:+,=-]+(?:\s+[a-zA-Z0-9_@./:+,=-]+)*$/.test(command.trim());
+  return /^[a-zA-Z0-9_@./:+,=-]+(?:[ \t]+[a-zA-Z0-9_@./:+,=-]+)*$/.test(command.trim());
+}
+
+function splitPlainCommandSequence(command: string): string[] | null {
+  if (!/(?:&&|\|\||;|\r?\n)/.test(command)) return null;
+  const commands = command.split(/(?:&&|\|\||;|\r?\n)/).map((item) => item.trim());
+  if (commands.some((item) => !item || !isSimpleCommand(item))) return null;
+  return commands;
 }
 
 function isAutoCommand(command: string): boolean {
@@ -66,8 +73,15 @@ function isAutoCommand(command: string): boolean {
 function hasRemoteOrReleaseIntent(command: string): boolean {
   if (!isSimpleCommand(command)) return false;
   const tokens = command.trim().split(/\s+/);
-  if (["env", "command", "xargs", "bash", "sh", "zsh", "fish"].includes(tokens[0])) return true;
-  if (tokens[0] === "git" && tokens.some((token) => /^(?:push|pull|fetch|clone)$/.test(token))) return true;
+  if (["env", "command", "xargs", "bash", "sh", "zsh", "fish", "nohup", "nice", "time", "timeout"].includes(tokens[0])) return true;
+  const gitIndex = tokens.indexOf("git");
+  if (gitIndex >= 0 && tokens.slice(gitIndex + 1).some((token) => /^(?:push|pull|fetch|clone)$/.test(token))) return true;
+  const remoteExecutables = new Set([
+    "gh", "glab", "curl", "wget", "scp", "sftp", "ssh", "rsync",
+    "vercel", "netlify", "firebase", "flyctl", "wrangler", "kubectl", "helm", "terraform", "pulumi",
+    "aws", "gcloud", "az", "doctl", "heroku",
+  ]);
+  if (tokens.some((token) => remoteExecutables.has(token))) return true;
   return tokens.some((token) => /(?:^|[-_:])(?:deploy|publish|release|upload)(?:$|[-_:])/i.test(token));
 }
 
@@ -90,14 +104,28 @@ export function classifyCommand(command: string): CommandClassification {
   for (const rule of ALWAYS_APPROVAL_PATTERNS) {
     if (rule.pattern.test(command)) return { policy: "always", reason: rule.reason };
   }
-  if (hasRemoteOrReleaseIntent(command)) {
-    return { policy: "always", reason: "命令包含远端、发布意图或可隐藏实际子命令的包装器" };
+  if (isSimpleCommand(command)) {
+    if (hasRemoteOrReleaseIntent(command)) {
+      return { policy: "always", reason: "命令包含远端、发布意图或可隐藏实际子命令的包装器" };
+    }
+    if (isAutoCommand(command)) {
+      return { policy: "auto", reason: "受限的本地验证或只读 Git 命令" };
+    }
+    return { policy: "permission_mode", reason: "普通工作区命令" };
   }
-  if (!isSimpleCommand(command)) {
-    return { policy: "always", reason: "复合 Shell 命令无法静态证明为纯本地操作" };
+
+  const sequence = splitPlainCommandSequence(command);
+  if (sequence) {
+    for (const item of sequence) {
+      for (const rule of ALWAYS_APPROVAL_PATTERNS) {
+        if (rule.pattern.test(item)) return { policy: "always", reason: rule.reason };
+      }
+      if (hasRemoteOrReleaseIntent(item)) {
+        return { policy: "always", reason: "本地命令序列包含远端、发布意图或可隐藏实际子命令的包装器" };
+      }
+    }
+    return { policy: "permission_mode", reason: "已逐段校验的普通本地命令序列" };
   }
-  if (isAutoCommand(command)) {
-    return { policy: "auto", reason: "受限的本地验证或只读 Git 命令" };
-  }
-  return { policy: "permission_mode", reason: "普通工作区命令" };
+
+  return { policy: "always", reason: "Shell 包装器或复杂语法无法静态证明为纯本地操作" };
 }
