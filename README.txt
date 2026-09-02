@@ -1,18 +1,35 @@
-HammerCode
-Git 公开仓库（完整历史）：https://github.com/Nortenshawn/HammerCode
+HammerCode 编程智能体
 
-一、如何运行
-平台：Apple Silicon macOS，需 Node.js 22+、npm；PDF/Python 工具另需 pdftotext/Python 3。进入仓库后运行：
+公开仓库：https://github.com/Nortenshawn/HammerCode
+
+运行
+
+项目面向 Apple Silicon macOS，需要 Node.js 22+ 与 npm；PDF、Python 工具另需 pdftotext 与 Python 3。进入仓库后执行：
+
 npm ci
 cp .env.example .env
 npm run dev
-在未入库的 .env 填写模型 key。验证：npm run typecheck、npm test、npm run build；打包：npm run package:mac。凭据不得提交。
 
-二、核心功能
-HammerCode 是我用 Electron+TypeScript 独立实现的本地 coding agent，未封装现成产品、未使用 agent 框架/SDK。核心是“模型提出意图—本地校验—授权执行—结果回传—继续推理”：自研分片 tool call、上下文压缩、Plan、状态机、重试与终止。工具覆盖文件、搜索、PDF、Python、Shell、只读 Git；聊天绑定工作区，阻断路径穿越/symlink，修改先展示 diff、落盘前复查哈希。请求批准/完全访问、命令分层、取消恢复与旧工具不重放共同控制副作用。Fast=deepseek-v4-flash，Strong=glm-5.3，也支持自定义接口。
+在未入库的 .env 中填写模型密钥，也可在设置页添加 OpenAI-compatible 接口。npm run typecheck、npm test、npm run build 用于验证，npm run package:mac 生成应用包。真实凭据不得提交或出现在视频中。
 
-三、我的 AI 协作方式
-我先把题目和安全边界写成机器可读的 AGENTS.md，再用 DEVELOPMENT_PLAN.md 拆分阶段、风险和验收标准，让规划、实现、审查、测试、实机验收由多 Agent/角色协作，证据写入 docs。遵循“需求—架构—实现—自动测试—模型/Electron 验证—复盘—提交”，不直接接受生成代码。我用截图/录屏反馈交互与竞态，要求 AI 查官方文档、解释取舍、复现失败，只在 HammerTest 沙箱验证副作用。我负责产品决策、安全边界和验收，能解释设计。
+项目与核心实现
 
-四、验证与提交
-36 个测试文件、218 项测试通过。应用仅支持 Apple Silicon，未签名。只提交 README.txt 与 2 分钟内、200 MB 以下的 MP4，压缩为“姓名.zip”；不得包含凭据。截止 2026-09-02 24:00，之后不再推送。
+HammerCode 是我用 Electron、React 和 TypeScript 独立实现的本地 coding agent，没有封装现成产品或采用 agent 框架。Agent 循环接收 SSE 流，组装正文、思考内容和分片 tool call；模型提出工具意图后，程序校验参数、工作区和权限，在本机执行，再把结构化结果送回模型继续推理。显式状态机管理审批、执行、取消和失败，Plan、轮次、工具次数、输出量及运行时间均会持久化。临时服务异常有上限退避重试；任务中断后可在原聊天继续，旧工具不会重放。
+
+工具覆盖文件读写与搜索、PDF 解析、Python、Shell 和只读 Git。每条聊天绑定单一工作区，真实路径检查阻断路径穿越和 symlink 逃逸；修改前展示 diff，落盘前复查哈希并原子写入，撤销也要审查反向 diff。“请求批准”逐项确认副作用，“完全访问”只自动批准工作区内普通操作；git push、部署和发布始终审批，提权、擦盘、关机及越界操作直接阻断。命令具备超时、输出截断和取消能力。
+
+Fast 默认接入 deepseek-v4-flash，Strong 默认接入 glm-5.3；设置页可新增、重命名和检测 OpenAI-compatible 连接，密钥由系统安全存储加密。应用支持多项目、多聊天和不同项目主任务并行，审批与取消互不串扰。运行时展开思考、工具链和 diff，结束后自动折叠，最终回答按 Markdown 渲染。
+
+记忆分为两层。聊天上下文按会话保存，接近阈值时由当前模型生成摘要，并与目标、约束、文件变更、验证结果和未解决错误等事实锚点合并；完整历史仍留在审计记录中。项目记忆默认关闭，开启后只在当前工作区跨聊天召回，每轮限量注入，记录来源、失效和冲突，并支持带校验的本地导入导出，绝不跨项目共享。
+
+BTW 是从主线快照单向 fork 的临时只读侧边聊天，可在主任务运行时并行提问。它使用独立请求和取消控制，不调用工具、不写入主聊天或项目记忆，关闭、切换聊天或退出应用后立即消失。
+
+Skill 系统兼容标准 SKILL.md，支持本地导入导出、$skill-name 显式启用和模型自动选择。启动时只加载名称与描述，激活后再读取正文，引用和脚本按需加载。项目 Skill 位于 .agents/skills/，首次启用需确认来源；整个包以内容哈希固化，发生变化即撤销信任。Skill 只是流程，不会获得额外权限，其 Python 脚本仍受校验、审批、审计和沙箱限制。
+
+我的 AI 开发方式
+
+我先把考核题目整理成机器可读的 AGENTS.md，再用 DEVELOPMENT_PLAN.md 拆分阶段、风险和退出标准，让规划、实现、审查、自动测试和真实验收由不同 Agent 依据同一文档协作。每轮遵循“需求—设计—实现—测试—真实验收—复盘—提交”，结果写入状态和在线测试报告。我用截图、录屏和失败复现持续修正交互与竞态，只在 HammerTest 沙箱验证真实副作用。ChatGPT 承担执行，我负责产品判断、安全边界和最终验收；这就是我的 Vibe Coding 实践。
+
+验证与提交
+
+当前 36 个测试文件、218 项测试通过，Fast 与 Strong 均完成真实桌面闭环。应用只面向 Apple Silicon，生成包未签名。最终只提交 README.txt 和两分钟以内、200 MB 以下的 MP4，压缩为“姓名.zip”；不包含凭据。截止 2026 年 9 月 2 日 24:00，之后不再推送。
