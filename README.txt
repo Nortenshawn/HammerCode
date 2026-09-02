@@ -1,21 +1,18 @@
-HammerCode 编程智能体项目说明
-
-Git 仓库：https://github.com/Nortenshawn/HammerCode
+HammerCode
+Git 公开仓库（完整历史）：https://github.com/Nortenshawn/HammerCode
 
 一、如何运行
-环境：Apple Silicon macOS、Node.js 22+、npm。克隆仓库后执行：
-1. npm ci
-2. cp .env.example .env
-3. 使用内置档位时在 .env 填写 key；也可启动后添加自定义连接
-4. npm run dev
-.env 已被 Git 忽略，不得提交。检查：npm run typecheck、npm test、npm run build；打包：npm run package:mac。PDF/Python 工具需 pdftotext/Python 3。
+平台：Apple Silicon macOS，需 Node.js 22+、npm；PDF/Python 工具另需 pdftotext/Python 3。进入仓库后运行：
+npm ci
+cp .env.example .env
+npm run dev
+在未入库的 .env 填写模型 key。验证：npm run typecheck、npm test、npm run build；打包：npm run package:mac。凭据不得提交。
 
-二、特色功能
-HammerCode 使用 Electron + TypeScript 独立实现，没有封装现成 agent 产品或使用 agent 框架。核心包含 SSE 流解析、分片 tool call 组装、上下文压缩、状态机、Plan、工具执行和错误处理。默认模型：Fast=deepseek-v4-flash，Strong=glm-5.3；用户可保存自定义名称、endpoint、key 和模型 ID 的 OpenAI-compatible 连接。每个 turn 固化实际连接和权限，不静默回退。
+二、核心功能
+HammerCode 是我用 Electron+TypeScript 独立实现的本地 coding agent，未封装现成产品、未使用 agent 框架/SDK。核心是“模型提出意图—本地校验—授权执行—结果回传—继续推理”：自研分片 tool call、上下文压缩、Plan、状态机、重试与终止。工具覆盖文件、搜索、PDF、Python、Shell、只读 Git；聊天绑定工作区，阻断路径穿越/symlink，修改先展示 diff、落盘前复查哈希。请求批准/完全访问、命令分层、取消恢复与旧工具不重放共同控制副作用。Fast=deepseek-v4-flash，Strong=glm-5.3，也支持自定义接口。
 
-模型只能提出工具调用，不能直接操作系统。执行前校验不可信 JSON、工作区真实路径和命令风险；只读工具可自动执行，文件 diff 和普通命令按“请求批准/完全访问”授权，越界、提权、擦盘等操作直接阻断。命令支持超时、输出截断、取消和进程组清理。
+三、我的 AI 协作方式
+我先把题目和安全边界写成机器可读的 AGENTS.md，再用 DEVELOPMENT_PLAN.md 拆分阶段、风险和验收标准，让规划、实现、审查、测试、实机验收由多 Agent/角色协作，证据写入 docs。遵循“需求—架构—实现—自动测试—模型/Electron 验证—复盘—提交”，不直接接受生成代码。我用截图/录屏反馈交互与竞态，要求 AI 查官方文档、解释取舍、复现失败，只在 HammerTest 沙箱验证副作用。我负责产品决策、安全边界和验收，能解释设计。
 
-不同项目最多 3 个主任务并行，同项目保持单任务；聊天可连续追问且不重放旧副作用。会话、工具、授权、预算与终止原因可恢复。文本修改提供累计 diff、哈希过期检查和二次审批撤销。renderer 关闭 Node integration，只通过最小 preload IPC 通信；API key 仅在 main process 使用并由 safeStorage 加密保存。
-
-三、说明
-支持 Apple Silicon macOS 本地运行，目录包未签名；自动撤销仅覆盖不超过 1 MB 的 UTF-8 文本工具变更。设计与验证证据见 README.md 和 docs/。
+四、验证与提交
+36 个测试文件、218 项测试通过。应用仅支持 Apple Silicon，未签名。只提交 README.txt 与 2 分钟内、200 MB 以下的 MP4，压缩为“姓名.zip”；不得包含凭据。截止 2026-09-02 24:00，之后不再推送。

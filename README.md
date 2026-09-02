@@ -8,7 +8,7 @@
     <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white" />
     <img alt="Electron 44" src="https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white" />
     <img alt="TypeScript 7" src="https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&logoColor=white" />
-    <img alt="202 tests passed" src="https://img.shields.io/badge/tests-202%20passed-8DB95A" />
+    <img alt="218 tests passed" src="https://img.shields.io/badge/tests-218%20passed-8DB95A" />
     <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-111111" />
   </p>
 
@@ -184,7 +184,7 @@ npm run package:mac # 生成 release/mac-arm64/HammerCode.app
 ## 质量与验证证据
 
 - 严格 TypeScript 类型检查覆盖 renderer、main/preload/core 和 tests。
-- 当前基线为 34 个测试文件、202 项自动测试；覆盖状态机、流组装、跨项目主任务并发、AgentRunner、上下文、路径边界、命令策略、审批、持久化、撤销、BTW、项目记忆、Skill 和隔离子任务。
+- 当前基线为 36 个测试文件、218 项自动测试；覆盖状态机、流组装、跨项目主任务并发、AgentRunner、上下文、路径边界、命令策略、审批、持久化、撤销、BTW、项目记忆、Skill 和隔离子任务。
 - 真实 Fast 与 Strong 都通过正式 Electron main/preload/renderer 链路测试；在线证据包含读写、审批、命令、连续 turn、跨项目并发、独立审批与取消、重启恢复、撤销、模型压缩和安全阻断。
 - Apple Silicon 目录包可以本地运行；当前未做代码签名、公证和 Mac App Store 沙箱。
 
